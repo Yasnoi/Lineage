@@ -1,0 +1,18 @@
+[project]
+name = "lineage-agent"
+version = "0.1.0"
+description = "A minimal LangGraph agent using the Responses API."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=1.2.11",
+    "openai>=3.16.2",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+lineage-agent = "lineage_agent.entrypoints.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.11,<0.12"]
+build-backend = "uv_build"
