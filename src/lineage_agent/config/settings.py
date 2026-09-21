@@ -20,6 +20,15 @@ class ModelSettings:
     base_url: str
     model_name: str
     timeout_seconds: float = 60.0
+    max_model_calls: int = 5
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.max_model_calls, int)
+            or isinstance(self.max_model_calls, bool)
+            or self.max_model_calls <= 0
+        ):
+            raise ConfigurationError("MAX_MODEL_CALLS 必须是正整数。")
 
 
 def load_settings(env_file: str | Path | None = None) -> ModelSettings:
@@ -58,8 +67,14 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ConfigurationError("TIMEOUT_SECONDS 必须是有限正数。")
 
+    try:
+        max_model_calls = int(os.environ.get("MAX_MODEL_CALLS", "5"))
+    except ValueError as exc:
+        raise ConfigurationError("MAX_MODEL_CALLS 必须是正整数。") from exc
+
     return ModelSettings(
         base_url=base_url,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
+        max_model_calls=max_model_calls,
     )
