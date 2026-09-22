@@ -2,7 +2,7 @@
 
 基于 LangGraph 和 Responses API 的最小 ReAct 循环。Agent 可以直接回答，也可以请求工具，在工具结果回传后继续调用模型，直到给出最终回答或达到模型调用上限。
 
-每次 `run_agent` 处理一次用户请求，使用异步、非流式模型调用，状态只在本次运行中保留。普通 CLI 不提供工具；固定结果工具仅存在于独立验证脚本中。
+每次 `run_agent` 处理一次用户请求，使用异步、非流式模型调用，状态只在本次运行中保留。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以只读列举该项目目录的直接子项。目录名称和结构不能证明已经理解代码，当前不读取文件正文。
 
 ## 运行
 
@@ -24,15 +24,27 @@ MODEL_NAME=your-model-name
 TIMEOUT_SECONDS=60
 MAX_MODEL_CALLS=5
 LOG_DIR=logs
+PROJECT_ROOT=
+DIRECTORY_MAX_ENTRIES=100
 ```
 
 `BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；超时默认为 60 秒且必须为有限正数，模型调用上限默认为 5 次且必须为正整数。
+
+`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为 100，必须为正整数；根目录和条目上限均由调用方控制，模型不能修改。
 
 配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；已有进程环境变量优先。真实 `.env` 已加入忽略规则，密钥仅用于创建模型客户端，不进入 Agent State 或应用日志。
 
 ```powershell
 uv run lineage-agent "请用一句话介绍你自己"
 ```
+
+启用目录工具时，在 `.env` 中将 `PROJECT_ROOT` 设置为要分析的目录，例如 `C:/path/to/project`，再运行：
+
+```powershell
+uv run lineage-agent "请先列举项目根目录，再列举其中的 src 子目录，只报告实际看到的文件路径"
+```
+
+被分析项目可以与 Lineage Agent 自身目录不同。相对 `PROJECT_ROOT` 以 dotenv 文件所在目录为基准；无效根目录在调用模型前报告配置错误。恢复无工具 CLI 时，将配置中的 `PROJECT_ROOT` 留空，并确保进程环境没有覆盖该值。
 
 也可以使用模块入口：
 
@@ -60,7 +72,10 @@ src/lineage_agent/
 │   └── types.py          # 模型返回值与可调用对象类型
 ├── tools/
 │   ├── execution.py      # 串行执行、参数解析和工具结果/错误转换
-│   └── types.py          # 执行器接口与参数错误类型
+│   ├── types.py          # 执行器接口与参数错误类型
+│   └── filesystem/
+│       ├── paths.py      # 根目录绑定和访问范围检查
+│       └── directory.py  # 目录工具 Schema、字段校验和直接子项列举
 ├── recording/
 │   ├── recorder.py       # 每次运行的 JSONL 文件、事件和步骤标识
 │   └── summaries.py      # 确定性的参数与结果摘要
@@ -79,6 +94,54 @@ src/lineage_agent/
 初始上下文中的 `function_call` 与 `function_call_output` 必须使用非空字符串 `call_id`，请求先于结果且一一对应；缺失、重复或无法配对时返回错误终态，模型调用次数为零。其他协议项原样保留。模型响应不得夹带由应用生成的 `function_call_output`，否则按协议错误终止；字典形式的响应同样深拷贝，避免不同运行共享嵌套数据。
 
 模型接口为 `await generate_response(client, model_name, input, *, tools=None)`。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
+
+## 目录列举
+
+`list_directory` 只接受 `{"path": "."}` 形式的参数；`path` 必填且为字符串，不接受额外字段。`.` 表示绑定根目录，也可以传入 `src`、`src/package` 等相对路径。Schema 使用严格模式，工具仍自行执行字段和路径校验。
+
+Python 运行接口 `run_agent` 不自动根据配置启用工具。调用方可以显式绑定目录，再通过现有接口注入；省略 `tools` 和 `execute_tool` 即为无工具运行：
+
+```python
+import asyncio
+
+from lineage_agent.agent.runtime import run_agent
+from lineage_agent.config.settings import load_settings
+from lineage_agent.tools.filesystem.directory import (
+    DIRECTORY_TOOL, create_directory_executor,
+)
+
+settings = load_settings()
+executor = create_directory_executor("C:/path/to/project", max_entries=100)
+state = asyncio.run(run_agent(
+    "请列举项目根目录", settings,
+    tools=[DIRECTORY_TOOL], execute_tool=executor,
+))
+```
+
+直接构造配置或执行器时，相对根目录以当前工作目录为基准。执行器不读取配置、不改变工作目录，根目录绑定于该执行器；不同项目应各自创建执行器。配置读取只绝对化路径，访问校验集中在 filesystem 模块，绑定时才检查根目录并规范化。
+
+执行器成功返回一个 JSON 字符串，再由通用执行层封装到 `{"ok": true, "result": "..."}`。内层结构为：
+
+```json
+{
+  "path": ".",
+  "entries": [{"name": "src", "path": "src", "type": "directory"}],
+  "limit": 100,
+  "truncated": false
+}
+```
+
+所有返回路径均相对于项目根目录，使用 `/` 分隔。类型包括 `file`、`directory`、`symlink`、`junction`、`reparse_point` 和 `other`。不读取正文，也不展开链接目标；不返回绝对路径或链接的外部目标。
+
+仅使用 Python 标准库 `os.scandir`，按文件系统枚举顺序最多消费上限加一项，保留前 N 项后按 `(name.casefold(), name)` 排序。超出上限时 `truncated=true`，未返回项不能视为不存在；排序仅针对已保留子集，不保证是全目录排序的前 N 项，重复列举也不保证得到同一子集。空目录成功返回空列表且 `truncated=false`。本轮限制条目数，不提供分页、总字节预算或严格执行耗时上限。
+
+不应用隐藏项或 `.gitignore` 过滤，`.git` 等目录项也包含在列举范围内。链接条目可以显示自身名称和类型，但不能作为目标或中间路径进入，即使链接指向根目录内部也会拒绝。其他特殊条目仅报告类型，不展开。
+
+路径接受 `/` 和 `\` 分隔，拒绝任何 `..` 组件、绝对路径、盘符相对路径、UNC/设备路径、ADS、控制字符、Windows 保留字符和设备名，以及组件末尾的点或空格。不展开环境变量或 `~`。根目录自身及祖先不得经过符号链接或 Windows reparse point；每次访问重新检查路径组件，并使用解析后的路径进行范围核对。
+
+字段、路径范围、链接和非目录目标通过 `ToolArgumentError` 计为拒绝；不存在、权限不足及其他 I/O 错误计为执行失败。枚举或条目分类中途发生异常时，整次调用失败，不返回部分成功结果；同批后续请求仍按原有规则处理。成功列举不是文件系统快照，枚举期间的新增或删除可能影响结果。
+
+这些是应用层的路径访问检查，检查与实际操作并非原子，不能抵御恶意并发替换目录的所有情况，不构成操作系统安全沙箱。日志继续只记录参数和结果的类型、长度等安全摘要，不新增原始路径或文件名预览。
 
 ## State
 
@@ -163,16 +226,24 @@ uv run --locked python scripts/check_react.py
 
 # 当前 .env 端点：无工具回归及固定结果工具的完整循环
 uv run --locked python scripts/verify_function_calling.py
+
+# 真实临时目录与确定性模型：目录边界、截断、失败和实际回传
+uv run --locked python scripts/check_filesystem.py
+
+# 当前 .env 端点：在非敏感临时目录中列举根目录、子目录并回答
+uv run --locked python scripts/verify_directory.py
 ```
 
-两个脚本各自包含临时工具、Schema 和验证调用；生产模块不导入脚本，CLI 不增加验证参数。确定性检查使用标准库断言和替身，不需要测试框架或真实凭据。真实验证脚本通过 `run_agent` 跑完整图，检查工具返回的固定标记进入最终回答，并显示终止原因、调用次数及 Token 统计；运行需有效连接配置和至少两次模型调用额度。
+验证代码保留在独立脚本中，生产模块不导入脚本，CLI 不增加验证参数。`check_react.py` 和 `verify_function_calling.py` 自带临时固定结果工具；目录检查使用生产目录工具和真实临时目录。确定性检查使用标准库断言和模型替身，不需要测试框架或真实凭据。真实固定结果验证需至少两次模型调用额度；目录验证需至少三次额度，检查随机临时文件路径进入最终回答，不要求固定的实际调用次数，也不将一次回答视为具备代码理解能力。
 
 确定性检查将日志保留在 `logs/checks/<检查标识>/`，逐场景输出运行、步骤、工具调用和日志路径。检查将日志中的关联列表与替身实际捕获的模型请求逐项比对，并覆盖工具失败后修正或误报成功、嵌套数据与并发运行隔离、摘要处理和日志 I/O 故障。真实脚本同时显示运行标识、工具处理统计和日志完整性。
 
 检查还覆盖同批部分失败、执行器非字符串返回、各层级重复参数键，以及 `tool.rejected`、`tool.failed`、`model.failed` 写入时再次发生故障。故障场景联合核对返回 State、实际调用记录和日志完整性；未落盘事件的定位信息来自故障注入器观察到的写入尝试，并单独标明来源，不视为已经持久化的日志。
 
+目录检查覆盖 Unicode 名称、上下级目录、空目录、条目上限、参数及路径拒绝、同批失败后继续、不同根目录运行隔离、配置和 CLI。权限与中途 I/O 故障使用标注的注入；Windows symlink/junction 尝试创建真实样例，无法构造时单独报告跳过原因。工具真实返回值与后续 SDK 请求逐项比对，日志关联和安全摘要分别核对。
+
 这两类结果分别报告，确定性检查不能代替真实端点的 Function Calling 兼容性验证。
 
-当前不实现文件、搜索、命令等业务工具，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。
+当前只提供目录直接子项列举，不实现文本读取、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。
 
 项目设计依据见 [技术选型](docs/技术选型.md) 和 [开发阶段划分](docs/开发阶段划分.md)。

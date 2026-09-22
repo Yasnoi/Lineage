@@ -7,6 +7,7 @@ import sys
 from lineage_agent.agent.runtime import run_agent
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, load_settings
+from lineage_agent.tools.filesystem import directory
 
 
 def format_run_summary(state: AgentState) -> str:
@@ -34,7 +35,20 @@ def main() -> int:
 
     try:
         settings = load_settings()
-        state = asyncio.run(run_agent(args.prompt, settings))
+        if settings.project_root is None:
+            state = asyncio.run(run_agent(args.prompt, settings))
+        else:
+            execute_tool = directory.create_directory_executor(
+                settings.project_root, max_entries=settings.directory_max_entries
+            )
+            state = asyncio.run(
+                run_agent(
+                    args.prompt,
+                    settings,
+                    tools=[directory.DIRECTORY_TOOL],
+                    execute_tool=execute_tool,
+                )
+            )
     except ConfigurationError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2

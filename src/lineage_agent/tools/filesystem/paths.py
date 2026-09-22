@@ -1,0 +1,76 @@
+"""Check project-relative paths without permitting links or reparse traversal."""
+
+import os
+from pathlib import Path, PureWindowsPath
+import stat
+
+from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.tools.types import ToolArgumentError
+
+
+def is_link_or_reparse(info: os.stat_result) -> bool:
+    """Use no-follow metadata, including Windows reparse types beyond junctions."""
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _check_components(path: Path) -> os.stat_result:
+    # Check ancestors too: inspecting only the final component misses linked parents.
+    for component in (*reversed(path.parents), path):
+        info = component.lstat()
+        if is_link_or_reparse(info):
+            raise ToolArgumentError("不允许通过链接或重解析点访问项目目录。")
+    return info
+
+
+def bind_project_root(root: str | Path) -> Path:
+    """Validate a trusted root before resolving it, without changing cwd."""
+    try:
+        if isinstance(root, str) and not root.strip():
+            raise ValueError("empty root")
+        path = Path(root).absolute()
+        info = _check_components(path)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("not a directory")
+        return path.resolve(strict=True)
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        raise ConfigurationError(
+            "PROJECT_ROOT 必须是存在且可访问的目录，其自身及祖先不能包含链接或重解析点。"
+        ) from exc
+
+
+def _relative_parts(value: str) -> list[str]:
+    if not isinstance(value, str) or not value:
+        raise ToolArgumentError("path 必须是非空项目内相对路径。")
+    windows_path = PureWindowsPath(value)
+    if windows_path.drive or windows_path.root:
+        raise ToolArgumentError("path 必须是项目内相对路径。")
+    parts: list[str] = []
+    for part in value.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if (
+            part == ".."
+            or part.endswith((".", " "))
+            or any(character in '<>:"|?*' for character in part)
+            or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in part)
+            or PureWindowsPath(part).is_reserved()
+        ):
+            raise ToolArgumentError("path 包含不允许的路径组件。")
+        parts.append(part)
+    return parts
+
+
+def resolve_project_path(root: Path, path: str) -> Path:
+    """Resolve a target under an already bound root; its type is tool-specific.
+
+    Component checks and filesystem use are not atomic. This is an application
+    boundary for stable paths, not an OS sandbox against concurrent replacement.
+    """
+    target = root.joinpath(*_relative_parts(path))
+    _check_components(target)
+    resolved = target.resolve(strict=True)
+    if not resolved.is_relative_to(root):
+        raise ToolArgumentError("path 超出本次绑定的项目目录。")
+    return resolved
