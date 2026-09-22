@@ -1,7 +1,9 @@
 """Orchestrate one bounded ReAct loop with injected model and tool access."""
 
-from typing import TYPE_CHECKING, Any
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any, Callable
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -41,11 +43,22 @@ def build_graph(
     max_model_calls: int = 5,
     recorder: RunRecorder | None = None,
     tracer: "RunTrace | None" = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    observe_state: Callable[[AgentState, str, str | None], None] | None = None,
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
         raise ValueError("MAX_MODEL_CALLS 必须是正整数。")
     available_tools = tools or []
+
+    def finish(state: AgentState, update: dict[str, Any], node: str, step_id: str | None) -> dict[str, Any]:
+        # Checkpoint writes can fail before LangGraph yields a node's update.
+        # Keep only this run's actual facts, never a second history store.
+        if observe_state is not None:
+            observed = {**state, **update}
+            observed["input"] = state["input"] + update.get("input", [])
+            observe_state(deepcopy(observed), node, step_id)
+        return update
 
     def emit(event: str, step_id: str | None, node: str, **details: Any) -> bool:
         return recorder is None or recorder.emit(
@@ -55,7 +68,7 @@ def build_graph(
     async def model_node(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
         if state["model_calls"] >= max_model_calls:
-            return {"stop_reason": "max_model_calls", "error": None, "error_code": None}
+            return finish(state, {"stop_reason": "max_model_calls", "error": None, "error_code": None}, "model", step_id)
         remaining = max_model_calls - state["model_calls"]
         budget = read_budget_snapshot(execute_tool)
         allowances = {
@@ -72,7 +85,7 @@ def build_graph(
                 if item.get("type") == "function_call_output"
             ],
         ):
-            return {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error"}
+            return finish(state, {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error"}, "model", step_id)
 
         failure: tuple[str, str] | None = None
         if tracer is not None:
@@ -144,6 +157,7 @@ def build_graph(
                     update["stop_reason"] = "max_model_calls"
             elif result["text"].strip():
                 update["stop_reason"] = "completed"
+                update["history_end"] = len(state["input"]) + len(output_items)
             else:
                 failure = ("empty_response", "response_validation")
 
@@ -183,7 +197,7 @@ def build_graph(
                 error_code=trace_failure[0] if trace_failure else None,
                 stage=trace_failure[1] if trace_failure else None,
             )
-        return update
+        return finish(state, update, "model", step_id)
 
     async def tools_node(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
@@ -204,7 +218,13 @@ def build_graph(
         }
         if batch["error"] is not None:
             update.update(stop_reason="error", error=batch["error"], error_code="logging_error")
-        return update
+        # A complete batch includes genuine rejection/failure results. A partial
+        # batch must not carry its entire response group into the next turn.
+        if [item["call_id"] for item in batch["output_items"]] == [
+            call["call_id"] for call in result["tool_calls"]
+        ]:
+            update["history_end"] = len(state["input"]) + len(batch["output_items"])
+        return finish(state, update, "tools", step_id)
 
     def after_model(state: AgentState) -> str:
         return END if state["stop_reason"] is not None else "tools"
@@ -218,4 +238,4 @@ def build_graph(
     builder.add_edge(START, "model")
     builder.add_conditional_edges("model", after_model, {"tools": "tools", END: END})
     builder.add_conditional_edges("tools", after_tools, {"model": "model", END: END})
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)

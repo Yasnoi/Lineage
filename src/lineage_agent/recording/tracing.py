@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from langsmith import Client
 from urllib3.util import Retry
 
+from lineage_agent.agent.checkpointing import CHECKPOINT_ERRORS, CheckpointError
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.responses import MODEL_ERRORS
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE
@@ -147,6 +148,7 @@ class RunTrace:
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
+        self._session_id: str | None = None
         self.enabled = False
         self._warned: set[str] = set()
         self._warning_lock = threading.Lock()
@@ -200,11 +202,34 @@ class RunTrace:
             "project_name": self._settings.project,
             "extra": {"metadata": {"run_id": self.run_id, **metadata}},
         }
+        if self._session_id is not None:
+            payload["extra"]["metadata"]["session_id"] = self._session_id
         if self._root is not None:
             payload["parent_run_id"] = self.run_id
             order = self._root.payload["dotted_order"] + "." + order
         payload["dotted_order"] = order
         return _Span(payload, time.monotonic())
+
+    @_safe
+    def bind_session(self, session_id: str) -> None:
+        """Associate filtered spans without sending the saved graph State."""
+        if not self.enabled or self._finished or self._closed:
+            return
+        self._session_id = self._sanitizer.text(session_id)
+        self._root.payload["extra"]["metadata"]["session_id"] = self._session_id
+
+    @_safe
+    def finish_checkpoint(self, checkpoint_id: str | None, checkpoint_error=None) -> None:
+        """Set confirmation metadata before finish submits the root span."""
+        if not self.enabled or self._finished or self._closed:
+            return
+        code = checkpoint_error.code if isinstance(checkpoint_error, CheckpointError) else checkpoint_error
+        if not isinstance(code, str) or code not in CHECKPOINT_ERRORS:
+            code = "checkpoint_write_error" if checkpoint_error is not None else None
+        metadata = self._root.payload["extra"]["metadata"]
+        metadata["checkpoint_id"] = self._sanitizer.text(checkpoint_id) if isinstance(checkpoint_id, str) else None
+        metadata["checkpoint_error"] = code
+        metadata["checkpoint_saved"] = checkpoint_id is not None and code is None
 
     @staticmethod
     def _stamp_end(span: _Span) -> None:
@@ -369,7 +394,7 @@ class RunTrace:
         if token is None:
             return
         token.payload["extra"]["metadata"]["skip_reason"] = (
-            reason if reason in {"max_model_calls", "logging_error", "protocol_error"}
+            reason if reason in {"max_model_calls", "logging_error", "protocol_error", "checkpoint_error"}
             else "not_executed"
         )
         code = "logging_error" if reason == "logging_error" else "execution_error"
@@ -387,11 +412,12 @@ class RunTrace:
         self._finished = True
         self._root.payload["outputs"] = self._sanitizer.root_outputs(state)
         self._root.payload["extra"]["metadata"]["read_budget"] = read_budget
-        failed = bool(error_code) or (isinstance(state, dict) and state.get("stop_reason") == "error")
+        checkpoint_error = self._root.payload["extra"]["metadata"].get("checkpoint_error")
+        failed = bool(error_code or checkpoint_error) or (isinstance(state, dict) and state.get("stop_reason") == "error")
         stopped = isinstance(state, dict) and state.get("stop_reason") == "max_model_calls"
         if failed:
-            code = error_code or (state.get("error_code") if isinstance(state, dict) else None)
-            self._root.payload["error"] = code if code in _MODEL_ERRORS | {"run_interrupted", "client_close_error"} else "agent_error"
+            code = error_code or (state.get("error_code") if isinstance(state, dict) else None) or checkpoint_error
+            self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {"run_interrupted", "client_close_error"} else "agent_error"
         elif stopped:
             self._root.payload["error"] = "max_model_calls"
         self._root.payload["extra"]["metadata"]["outcome"] = (

@@ -1,4 +1,4 @@
-"""State scoped to one user request, including its internal model/tool rounds."""
+"""Protocol history plus execution data scoped to the latest user request."""
 
 from operator import add
 from typing import Annotated, Any, Literal, TypedDict
@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     """Nodes append protocol items and replace the latest result and counters."""
 
     input: Annotated[list[dict[str, Any]], add]
+    history_end: int
     run_id: str
     log_path: str
     log_complete: bool

@@ -2,7 +2,7 @@
 
 基于 LangGraph 和 Responses API 的最小 ReAct 循环。Agent 可以直接回答，也可以请求工具，在工具结果回传后继续调用模型，直到给出最终回答或达到模型调用上限。
 
-每次 `run_agent` 处理一次用户请求，使用异步、非流式模型调用，状态只在本次运行中保留。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以列举该项目目录的直接子项，并读取限额内的 UTF-8 普通文本文件（包括源码和配置）。目录结构或单个文件正文都不能证明已经理解整个项目。
+每次 `run_agent` 处理一次独立用户请求，使用异步、非流式模型调用。`SessionManager` 使用 LangGraph 原生内存检查点保留同一会话的上下文，让后续问题使用之前的消息和工具资料；保存寿命仅限当前进程。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以列举该项目目录的直接子项，并读取限额内的 UTF-8 普通文本文件（包括源码和配置）。目录结构或单个文件正文都不能证明已经理解整个项目。
 
 ## 运行
 
@@ -54,9 +54,60 @@ uv run lineage-agent "请先分页列举项目根目录，再选择其中的源�
 uv run python -m lineage_agent "请用一句话介绍你自己"
 ```
 
-CLI 仅保留一个用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性和实际工具处理统计写入 stderr。退出码 `0` 表示得到最终回答，`1` 表示模型、协议、日志或客户端关闭错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。若已得到最终回答但客户端关闭失败，仍展示该回答，同时报告关闭失败并退出 `1`；若收尾前未完成，则不展示中间文本。
+CLI 只有一个可选的用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性和实际工具处理统计写入 stderr。提供输入参数时，退出码 `0` 表示得到最终回答，`1` 表示模型、协议、日志或客户端关闭错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。若已得到最终回答但客户端关闭失败，仍展示该回答，同时报告关闭失败并退出 `1`；若收尾前未完成，则不展示中间文本。
 
 SDK 自动重试已关闭，不使用服务端会话或 `previous_response_id`。每次请求都使用本地当前上下文。
+
+## 连续对话与状态保存
+
+省略问题参数进入交互模式。配置和文件访问权限仍来自启动时的 `.env`，没有额外的验证或权限参数：
+
+```powershell
+uv run lineage-agent
+```
+
+每行输入一个问题。`/new` 新建并切换到独立会话，`/switch <会话ID>` 切换到本次交互已创建的会话，`/exit` 或 EOF 正常退出 `0`；Ctrl-C 关闭运行资源后退出 `130`。每轮展示会话标识、独立运行标识、工具处理统计、日志及最终检查点确认。普通模型或工具错误、调用额度耗尽后仍可继续提问；检查点故障会阻断该会话，需新建或切换会话。交互模式正常退出不表示中途每一轮都成功，应查看每轮结果。
+
+程序调用可直接选择工具权限；以下在同一进程中创建两轮无工具问答：
+
+```python
+import asyncio
+
+from lineage_agent.agent.sessions import SessionManager
+from lineage_agent.config.settings import load_settings
+
+
+async def main():
+    sessions = SessionManager()
+    session_id = sessions.create_session(load_settings())
+    first = await sessions.run_turn(session_id, "本次记录中的纸船是蓝色。请记住这个事实。")
+    if not first.checkpoint_complete:
+        raise RuntimeError(first.checkpoint_error)
+    second = await sessions.run_turn(session_id, "刚才纸船是什么颜色？")
+    print(second.state["result"]["text"] if second.state["result"] else second.state["error"])
+    print(second.session_id, second.checkpoint_id, second.checkpoint_complete)
+
+
+asyncio.run(main())
+```
+
+需要目录与读取能力时，把 `tools=[DIRECTORY_TOOL, TEXT_TOOL]` 和已绑定可信根目录的 `execute_tool=create_filesystem_executor(root)` 传入 `create_session`；这些对象与单次调用使用同一接口。会话创建后，后续输入不能更换配置、项目根目录或工具定义。未注入工具时，即使配置含 `PROJECT_ROOT`，程序接口也不自动启用工具。
+
+每个会话 UUID 映射为 LangGraph `thread_id`，与每轮新建的 `run_id` 分开。`SessionTurn` 提供 `session_id`、`state`、`checkpoint_id`、`checkpoint_complete` 和固定安全错误 `checkpoint_error`；只有最终保存确认成功才返回检查点 ID。同一会话的重叠提交立即抛出带固定错误码的 `SessionError`，不排队或交错合并历史；未知或已阻断的会话同样明确拒绝。不同会话可以交错运行。
+
+检查点由管理器拥有的 `InMemorySaver` 保存，不在项目中创建状态文件，也不另建一份完整历史数据库。每轮从检查点加载可继承的协议上下文，通过原生 `Overwrite` 写入“有效历史＋新输入”，后续节点继续只追加本次新增项。调用方输入和返回 State 与已保存内容相互隔离。
+
+`history_end` 指向上下文中可供下一轮使用的前缀边界。合法输入、通过协议检查的最终回答，以及工具请求和结果完整配对的批次可以保留；工具拒绝或执行失败的关联结果也是有效资料。无效模型输出、最后一轮未执行的工具请求或未完成批次不进入下一轮，也不会补造结果。原轮返回 State 保留已发生事实，检查点与日志的保留程度分别取决于实际保存和写入结果。一个批次只有全部关联结果完成后才推进边界，不提供逐工具恢复。
+
+每个新问题重新初始化结果、终态、错误、模型与工具计数、`usage_totals`、运行日志和读取额度。`result.usage` 仍是最近一次模型调用；`usage_totals` 仍是本轮用户请求内部的已知小计，不是会话累计。前一轮失败或耗尽次数不会耗用下一轮额度。文件正文历史表示当时的读取结果，不自动反映文件当前版本；每轮读取额度也不限制整个会话不断增长的上下文。
+
+### 保存故障与收尾
+
+图使用同步检查点提交，内存后端的 pending writes 故障在下一次提交前阻断后续步骤。创建、读取或写入失败均明确报告并封锁该会话，不自动重试、回退或继续原请求；已有调用、工具结果和可取得的 usage 仍保留在返回 State，无法确认的事实不补造。
+
+收尾先关闭模型客户端、完成并关闭 JSONL，再用原生 `aupdate_state` 保存最终 State；该操作不执行图节点。此前没有检查点错误时，会话的 `run.ended` 明确标为等待最终保存，记录此前已确认的检查点 ID；已有检查点错误时标为失败，不再尝试保存。最终保存状态由返回的 `SessionTurn` 和 CLI 展示，不重开日志补写确认。因此 `log_complete=true` 只证明本地日志收尾成功，不能证明最后的检查点提交成功。保存故障与执行结果分别显示；已经产生的回答和统计不会被伪装成没有发生。
+
+检查点不序列化运行依赖中的连接配置、API 密钥、客户端、文件句柄、记录器或执行器。消息和工具正文属于 State，会原样保存在进程内；若用户或获准读取的文件本身包含敏感内容，这些材料也会进入历史。Tracing 只接收经过过滤的观察数据，不自动上传完整 State，也不是检查点成功的凭据。退出进程或释放管理器后历史丢失；本轮没有跨进程加载、任意中断恢复、历史分叉或重放接口。新问题不是恢复原请求，不能以重置计数重新运行来宣称恢复成功。
 
 ## 可选 LangSmith Tracing
 
@@ -114,7 +165,9 @@ src/lineage_agent/
 ├── agent/
 │   ├── graph.py          # 条件路由、调用计数与本次请求的 usage 累计
 │   ├── state.py          # AgentState
-│   └── runtime.py        # 依赖组装、状态初始化和客户端生命周期
+│   ├── runtime.py        # 依赖组装、状态初始化和客户端生命周期
+│   ├── sessions.py       # 会话协调、跨轮边界和独立运行
+│   └── checkpointing.py  # 内存检查点及保存故障边界
 ├── models/
 │   ├── responses.py      # Responses 请求与响应解析
 │   └── types.py          # 模型返回值与可调用对象类型
@@ -258,7 +311,8 @@ state = asyncio.run(run_agent(
 
 | 字段 | 用途 | 更新方式 |
 | --- | --- | --- |
-| `input` | 本次请求的完整上下文，替代原 `user_input` | 初始化用户项；每轮只追加新增协议项 |
+| `input` | 本次请求使用的协议上下文，包含会话继承的有效历史 | 独立运行初始化用户项；会话新轮用有效历史和新输入覆盖，节点只追加新增项 |
+| `history_end` | 可以继承到下一轮的上下文前缀长度 | 合法输入、有效最终回答或完整关联的工具批次推进边界 |
 | `run_id` | 本次用户请求的 UUID | 初始化一次，运行期间不变 |
 | `log_path` | 本次 JSONL 文件的绝对路径 | 初始化一次，失败时也可定位预期文件 |
 | `log_complete` | 本次运行记录是否完整 | 初始为 `False`；结束事件成功写入且文件成功关闭后才为 `True` |
@@ -277,7 +331,7 @@ state = asyncio.run(run_agent(
 
 `result.usage` **仅表示最近一次模型调用**的输入、输出和总 Token。未报告 usage 时为 `None`；部分字段缺失时相应值为 `None`，不沿用上一轮。
 
-`state.usage_totals` **仅统计一次 `run_agent` 处理一次用户请求**，包括该请求内部全部模型调用。每次新运行都重新初始化，与其他请求无关：
+`state.usage_totals` **仅统计一次 `run_agent` 或 `run_turn` 处理一次用户请求**，包括该请求内部全部模型调用。每次新运行都重新初始化，与其他请求无关：
 
 - `input_tokens`、`output_tokens`、`total_tokens` 初始均为 `None`，收到实际数值后才累加；缺失或无效字段不补零、不推算。
 - `missing_usage_calls` 记录没有完整 usage 的模型尝试数，包括未收到响应的失败。大于零时，累计值只是已知小计，不能视为完整消耗。
@@ -310,6 +364,8 @@ state = asyncio.run(run_agent(
 `LOG_DIR` 默认为 `logs`，每次运行创建独立的 `<run_id>.jsonl`。通过 `load_settings` 加载时，相对路径以 dotenv 文件所在目录为基准；直接构造 `ModelSettings` 时相对当前工作目录解析。调用方从返回 State 的 `run_id`、`log_path` 和 `log_complete` 获取记录信息。默认日志目录被 Git 忽略；自定义目录需自行安排保留与清理。
 
 每行是 UTF-8 JSON，写入后立即 flush。记录器按运行绑定，不使用共享的可变运行标识，日志也不进入模型上下文。通用字段包括 UTC `timestamp`、运行内递增的 `event_seq`、`event` 和 `run_id`。每次模型或工具节点执行分配 `step-0001` 形式的 `step_id`，并记录 `node`；同批工具共享步骤，运行级事件省略步骤。
+
+会话运行另带 `session_id`，可将多次独立 `run_id` 关联到同一会话；过滤后的 Tracing 同样保留该关联。检查点故障、此前已确认的检查点及最终保存待确认状态与运行结果分别记录，最终确认以 `SessionTurn` 为准。
 
 工具事件保留原 `call_id`、`tool_name` 和从 1 开始的 `request_index`（本轮响应中的工具请求序号）。缺失标识不补造；重复标识结合步骤和请求序号定位。
 
@@ -360,6 +416,15 @@ uv run --locked python scripts/check_text_tracing.py
 # Review 回归：协议、收尾、配置、分页、读取预算和最后回答轮
 uv run --locked python scripts/check_review_fixes.py
 
+# 会话检查：连续追问、状态隔离、历史边界、预算重置及检查点故障
+uv run --locked python scripts/check_sessions.py
+
+# 会话 Tracing：实际会话集成、过滤范围、上传和保存故障
+uv run --locked python scripts/check_session_tracing.py
+
+# 当前 .env 端点：读取非敏感临时资料，再在同一会话中追问事实和来源
+uv run --locked python scripts/verify_sessions.py
+
 # 当前 .env 端点：分页发现、源码/配置读取及最后回答轮兼容性
 uv run --locked python scripts/verify_review_fixes.py
 
@@ -393,6 +458,8 @@ uv run --locked python scripts/verify_tracing.py
 
 `verify_text.py` 需要至少三次模型调用额度，并在不含敏感信息的临时目录内验证“列举 → 读取 → 回答”。文件名和正文识别码不预先出现在提示中，检查真实模型请求携带完整正文，最终回答引用内容与来源；实际调用次数不固定。
 
-当前提供目录直接子项分页列举和限额内 UTF-8 普通文本读取，不实现 PDF/Word 转换、正文分页、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。两类文件工具均不提供严格耗时保证，也不构成操作系统安全沙箱。
+`check_sessions.py` 将实际 SDK 请求与历史消息、真实临时文件结果逐项比较，检查历史不重复、不同会话隔离、新问题计数重置及同会话重叠拒绝。保存故障使用明确的注入，结合返回 State、实际调用与客户端关闭判断，不把缺失记录补造为成功；逐场景报告会话、运行、适用检查点和日志。`verify_sessions.py` 在第一轮发现并读取随机文件，第二轮不重供正文事实，分别核对真实请求携带的历史及模型回答引用的事实和来源，不固定实际调用次数。两者均只验证同进程保存，不证明跨进程加载或任意中断恢复。
+
+当前提供目录直接子项分页列举、限额内 UTF-8 普通文本读取和进程内连续会话，不实现 PDF/Word 转换、正文分页、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、磁盘持久化或任务恢复。两类文件工具均不提供严格耗时保证，也不构成操作系统安全沙箱。
 
 项目设计依据见 [技术选型](docs/技术选型.md) 和 [开发阶段划分](docs/开发阶段划分.md)。

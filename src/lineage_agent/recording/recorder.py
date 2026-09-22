@@ -15,6 +15,7 @@ class RunRecorder:
 
     def __init__(self, log_dir: Path) -> None:
         self.run_id = str(uuid4())
+        self.session_id: str | None = None
         self.path = (Path(log_dir) / f"{self.run_id}.jsonl").absolute()
         self.failed = False
         self.failure_stage: str | None = None
@@ -41,6 +42,10 @@ class RunRecorder:
         self._step_seq += 1
         return f"step-{self._step_seq:04d}"
 
+    def bind_session(self, session_id: str) -> None:
+        """Attach the application's session identity without recording history."""
+        self.session_id = session_id
+
     def emit(
         self,
         event: str,
@@ -64,6 +69,8 @@ class RunRecorder:
         }
         if step_id is not None:
             item["step_id"] = step_id
+        if self.session_id is not None:
+            item["session_id"] = self.session_id
         if node is not None:
             item["node"] = node
         try:
