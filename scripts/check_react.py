@@ -1,7 +1,7 @@
 """Deterministic ReAct checks; uses local responses and makes no network calls."""
 
 import asyncio
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 from io import StringIO
@@ -17,6 +17,7 @@ from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, generate_response
+from lineage_agent.recording.recorder import RunRecorder
 from lineage_agent.tools.types import ToolArgumentError
 
 
@@ -75,13 +76,16 @@ def response(*items, usage=(10, 2, 12), status="completed"):
 class LocalClient:
     """Records SDK request arguments and yields predetermined SDK responses."""
 
-    def __init__(self, replies):
+    def __init__(self, replies, *, trace=None):
         self.replies = iter(replies)
         self.requests = []
         self.closed = False
+        self.trace = trace
         self.responses = SimpleNamespace(create=self.create)
 
     async def create(self, **kwargs):
+        if self.trace is not None:
+            self.trace.append(("model", len(self.requests) + 1))
         self.requests.append(deepcopy(kwargs))
         try:
             item = next(self.replies)
@@ -112,7 +116,7 @@ def read_events(state):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def audit_recording(state, client):
+def audit_recording(state, client, *, scenario=None, failed_writes=None):
     """Compare records with independently captured actual SDK requests."""
     events = read_events(state)
     assert Path(state["log_path"]).is_absolute()
@@ -154,8 +158,10 @@ def audit_recording(state, client):
         if event["event"].startswith("tool."):
             assert "step_id" in event and "request_index" in event
     print(json.dumps({
+        "scenario": scenario,
         "run_id": state["run_id"], "stop_reason": state["stop_reason"],
-        "model_calls": state["model_calls"], "tool_calls": state["tool_calls"],
+        "model_calls": state["model_calls"], "tool_requests": state["tool_requests"],
+        "tool_calls": state["tool_calls"],
         "tool_outcomes": state["tool_outcomes"],
         "errors": [
             {key: event[key] for key in ("event", "step_id", "call_id", "error_code", "stage") if key in event}
@@ -163,13 +169,21 @@ def audit_recording(state, client):
         ],
         "steps": list(dict.fromkeys(event["step_id"] for event in events if "step_id" in event)),
         "call_ids": list(dict.fromkeys(event["call_id"] for event in events if "call_id" in event)),
+        "requested_call_ids": [
+            item["call_id"] for item in state["input"]
+            if item.get("type") == "function_call" and isinstance(item.get("call_id"), str)
+        ],
         "log_complete": state["log_complete"], "log_path": state["log_path"],
+        "fault_injection_observations": failed_writes or [],
     }, ensure_ascii=False))
     return events
 
 
-async def run(replies, *, input="question", tools=None, execute_tool=None, limit=5):
-    client = LocalClient(replies)
+async def run(
+    replies, *, input="question", tools=None, execute_tool=None, limit=5,
+    scenario=None, trace=None, failed_writes=None,
+):
+    client = LocalClient(replies, trace=trace)
     with patch.object(runtime, "create_client", return_value=client) as factory:
         state = await runtime.run_agent(
             input, replace(SETTINGS, max_model_calls=limit),
@@ -177,7 +191,7 @@ async def run(replies, *, input="question", tools=None, execute_tool=None, limit
         )
     assert not factory.called or client.closed, "every created client must close"
     assert state["model_calls"] == len(client.requests)
-    audit_recording(state, client)
+    audit_recording(state, client, scenario=scenario, failed_writes=failed_writes)
     return state, client
 
 
@@ -312,6 +326,148 @@ async def check_tool_errors():
         envelope = json.loads(result["output"])
         assert envelope["ok"] is False and envelope["error"]["code"] == code
         assert client.requests[1]["input"][-1] == result
+
+
+def assert_batch_returned(state, client, requests, outcomes, attempts):
+    """Check ordered protocol results against the next real SDK invocation."""
+    counts(state, 2, len(requests), attempts)
+    assert state["tool_outcomes"] == {
+        name: outcomes.count(name) for name in ("succeeded", "rejected", "failed", "skipped")
+    }
+    results = outputs(state)
+    ids = [item["call_id"] for item in requests]
+    assert [item["call_id"] for item in results] == ids
+    actual_input = client.requests[1]["input"]
+    assert actual_input == client.requests[0]["input"] + requests + results
+    assert [item for item in actual_input if item.get("type") == "function_call_output"] == results
+    events = read_events(state)
+    created = [event for event in events if event["event"] == "tool.result_created"]
+    assert [event["call_id"] for event in created] == ids
+    assert [event["request_index"] for event in created] == list(range(1, len(ids) + 1))
+    assert len({event["step_id"] for event in created}) == 1
+    for request, outcome, result, event in zip(requests, outcomes, results, created):
+        envelope = json.loads(result["output"])
+        assert event["outcome"] == outcome and event["ok"] is envelope["ok"]
+        recorded = [
+            item for item in events
+            if item["event"] == f"tool.{outcome}" and item.get("call_id") == request["call_id"]
+        ]
+        assert len(recorded) == 1
+        assert recorded[0]["event_seq"] < event["event_seq"]
+        if outcome == "succeeded":
+            assert set(envelope) == {"ok", "result"} and envelope["ok"] is True
+        else:
+            assert set(envelope) == {"ok", "error"} and envelope["ok"] is False
+            assert set(envelope["error"]) == {"code", "message"}
+            assert envelope["error"]["code"] == recorded[0]["error_code"]
+    next_model = [event for event in events if event["event"] == "model.started"][1]
+    assert all(event["event_seq"] < next_model["event_seq"] for event in created)
+    assert next_model["input_tool_result_call_ids"] == ids
+    assert client.closed and state["log_complete"] is True
+    return [json.loads(item["output"]) for item in results]
+
+
+async def check_mixed_batches_and_return_types():
+    cases = [
+        ("exception_then_success", {}, "raises", None, False, "failed", "execution_error", 2),
+        ("success_then_exception", {}, "raises", None, True, "failed", "execution_error", 2),
+        ("unknown_then_success", {"name": "unknown"}, None, None, False, "rejected", "unknown_tool", 1),
+        ("invalid_json_then_success", {"arguments": "not-json"}, None, None, False, "rejected", "invalid_arguments", 1),
+        ("non_object_then_success", {"arguments": "[]"}, None, None, False, "rejected", "invalid_arguments", 1),
+        ("field_rejection_then_success", {"arguments": '{"key":42}'}, "validates", None, False, "rejected", "invalid_arguments", 2),
+    ]
+    cases.extend(
+        (f"return_{name}_then_success", {}, "returns", value, False, "failed", "execution_error", 2)
+        for name, value in (
+            ("none", None), ("dict", {"value": "not a string"}), ("list", ["not a string"]),
+            ("integer", 42), ("float", 1.5), ("bool", True),
+        )
+    )
+    for label, overrides, behavior, bad_return, reverse, outcome, code, attempts in cases:
+        trace = []
+
+        async def executor(name, arguments):
+            key = arguments.get("key")
+            trace.append(("tool_started", key))
+            try:
+                await asyncio.sleep(0)
+                if key != "good":
+                    if behavior == "raises":
+                        raise RuntimeError("SYNTHETIC_BATCH_SECRET")
+                    if behavior == "returns":
+                        return bad_return
+                return await fixed_tool(name, arguments)
+            finally:
+                trace.append(("tool_finished", key))
+
+        bad = call(label + "_a", arguments='{"key":"bad"}')
+        bad.update(overrides)
+        good = call(label + "_b", arguments='{"key":"good"}')
+        requests = [good, bad] if reverse else [bad, good]
+        expected_outcomes = ["succeeded", outcome] if reverse else [outcome, "succeeded"]
+        state, client = await run(
+            [response(*requests), response(message("batch handled"))],
+            tools=[TOOL], execute_tool=executor, scenario=label, trace=trace,
+        )
+        envelopes = assert_batch_returned(state, client, requests, expected_outcomes, attempts)
+        bad_index, good_index = (1, 0) if reverse else (0, 1)
+        assert envelopes[bad_index]["error"]["code"] == code
+        assert envelopes[good_index] == {"ok": True, "result": "fixed:good"}
+        expected_keys = [json.loads(item["arguments"])["key"] for item in requests] if attempts == 2 else ["good"]
+        assert trace == [
+            ("model", 1),
+            *[item for key in expected_keys for item in (("tool_started", key), ("tool_finished", key))],
+            ("model", 2),
+        ], trace
+        if behavior == "validates":
+            event = next(item for item in read_events(state) if item["event"] == "tool.rejected")
+            assert event["stage"] == "argument_validation"
+        assert "SYNTHETIC_BATCH_SECRET" not in Path(state["log_path"]).read_text(encoding="utf-8")
+
+
+async def check_duplicate_argument_keys():
+    marker = "FORBIDDEN_DUPLICATE_KEY_87EA"
+    rejected = (
+        ("duplicate_top_level", '{"' + marker + '":1,"' + marker + '":2}'),
+        ("duplicate_nested", '{"nested":{"' + marker + '":1,"' + marker + '":2}}'),
+        ("duplicate_in_array", '{"rows":[{"' + marker + '":1,"' + marker + '":2}]}'),
+        ("duplicate_decoded_escape", r'{"key":1,"\u006bey":2}'),
+    )
+    allowed = (
+        ("same_key_separate_objects", '{"left":{"key":1},"right":{"key":2},"rows":[{"key":3},{"key":4}]}'),
+        ("distinct_case_keys", '{"key":1,"Key":2}'),
+        ("distinct_unicode_keys", r'{"\u00e9":1,"e\u0301":2}'),
+    )
+    for label, arguments_text in (*rejected, *allowed):
+        should_reject = label.startswith("duplicate_")
+        seen = []
+        trace = []
+
+        async def executor(name, arguments):
+            trace.append(("tool", len(seen) + 1))
+            seen.append(deepcopy(arguments))
+            return "accepted-parameters"
+
+        requests = [
+            call(label + "_a", arguments=arguments_text),
+            call(label + "_b", arguments='{"key":"good"}'),
+        ]
+        state, client = await run(
+            [response(*requests), response(message())], tools=[TOOL], execute_tool=executor,
+            scenario=label, trace=trace,
+        )
+        outcomes = ["rejected" if should_reject else "succeeded", "succeeded"]
+        attempts = 1 if should_reject else 2
+        envelopes = assert_batch_returned(state, client, requests, outcomes, attempts)
+        assert trace == [("model", 1), *[("tool", index) for index in range(1, attempts + 1)], ("model", 2)]
+        assert seen == ([{"key": "good"}] if should_reject else [json.loads(arguments_text), {"key": "good"}])
+        if should_reject:
+            assert envelopes[0]["error"]["code"] == "invalid_arguments"
+            event = next(item for item in read_events(state) if item["event"] == "tool.rejected")
+            assert event["stage"] == "argument_parsing"
+            assert event["arguments_summary"] == {"type": "string", "length": len(arguments_text)}
+            assert marker not in outputs(state)[0]["output"]
+        assert marker not in Path(state["log_path"]).read_text(encoding="utf-8")
 
 
 async def check_model_failures():
@@ -561,47 +717,78 @@ async def check_safe_summaries():
         assert secret not in Path(item["log_path"]).read_text(encoding="utf-8")
 
 
-async def check_recording_failures():
-    from lineage_agent.recording.recorder import RunRecorder
+class FaultyFile:
+    """Inject I/O errors and retain only safe metadata about failed operations."""
 
+    def __init__(self, stream, observations, event_name=None, *, fail_close=False, fail_flush=False):
+        self.stream = stream
+        self.observations = observations
+        self.event_name = event_name
+        self.fail_close = fail_close
+        self.fail_flush = fail_flush
+        self.last_item = None
+
+    def observe(self, operation, persistence):
+        safe_fields = (
+            "run_id", "event", "event_seq", "step_id", "node", "call_id",
+            "tool_name", "request_index", "stage", "error_code",
+        )
+        self.observations.append({
+            "source": "fault_injection", "operation": operation, "persistence": persistence,
+            **{key: self.last_item[key] for key in safe_fields if key in self.last_item},
+        })
+
+    def write(self, value):
+        self.last_item = json.loads(value)
+        if self.last_item["event"] == self.event_name and not self.fail_flush:
+            self.observe("write", "not_written")
+            raise OSError("synthetic secret IO failure")
+        return self.stream.write(value)
+
+    def flush(self):
+        if self.fail_flush and self.last_item["event"] == self.event_name:
+            self.observe("flush", "not_confirmed")
+            raise OSError("synthetic secret flush failure")
+        return self.stream.flush()
+
+    def close(self):
+        self.stream.close()
+        if self.fail_close:
+            raise OSError("synthetic secret close failure")
+
+
+@contextmanager
+def recording_failure(event_name=None, *, create_failure=False, fail_close=False, fail_flush=False):
     original_open = RunRecorder._open
+    observations, streams = [], []
 
-    class FaultyFile:
-        def __init__(self, stream, event_name=None, *, fail_close=False, fail_flush=False):
-            self.stream = stream
-            self.event_name = event_name
-            self.fail_close = fail_close
-            self.fail_flush = fail_flush
-            self.last_event = None
+    def open_file(recorder):
+        if create_failure:
+            raise OSError("synthetic secret create failure")
+        stream = FaultyFile(
+            original_open(recorder), observations, event_name,
+            fail_close=fail_close, fail_flush=fail_flush,
+        )
+        streams.append(stream)
+        return stream
 
-        def write(self, value):
-            self.last_event = json.loads(value)["event"]
-            if self.last_event == self.event_name and not self.fail_flush:
-                raise OSError("synthetic secret IO failure")
-            return self.stream.write(value)
+    with patch.object(RunRecorder, "_open", open_file):
+        try:
+            yield observations
+        finally:
+            assert all(stream.stream.closed for stream in streams), "recording files must close"
 
-        def flush(self):
-            if self.fail_flush and self.last_event == self.event_name:
-                raise OSError("synthetic secret flush failure")
-            return self.stream.flush()
 
-        def close(self):
-            self.stream.close()
-            if self.fail_close:
-                raise OSError("synthetic secret close failure")
-
+async def check_recording_failures():
     async def attempt(event_name=None, *, create_failure=False, fail_close=False, fail_flush=False):
-        def open_file(recorder):
-            if create_failure:
-                raise OSError("synthetic secret create failure")
-            return FaultyFile(
-                original_open(recorder), event_name, fail_close=fail_close, fail_flush=fail_flush,
-            )
-
-        with patch.object(RunRecorder, "_open", open_file):
+        fault = "create" if create_failure else "close" if fail_close else "flush" if fail_flush else "write"
+        with recording_failure(
+            event_name, create_failure=create_failure, fail_close=fail_close, fail_flush=fail_flush,
+        ) as observations:
             state, client = await run(
                 [response(call("io_a"), call("io_b")), response(message())],
                 tools=[TOOL], execute_tool=fixed_tool,
+                scenario=f"recording_{fault}_{event_name or 'file'}", failed_writes=observations,
             )
         assert state["stop_reason"] == "error" and state["log_complete"] is False
         assert "synthetic secret" not in (state["error"] or "")
@@ -628,6 +815,127 @@ async def check_recording_failures():
     counts(state, 2, 2, 2, "error")
     state, _ = await attempt("model.started", fail_flush=True)
     counts(state, 0, 0, 0, "error")
+
+
+def assert_failed_event(state, client, observations, event_name, *, stage):
+    assert state["stop_reason"] == "error" and state["log_complete"] is False
+    assert client.closed and "synthetic secret" not in state["error"]
+    assert len(observations) == 1
+    attempted = observations[0]
+    assert attempted["source"] == "fault_injection" and attempted["persistence"] == "not_written"
+    assert attempted["operation"] == "write" and attempted["event"] == event_name
+    assert attempted["run_id"] == state["run_id"] and attempted["stage"] == stage
+    events = read_events(state)
+    assert all(event["event"] != event_name for event in events)
+    assert all(event["event"] != "run.ended" for event in events)
+    assert len([event for event in events if event["event"] == "model.started"]) == len(client.requests)
+    assert "synthetic secret" not in Path(state["log_path"]).read_text(encoding="utf-8")
+    return attempted, events
+
+
+async def check_failure_event_recording_failures():
+    cases = (
+        ("unknown", {"name": "unknown"}, "tool.rejected", "name_validation", "unknown_tool", 0),
+        ("invalid_json", {"arguments": "not-json"}, "tool.rejected", "argument_parsing", "invalid_arguments", 0),
+        ("non_object", {"arguments": "[]"}, "tool.rejected", "argument_parsing", "invalid_arguments", 0),
+        ("duplicate_key", {"arguments": '{"key":"bad","key":"good"}'}, "tool.rejected", "argument_parsing", "invalid_arguments", 0),
+        ("field_rejection", {"arguments": '{"key":42}'}, "tool.rejected", "argument_validation", "invalid_arguments", 1),
+        ("executor_exception", {}, "tool.failed", "execution", "execution_error", 1),
+        ("executor_return_type", {}, "tool.failed", "execution", "execution_error", 1),
+    )
+    for label, overrides, event_name, stage, code, attempts in cases:
+        trace = []
+
+        async def executor(name, arguments):
+            trace.append(("tool", deepcopy(arguments)))
+            if label == "executor_exception":
+                raise RuntimeError("synthetic secret executor failure")
+            if label == "executor_return_type":
+                return {"invalid": "synthetic secret result"}
+            return await fixed_tool(name, arguments)
+
+        first = call(f"fault_{label}_a", arguments='{"key":"bad"}')
+        first.update(overrides)
+        requests = [first, call(f"fault_{label}_b", arguments='{"key":"good"}')]
+        with recording_failure(event_name) as observations:
+            state, client = await run(
+                [response(*requests), response(message("must not be requested"))],
+                tools=[TOOL], execute_tool=executor, scenario=f"failure_record_{label}",
+                trace=trace, failed_writes=observations,
+            )
+        counts(state, 1, 2, attempts, "error")
+        outcome = "failed" if event_name == "tool.failed" else "rejected"
+        assert state["tool_outcomes"] == {
+            "succeeded": 0, "rejected": int(outcome == "rejected"),
+            "failed": int(outcome == "failed"), "skipped": 1,
+        }
+        assert trace == [("model", 1)] + ([("tool", json.loads(first["arguments"]))] if attempts else [])
+        assert state["usage_totals"] == {
+            "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+            "missing_usage_calls": 0,
+        }
+        assert state["result"]["usage"] == {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+        results = outputs(state)
+        assert len(results) == 1 and results[0]["call_id"] == first["call_id"]
+        envelope = json.loads(results[0]["output"])
+        assert envelope["ok"] is False and envelope["error"]["code"] == code
+        assert "synthetic secret" not in results[0]["output"]
+        assert state["input"] == client.requests[0]["input"] + requests + results
+        assert not any(item.get("type") == "function_call_output" for item in client.requests[0]["input"])
+        attempted, events = assert_failed_event(state, client, observations, event_name, stage=stage)
+        assert attempted["call_id"] == first["call_id"] and attempted["request_index"] == 1
+        assert attempted["tool_name"] == first["name"] and attempted["error_code"] == code
+        assert attempted["step_id"] == "step-0002" and attempted["node"] == "tools"
+        assert not any(event["event"] == "tool.result_created" for event in events)
+        assert not any(event["event"] == "tool.succeeded" for event in events)
+        assert [event["call_id"] for event in events if event["event"] == "tool.started"] == (
+            [first["call_id"]] if attempts else []
+        )
+
+    for label, second_reply, last_usage, totals in (
+        (
+            "no_response", ModelError("synthetic secret model failure"), None,
+            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "missing_usage_calls": 1},
+        ),
+        (
+            "incomplete_response", response(message("partial"), usage=(20, 3, 23), status="incomplete"),
+            {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23},
+            {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35, "missing_usage_calls": 0},
+        ),
+    ):
+        trace = []
+        request = call(f"before_model_failure_{label}")
+
+        async def executor(name, arguments):
+            trace.append(("tool", deepcopy(arguments)))
+            return await fixed_tool(name, arguments)
+
+        with recording_failure("model.failed") as observations:
+            state, client = await run(
+                [response(request), second_reply, response(message("must not be requested"))],
+                tools=[TOOL], execute_tool=executor, scenario=f"failure_record_model_{label}",
+                trace=trace, failed_writes=observations,
+            )
+        counts(state, 2, 1, 1, "error")
+        assert trace == [("model", 1), ("tool", {"key": "sample"}), ("model", 2)]
+        assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 0, "failed": 0, "skipped": 0}
+        assert state["usage_totals"] == totals
+        if last_usage is None:
+            assert state["result"] is None
+        else:
+            assert state["result"]["usage"] == last_usage
+            assert state["result"]["raw_response"]["status"] == "incomplete"
+        results = outputs(state)
+        assert len(results) == 1 and results[0]["call_id"] == request["call_id"]
+        assert json.loads(results[0]["output"]) == {"ok": True, "result": "fixed:sample"}
+        assert client.requests[1]["input"] == client.requests[0]["input"] + [request] + results
+        attempted, events = assert_failed_event(
+            state, client, observations, "model.failed",
+            stage="model_request" if last_usage is None else "response_validation",
+        )
+        assert attempted["step_id"] == "step-0003" and attempted["node"] == "model"
+        assert "call_id" not in attempted and "tool_name" not in attempted
+        assert [event["call_id"] for event in events if event["event"] == "tool.result_created"] == [request["call_id"]]
 
 
 def check_cli_exit_codes():
@@ -673,7 +981,8 @@ def main():
         check_model_failures, check_usage_gaps_and_run_isolation,
         check_failure_history_and_final_display, check_protocol_protection,
         check_nested_and_concurrent_isolation, check_safe_summaries,
-        check_recording_failures,
+        check_recording_failures, check_mixed_batches_and_return_types,
+        check_duplicate_argument_keys, check_failure_event_recording_failures,
     )
     for check in checks:
         print(f"CHECK {check.__name__}")

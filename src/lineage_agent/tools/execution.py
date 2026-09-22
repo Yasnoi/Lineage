@@ -30,6 +30,16 @@ def _parse_float(value: str) -> float:
     return parsed
 
 
+def _parse_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate decoded keys separately in every JSON object."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate object keys are not supported.")
+        result[key] = value
+    return result
+
+
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message}}
 
@@ -85,11 +95,14 @@ async def execute_calls(
                     call["arguments"],
                     parse_constant=_reject_constant,
                     parse_float=_parse_float,
+                    object_pairs_hook=_parse_object,
                 )
                 if not isinstance(arguments, dict):
                     raise ValueError("Tool arguments must be a JSON object.")
             except (TypeError, ValueError, RecursionError):
-                output = _error("invalid_arguments", "工具参数必须是有效的 JSON 对象。")
+                output = _error(
+                    "invalid_arguments", "工具参数必须是有效的 JSON 对象，且所有对象内的键名不得重复。"
+                )
             else:
                 arguments_summary = summarize_arguments(arguments, available_tools[call["name"]])
                 if execute_tool is None:
