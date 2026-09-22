@@ -20,6 +20,8 @@ import requests
 from langgraph.errors import NodeCancelledError
 
 from check_react import LocalClient, call, message, recording_failure, response
+from check_trace_data import check_capacity_and_rounds, check_redaction_boundaries, directory_pair, readable, text_item
+from check_trace_usage import main as check_usage_coverage
 from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.recording import tracing
@@ -322,7 +324,10 @@ def check_projection(root):
     for marker in (MODEL_SECRET, TRACE_SECRET, str(root), "PRIVATE_REASONING", "PRIVATE_ATTACHMENT", "PRIVATE_ENTRY", "PRIVATE_LISTING", "PRIVATE_OTHER_ARGUMENT", "PRIVATE_OTHER_RESULT", "PRIVATE_RESPONSE_EXTENSION"):
         assert marker not in serialized, marker
     assert (inputs, result) == before
-    nested = sanitizer.cap_payload(sanitizer.model_inputs("check", [directory_call("quoted", "password=private-value")], None))
+    nested = sanitizer.cap_payload(sanitizer.model_inputs("check", [
+        directory_call("quoted", "password=private-value"),
+        {"type": "function_call_output", "call_id": "quoted", "output": '{"ok":false,"error":{"code":"invalid_arguments"}}'},
+    ], None))
     arguments = json.loads(nested["input"][0]["arguments"])
     assert "private-value" not in arguments["path"]
     capped = sanitizer.cap_payload({"input": "x" * 200000, "call_id": "keep-me"})
@@ -371,6 +376,67 @@ def check_cli_exit_deadline():
     assert "PRIVATE_" not in result.stderr and "incomplete" in result.stdout
 
 
+async def check_serialized_redaction():
+    """Inspect the SDK wire payload and compare unchanged business objects."""
+    quoted = 'password="SYNTHETIC_HEAD,SYNTHETIC_TAIL"'
+    split = [MODEL_SECRET[:12], MODEL_SECRET[12:]]
+    prompt = [{"role": "user", "content": quoted}, message(split[0]), message(split[1])]
+    replies = [response(directory_call("sensitive_path", quoted)), response(
+        message(split[0]), message(split[1]), message(quoted),
+    )]
+
+    async def executor(name, arguments):
+        return json.dumps({"path": ".", "entries": [{"name": quoted, "path": quoted, "type": "file"}],
+                           "limit": 1, "truncated": False})
+
+    before = deepcopy((prompt, replies))
+    with capture(LANGSMITH_TRACING="false"):
+        baseline, baseline_client = await run(replies, prompt=prompt, executor=executor)
+    with capture() as (transport, stderr):
+        state, client = await run(replies, prompt=prompt, executor=executor)
+    assert not stderr.getvalue(), stderr.getvalue()
+    assert stable(state) == stable(baseline) and client.requests == baseline_client.requests
+    assert (prompt, replies) == before
+    assert len(transport.sent) == 4
+    encoded = json.dumps(transport.sent)
+    assert all(marker not in encoded for marker in (MODEL_SECRET, TRACE_SECRET, "SYNTHETIC_HEAD", "SYNTHETIC_TAIL"))
+    for span in transport.sent:
+        if span["run_type"] == "llm":
+            assert "text" not in span["outputs"]
+            for owner, field in (("inputs", "input"), ("outputs", "output")):
+                joined = readable(span[owner][field])
+                assert MODEL_SECRET not in joined and all(part not in joined for part in split)
+            for item in span["inputs"]["input"]:
+                if item.get("type") == "function_call":
+                    assert json.loads(item["arguments"])["path"] == 'password="[redacted]"'
+                elif item.get("type") == "function_call_output":
+                    assert json.loads(item["output"])["result"]["entries"]
+
+
+async def check_serialized_capacity():
+    history = [text_item("system instructions", "system"), text_item("initial user request", "user")]
+    for index in range(20):
+        history.extend(directory_pair(f"wire-{index}", entries=30, width=60))
+    answer = "SHORT_SYNTHETIC_ANSWER " * 40
+    replies = [response(message(answer))]
+    with capture(LANGSMITH_TRACING="false"):
+        baseline, baseline_client = await run(replies, prompt=history)
+    with capture() as (transport, stderr):
+        state, client = await run(replies, prompt=history)
+    assert not stderr.getvalue(), stderr.getvalue()
+    assert stable(state) == stable(baseline) and client.requests == baseline_client.requests
+    assert len(transport.sent) == 2 and state["model_calls"] == 1 and state["tool_requests"] == 0
+    llm = next(span for span in transport.sent if span["run_type"] == "llm")
+    assert readable(llm["outputs"]["output"]) == answer
+    assert {key: llm["outputs"]["usage_metadata"][key] for key in ("input_tokens", "output_tokens", "total_tokens")} == {
+        "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+    }
+    assert llm["inputs"]["trace_omissions"]["input"]["omitted_count"] > 0
+    assert llm["extra"]["metadata"]["run_id"] == state["run_id"]
+    assert "duration_ms" in llm["extra"]["metadata"] and not llm.get("error")
+    assert len(json.dumps(llm, ensure_ascii=False, separators=(",", ":")).encode()) <= 65536
+
+
 def hanging_upload_child():
     from lineage_agent.entrypoints import cli
 
@@ -389,6 +455,15 @@ async def main():
         (root / "example.txt").touch()
         check_projection(root)
         print("PASS projection and redaction")
+        check_redaction_boundaries()
+        print("PASS credential boundaries and source immutability")
+        check_capacity_and_rounds()
+        print("PASS trace capacity, omissions and complete rounds")
+        check_usage_coverage()
+        await check_serialized_redaction()
+        print("PASS SDK serialized and reassembled credential redaction")
+        await check_serialized_capacity()
+        print("PASS SDK oversized input preserves answer and usage")
         for check in (check_disabled_and_equivalence, check_failures_and_shutdown, check_concurrency_and_skips, check_local_recording_failure, check_late_protocol_failure):
             await check(root)
             print(f"PASS {check.__name__}")
@@ -398,6 +473,7 @@ async def main():
         print("PASS cancellation and bounded queue")
     check_cli_exit_deadline()
     print("PASS CLI bounded exit with stuck upload")
+    print("PASS 17 offline tracing check groups; no real endpoint calls")
     print(f"Check logs: {CHECK_DIR}")
 
 

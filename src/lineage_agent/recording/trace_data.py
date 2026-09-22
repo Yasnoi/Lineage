@@ -1,6 +1,7 @@
 """Allowlisted copies for tracing; never serialize State or SDK response objects."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import re
 from typing import Any
@@ -24,8 +25,9 @@ _TOKEN = re.compile(
 _ASSIGNMENT = re.compile(
     r"(?i)(\b(?:api[_ -]?key|langsmith[_ -]?api[_ -]?key|secret|password|"
     r"passwd|authorization|access[_ -]?token|refresh[_ -]?token|token|cookie)"
-    r"\s*[\"']?\s*[:=]\s*)([\"']?)[^\r\n,;}\"']+"
+    r"\s*[\"']?\s*[:=]\s*)"
 )
+_BEARER = re.compile(r"(?i)\bBearer\s+([^\s\"',;]+)")
 _ERROR_CODES = {
     "unknown_tool", "invalid_arguments", "execution_error", "logging_error", "tool_interrupted",
 }
@@ -64,16 +66,17 @@ class TraceSanitizer:
     def text(self, value: str) -> str:
         """Clean readable text without examining environment or filesystem."""
         value = value.encode("utf-8", errors="replace").decode("utf-8")
-        for secret in self._secrets:
-            value = value.replace(secret, "[redacted]")
-        if self._root is not None:
-            value = self._root.sub("[project_root]", value)
-        value = _TOKEN.sub("[redacted]", value)
-        value = re.sub(r"(?i)\bBearer\s+[^\s\"',;]+", "Bearer [redacted]", value)
-        value = _ASSIGNMENT.sub(r"\1\2[redacted]", value)
-        if len(value) > _MAX_TEXT:
-            value = value[:_MAX_TEXT] + "[truncated]"
-        return value
+        if (not any(secret in value for secret in self._secrets)
+                and (self._root is None or self._root.search(value) is None)
+                and _TOKEN.search(value) is None and _BEARER.search(value) is None
+                and _ASSIGNMENT.search(value) is None):
+            return self._clip(value, _MAX_TEXT)
+        return self._text_fragments([value])[0]
+
+    @staticmethod
+    def _clip(value: str, limit: int) -> str:
+        marker = "[truncated]"
+        return value if len(value) <= limit else value[:max(0, limit - len(marker))] + marker
 
     def _path(self, value: str) -> str:
         cleaned = self.text(value)
@@ -146,8 +149,7 @@ class TraceSanitizer:
                     item["type"] = entry["type"]
                 self._omissions(item, entry, {"name", "path", "type"})
                 result["entries"].append(item)
-            if len(entries) > _MAX_ITEMS:
-                result.update(trace_truncated=True, omitted_entries=len(entries) - _MAX_ITEMS)
+            self._omitted(result, "entries", len(entries), list(range(1, len(result["entries"]) + 1)))
         self._omissions(result, value, {"path", "entries", "limit", "truncated"})
         return result
 
@@ -175,57 +177,222 @@ class TraceSanitizer:
         return result
 
     def _text_fragments(self, texts: list[str]) -> list[str]:
-        """Redact known secrets even when a message splits one across text parts."""
+        """Mask one logical text stream before mapping it back to copied leaves."""
+        texts = [text.encode("utf-8", errors="replace").decode("utf-8") for text in texts]
         joined = "".join(texts)
-        intervals: list[tuple[int, int]] = []
+        intervals: list[tuple[int, int, str]] = []
         for secret in self._secrets:
             offset = 0
             while (start := joined.find(secret, offset)) >= 0:
-                intervals.append((start, start + len(secret)))
+                intervals.append((start, start + len(secret), "[redacted]"))
                 offset = start + len(secret)
+        intervals.extend((match.start(), match.end(), "[redacted]") for match in _TOKEN.finditer(joined))
+        intervals.extend((match.start(1), match.end(1), "[redacted]") for match in _BEARER.finditer(joined))
+        if self._root is not None:
+            intervals.extend((match.start(), match.end(), "[project_root]") for match in self._root.finditer(joined))
+        assignment_end = 0
+        for match in _ASSIGNMENT.finditer(joined):
+            if match.start() < assignment_end:
+                continue
+            start = match.end()
+            if start == len(joined):
+                continue
+            quote = joined[start] if joined[start] in "\"'" else None
+            if quote:
+                start += 1
+                end = start
+                escaped = False
+                while end < len(joined):
+                    char = joined[end]
+                    if char == quote and not escaped:
+                        break
+                    escaped = char == "\\" and not escaped
+                    end += 1
+            else:
+                end = start
+                while end < len(joined) and joined[end] not in "\r\n":
+                    end += 1
+            if end > start:
+                intervals.append((start, end, "[redacted]"))
+                assignment_end = end
+        merged: list[tuple[int, int, str]] = []
+        for start, stop, marker in sorted(intervals):
+            if merged and start < merged[-1][1]:
+                old_start, old_stop, old_marker = merged.pop()
+                marker = "[redacted]" if "[redacted]" in (marker, old_marker) else marker
+                merged.append((old_start, max(stop, old_stop), marker))
+            else:
+                merged.append((start, stop, marker))
         cleaned = []
         offset = 0
+        interval_index = 0
         for text in texts:
             end = offset + len(text)
-            overlaps = sorted((max(start, offset) - offset, min(stop, end) - offset)
-                              for start, stop in intervals if start < end and stop > offset)
             chunks = []
             cursor = 0
-            for start, stop in overlaps:
-                if stop > cursor:
-                    chunks.extend((text[cursor:max(start, cursor)], "[redacted]"))
+            while interval_index < len(merged) and merged[interval_index][1] <= offset:
+                interval_index += 1
+            index = interval_index
+            while index < len(merged) and merged[index][0] < end:
+                start, stop, marker = merged[index]
+                if start < end and stop > offset:
+                    start, stop = max(start, offset) - offset, min(stop, end) - offset
+                    chunks.extend((text[cursor:start], marker))
                     cursor = stop
+                index += 1
             chunks.append(text[cursor:])
-            cleaned.append(self.text("".join(chunks)))
+            cleaned.append(self._clip("".join(chunks), _MAX_TEXT))
             offset = end
         return cleaned
 
-    def _items(self, items: Any) -> list[dict[str, Any]]:
+    @staticmethod
+    def _ranges(indices: list[int]) -> list[list[int]]:
+        ranges: list[list[int]] = []
+        for index in indices:
+            if ranges and index == ranges[-1][1] + 1:
+                ranges[-1][1] = index
+            else:
+                ranges.append([index, index])
+        return ranges
+
+    def _omitted(self, owner: dict[str, Any], key: str, count: int, retained: list[int],
+                 summaries: list[dict[str, Any]] | None = None) -> None:
+        """Keep source counts outside protocol arrays, using inclusive 1-based ranges."""
+        if count == len(retained):
+            return
+        retained_set = set(retained)
+        omitted = [index for index in range(1, count + 1) if index not in retained_set]
+        details: dict[str, Any] = {
+            "original_count": count, "retained_count": len(retained),
+            "omitted_count": count - len(retained), "omitted_ranges": self._ranges(omitted),
+            "retained_ranges": self._ranges(retained),
+        }
+        if summaries:
+            details["summarized_groups"] = summaries[:_MAX_ITEMS]
+            if len(summaries) > _MAX_ITEMS:
+                details["summarized_groups_omitted_count"] = len(summaries) - _MAX_ITEMS
+        owner.setdefault("trace_omissions", {})[key] = details
+
+    @staticmethod
+    def _source_indices(owner: dict[str, Any], key: str) -> tuple[int, list[int], list[dict[str, Any]]]:
+        details = owner.get("trace_omissions", {}).get(key)
+        if details is None:
+            return len(owner[key]), list(range(1, len(owner[key]) + 1)), []
+        return details["original_count"], [index for first, last in details["retained_ranges"]
+                                           for index in range(first, last + 1)], details.get("summarized_groups", [])
+
+    def _retain(self, owner: dict[str, Any], key: str, positions: list[int],
+                *, summarized: list[int] | None = None, reason: str = "byte_limit") -> None:
+        old_unlisted = owner.get("trace_omissions", {}).get(key, {}).get("summarized_groups_omitted_count", 0)
+        count, sources, summaries = self._source_indices(owner, key)
+        if summarized:
+            summaries = [*summaries, {"range": [sources[summarized[0]], sources[summarized[-1]]], "reason": reason}]
+        owner[key] = [owner[key][index] for index in positions]
+        self._omitted(owner, key, count, [sources[index] for index in positions], summaries)
+        if old_unlisted:
+            details = owner["trace_omissions"][key]
+            details["summarized_groups_omitted_count"] = old_unlisted + details.get("summarized_groups_omitted_count", 0)
+
+    @staticmethod
+    def _context_groups(items: list[dict[str, Any]]) -> tuple[list[int], list[tuple[list[int], bool]]]:
+        """Keep initial instructions/request and each complete serial tool batch together."""
+        anchors: list[int] = []
+        user_seen = False
+        for index, item in enumerate(items):
+            role = item.get("role")
+            if role in ("system", "developer") or (role == "user" and not user_seen):
+                anchors.append(index)
+                user_seen |= role == "user"
+            else:
+                break
+        groups: list[tuple[list[int], bool]] = []
+        current: list[int] = []
+        pending: set[str] = set()
+        calls = False
+        unmatched = False
+        for index in range(len(anchors), len(items)):
+            item = items[index]
+            if item.get("role") == "user" and current and not pending:
+                groups.extend([(current, not unmatched)] if calls else [([entry], True) for entry in current])
+                current, calls, unmatched = [], False, False
+            current.append(index)
+            kind, call_id = item.get("type"), item.get("call_id")
+            if kind == "function_call":
+                calls = True
+                if isinstance(call_id, str) and call_id not in pending:
+                    pending.add(call_id)
+                else:
+                    unmatched = True
+            elif kind == "function_call_output":
+                if call_id in pending:
+                    pending.remove(call_id)
+                else:
+                    unmatched = True
+                if calls and not pending:
+                    groups.append((current, not unmatched))
+                    current, calls, unmatched = [], False, False
+        if current:
+            groups.extend([(current, not pending and not unmatched)] if calls or unmatched
+                          else [([entry], True) for entry in current])
+        return anchors, groups
+
+    def _limit_context(self, owner: dict[str, Any]) -> None:
+        anchors, groups = self._context_groups(owner["input"])
+        retained = anchors if len(anchors) <= _MAX_ITEMS else []
+        count, sources, summaries = self._source_indices(owner, "input")
+        summaries = list(summaries)
+        for indices, complete in reversed(groups):
+            if complete and len(retained) + len(indices) <= _MAX_ITEMS:
+                retained.extend(indices)
+            else:
+                summaries.append({"range": [sources[indices[0]], sources[indices[-1]]],
+                                  "reason": "item_limit" if complete else "incomplete_group"})
+        if len(anchors) > _MAX_ITEMS:
+            summaries.append({"range": [sources[anchors[0]], sources[anchors[-1]]], "reason": "item_limit"})
+        retained.sort()
+        owner["input"] = [owner["input"][index] for index in retained]
+        self._omitted(owner, "input", count, [sources[index] for index in retained], summaries)
+
+    def _items(self, items: Any, *, key: str) -> dict[str, Any]:
         if isinstance(items, str):
-            return [{"role": "user", "content": self.text(items)}]
+            items = [{"role": "user", "content": items}]
         if not isinstance(items, list):
-            return [{"summary": summarize_value(items)}]
+            return {key: [], "trace_omissions": {key: {"summary": summarize_value(items)}}}
         names: dict[str, Any] = {}
-        for item in items:
+        leaves: list[tuple[int, int | None]] = []
+        texts: list[str] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
             if isinstance(item, dict) and item.get("type") == "function_call" and isinstance(item.get("call_id"), str):
                 call_id = item["call_id"]
-                # Ambiguous associations must not grant permission to expose a result.
                 names[call_id] = item.get("name") if call_id not in names else None
+            if item.get("type") == "message" or (item.get("type") is None and item.get("role") in ("system", "developer", "user", "assistant")):
+                content = item.get("content")
+                if isinstance(content, str):
+                    leaves.append((index, None))
+                    texts.append(content)
+                elif isinstance(content, list):
+                    for part_index, part in enumerate(content):
+                        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text") and isinstance(part.get("text"), str):
+                            leaves.append((index, part_index))
+                            texts.append(part["text"])
+        # Match across every readable message before any item/part/text limit.
+        cleaned = dict(zip(leaves, self._text_fragments(texts)))
         projected = []
-        for item in items[:_MAX_ITEMS]:
+        retained = []
+        for index, item in enumerate(items):
             if not isinstance(item, dict):
-                projected.append({"summary": summarize_value(item)})
                 continue
             kind = item.get("type")
             if kind == "function_call":
                 safe = self.tool_inputs(item)
                 safe["type"] = "function_call"
-                safe["arguments"] = json.dumps(safe["arguments"], ensure_ascii=False)
             elif kind == "function_call_output":
                 call_id = item.get("call_id")
                 decoded, valid = self._decode(item.get("output"))
                 envelope = self.tool_outputs(decoded, names.get(call_id)) if valid and isinstance(call_id, str) else {"omitted": "invalid_tool_result"}
-                safe = {"type": kind, "output": json.dumps(envelope, ensure_ascii=False)}
+                safe = {"type": kind, "output": envelope}
                 if isinstance(call_id, str):
                     safe["call_id"] = self.text(call_id)
             elif kind == "message" or (kind is None and item.get("role") in ("system", "developer", "user", "assistant")):
@@ -234,28 +401,29 @@ class TraceSanitizer:
                     safe["role"] = item["role"]
                 content = item.get("content")
                 if isinstance(content, str):
-                    safe["content"] = self.text(content)
+                    safe["content"] = cleaned[index, None]
                 elif isinstance(content, list):
                     safe["content"] = []
-                    text_parts = [part for part in content[:_MAX_ITEMS] if isinstance(part, dict)
-                                  and part.get("type") in ("input_text", "output_text")
-                                  and isinstance(part.get("text"), str)]
-                    texts = iter(self._text_fragments([part["text"] for part in text_parts]))
-                    for part in content[:_MAX_ITEMS]:
+                    part_indices = []
+                    for part_index, part in enumerate(content):
                         if isinstance(part, dict) and part.get("type") in ("input_text", "output_text") and isinstance(part.get("text"), str):
-                            safe["content"].append({"type": part["type"], "text": next(texts)})
-                        else:
-                            safe["content"].append({"omitted": "unsupported_content", "summary": summarize_value(part)})
-                    if len(content) > _MAX_ITEMS:
-                        safe["trace_truncated"] = True
+                            if len(safe["content"]) < _MAX_ITEMS:
+                                safe["content"].append({"type": part["type"], "text": cleaned[index, part_index]})
+                                part_indices.append(part_index + 1)
+                    self._omitted(safe, "content", len(content), part_indices)
                 else:
                     safe["content"] = {"summary": summarize_value(content)}
             else:
-                safe = {"omitted": "unsupported_protocol_item", "summary": summarize_value(item)}
+                continue
             projected.append(safe)
-        if len(items) > _MAX_ITEMS:
-            projected.append({"trace_truncated": True, "omitted_items": len(items) - _MAX_ITEMS})
-        return projected
+            retained.append(index + 1)
+        owner = {key: projected}
+        self._omitted(owner, key, len(items), retained)
+        if key == "input":
+            self._limit_context(owner)
+        elif len(projected) > _MAX_ITEMS:
+            self._retain(owner, key, list(range(_MAX_ITEMS)), reason="item_limit")
+        return owner
 
     def _tool_definition(self, tool: Any) -> dict[str, Any]:
         if not isinstance(tool, dict) or tool.get("type") != "function" or tool.get("name") != "list_directory":
@@ -291,12 +459,11 @@ class TraceSanitizer:
 
     def model_inputs(self, model_name: str, input: Any, tools: Any) -> dict[str, Any]:
         """Project Responses messages and nested tool envelopes before upload."""
-        result: dict[str, Any] = {"model": self.text(model_name), "input": self._items(input)}
+        result: dict[str, Any] = {"model": self.text(model_name), **self._items(input, key="input")}
         if isinstance(tools, list) and tools:
             # Do not include arbitrary descriptions or schema extension values.
             result["tools"] = [self._tool_definition(tool) for tool in tools[:_MAX_ITEMS]]
-            if len(tools) > _MAX_ITEMS:
-                result["trace_truncated"] = True
+            self._omitted(result, "tools", len(tools), list(range(1, len(result["tools"]) + 1)))
         return result
 
     @staticmethod
@@ -309,9 +476,7 @@ class TraceSanitizer:
         """Keep text/tool outputs and known usage fields, never the raw response."""
         if result is None:
             return {}
-        output: dict[str, Any] = {"output": self._items(result.get("output_items"))}
-        if isinstance(result.get("text"), str):
-            output["text"] = self.text(result["text"])
+        output: dict[str, Any] = self._items(result.get("output_items"), key="output")
         usage: dict[str, Any] = self._usage(result.get("usage"))
         raw = result.get("raw_response")
         raw_usage = raw.get("usage") if isinstance(raw, dict) else None
@@ -357,82 +522,109 @@ class TraceSanitizer:
             return {"trace_truncated": True, "summary": summarize_value(value)}
         if isinstance(value, str):
             if key in ("arguments", "output"):
-                decoded, valid = self._decode(value)
-                if valid:
-                    return json.dumps(self._copy(decoded, depth + 1), ensure_ascii=False)
-                return json.dumps({"trace_truncated": True, "summary": summarize_value(value)})
+                # Finalized protocol JSON is already clean. Never reinterpret it
+                # as ordinary text or serialize it for a second time.
+                return value
             return self.text(value)
         if value is None or type(value) in (bool, int):
             return value
         if isinstance(value, dict):
             result = {}
-            for key, item in list(value.items())[:_MAX_ITEMS]:
+            for key, item in value.items():
                 if not isinstance(key, str):
                     continue
                 result[self.text(key)] = "[redacted]" if _CREDENTIAL_KEY.search(key) else self._copy(item, depth + 1, key)
-            if len(value) > _MAX_ITEMS:
-                result["trace_truncated"] = True
             return result
         if isinstance(value, (list, tuple)):
-            result = [self._copy(item, depth + 1) for item in value[:_MAX_ITEMS]]
-            if len(value) > _MAX_ITEMS:
-                result.append({"trace_truncated": True, "omitted_items": len(value) - _MAX_ITEMS})
-            return result
+            return [self._copy(item, depth + 1) for item in value]
         return {"summary": summarize_value(value)}
 
-    @staticmethod
-    def _size(value: Any) -> int:
-        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    @classmethod
+    def _wire(cls, value: Any) -> Any:
+        """Encode only the two Responses JSON fields, once at the upload boundary."""
+        if isinstance(value, list):
+            return [cls._wire(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: cls._wire(item) for key, item in value.items()}
+        field = {"function_call": "arguments", "function_call_output": "output"}.get(value.get("type"))
+        if field and isinstance(result.get(field), dict):
+            result[field] = json.dumps(result[field], ensure_ascii=False, separators=(",", ":"))
+        return result
+
+    def _size(self, value: Any) -> int:
+        return len(json.dumps(self._wire(value), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
     def _shrink(self, value: Any, limit: int, key: str = "") -> Any:
         if isinstance(value, str):
             if key in ("arguments", "output"):
-                decoded, valid = self._decode(value)
-                if valid:
-                    return json.dumps(self._shrink(decoded, limit), ensure_ascii=False)
-                return json.dumps({"trace_truncated": True, "summary": summarize_value(value)})
+                return value
             if key in ("call_id", "name", "type", "role"):
                 return value
-            return value if len(value) <= limit else value[:limit] + "[truncated]"
+            return self._clip(value, limit)
         if isinstance(value, list):
             return [self._shrink(item, limit) for item in value]
         if isinstance(value, dict):
-            return {key: self._shrink(item, limit, key) for key, item in value.items()}
+            return {key: deepcopy(item) if key in ("usage_metadata", "usage_totals", "trace_omissions")
+                    else self._shrink(item, limit, key) for key, item in value.items()}
         return value
 
-    def cap_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Bound a clean copy, preserving transport identifiers on full run records."""
-        result = self._copy(payload)
-        if self._size(result) <= _MAX_PAYLOAD:
-            return result
-        targets = [key for key in ("inputs", "outputs") if key in result]
+    def _reduce_input(self, result: dict[str, Any], inputs: dict[str, Any]) -> None:
+        items = inputs.get("input")
+        if isinstance(items, list):
+            # Drop complete old rounds first. Keep initial instructions/request
+            # and the latest complete round while they fit.
+            while self._size(result) > _MAX_PAYLOAD:
+                _, groups = self._context_groups(inputs["input"])
+                if len(groups) <= 1:
+                    break
+                removed = set(groups[0][0])
+                self._retain(inputs, "input", [index for index in range(len(inputs["input"])) if index not in removed])
         for limit in (512, 128, 32):
-            if targets:
-                for key in targets:
-                    result[key] = self._shrink(result[key], limit)
-                    if isinstance(result[key], dict):
-                        result[key]["trace_truncated"] = True
-            else:
-                result = self._shrink(result, limit)
-                result["trace_truncated"] = True
             if self._size(result) <= _MAX_PAYLOAD:
-                return result
-        if targets:
-            for key in targets:
-                result[key] = {"trace_truncated": True, "summary": summarize_value(result[key])}
-            if self._size(result) > _MAX_PAYLOAD and "extra" in result:
-                result["extra"] = {"metadata": {"trace_truncated": True}}
-            if self._size(result) > _MAX_PAYLOAD:
-                # Normal transport identifiers are short. An invalid envelope
-                # cannot bypass the byte limit via arbitrary top-level values.
-                result = {key: result[key] for key in (
-                    "id", "trace_id", "parent_run_id", "dotted_order", "name",
-                    "run_type", "start_time", "end_time", "project_name", "extra",
-                    "error", "inputs", "outputs",
-                ) if key in result}
-                result = self._shrink(result, 512)
-            if self._size(result) > _MAX_PAYLOAD:
-                raise ValueError("trace envelope exceeds payload limit")
-        else:
-            result = {"trace_truncated": True, "summary": summarize_value(result)}
-        return result
+                return
+            reduced = self._shrink(inputs, limit)
+            inputs.clear()
+            inputs.update(reduced)
+            inputs["trace_truncated"] = True
+        if self._size(result) > _MAX_PAYLOAD and isinstance(inputs.get("tools"), list):
+            self._retain(inputs, "tools", [])
+        if isinstance(inputs.get("input"), list):
+            while self._size(result) > _MAX_PAYLOAD and inputs["input"]:
+                anchors, groups = self._context_groups(inputs["input"])
+                removed = groups[0][0] if groups else anchors
+                removed_set = set(removed)
+                self._retain(inputs, "input", [index for index in range(len(inputs["input"])) if index not in removed_set],
+                             summarized=removed)
+
+    def _reduce_output(self, result: dict[str, Any], outputs: dict[str, Any]) -> None:
+        for limit in (512, 128, 32):
+            if self._size(result) <= _MAX_PAYLOAD:
+                return
+            reduced = self._shrink(outputs, limit)
+            outputs.clear()
+            outputs.update(reduced)
+            outputs["trace_truncated"] = True
+        if self._size(result) > _MAX_PAYLOAD and isinstance(outputs.get("output"), list):
+            self._retain(outputs, "output", [], summarized=list(range(len(outputs["output"]))))
+        directory = outputs.get("result")
+        if self._size(result) > _MAX_PAYLOAD and isinstance(directory, dict) and isinstance(directory.get("entries"), list):
+            self._retain(directory, "entries", [])
+
+    def cap_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Budget input before output and finalize protocol JSON on a clean copy."""
+        result = self._copy(payload)
+        wire = self._wire(result)
+        if len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= _MAX_PAYLOAD:
+            return wire
+        inputs = result.get("inputs") if "inputs" in result else result if "input" in result else None
+        outputs = result.get("outputs") if "outputs" in result else result if "output" in result else None
+        if isinstance(inputs, dict) and self._size(result) > _MAX_PAYLOAD:
+            self._reduce_input(result, inputs)
+        if isinstance(outputs, dict) and self._size(result) > _MAX_PAYLOAD:
+            self._reduce_output(result, outputs)
+        if self._size(result) > _MAX_PAYLOAD:
+            # Normal run metadata and association IDs are small; do not trade
+            # them or usage for unbounded custom data on a malformed envelope.
+            raise ValueError("trace envelope exceeds payload limit")
+        return self._wire(result)

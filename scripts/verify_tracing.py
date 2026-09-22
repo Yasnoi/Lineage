@@ -24,6 +24,33 @@ from lineage_agent.recording.tracing import _create_client, _read_settings, _Wor
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 
 
+def summarize_usage_coverage(projected_remote_outputs):
+    """Classify final, remotely verified token fields without filling missing values."""
+    fields = ("input_tokens", "output_tokens", "total_tokens")
+    counts = {"none": 0, "partial": 0, "full": 0}
+    per_call = []
+    for index, (projected, remote) in enumerate(projected_remote_outputs, 1):
+        expected = projected.get("usage_metadata")
+        observed = remote.get("usage_metadata")
+        # JSON equality distinguishes a reported zero from False, and ints from floats.
+        assert json.dumps(expected, sort_keys=True, allow_nan=False) == json.dumps(
+            observed, sort_keys=True, allow_nan=False
+        ), "远端 usage_metadata 与最终上传投影不一致。"
+        reported = [
+            field for field in fields
+            if isinstance(expected, dict)
+            and type(expected.get(field)) is int and expected[field] >= 0
+        ]
+        coverage = "full" if len(reported) == len(fields) else "partial" if reported else "none"
+        counts[coverage] += 1
+        per_call.append({"model_call": index, "coverage": coverage, "reported_fields": reported})
+    return {
+        "usage_covered": counts["partial"] + counts["full"] > 0,
+        "usage_coverage_counts": counts,
+        "usage_coverage_by_call": per_call,
+    }
+
+
 async def _remote_runs(config, run_id, expected):
     """Bound both polling and interpreter exit, including a stalled DNS lookup."""
     result = Queue(maxsize=1)
@@ -150,6 +177,7 @@ async def verify():
         )
         assert root_run.outputs == cleaner.root_outputs(state) and not root_run.error, "远端根运行结果不一致。"
         calls = {}
+        usage_outputs = []
         for index, (request, raw_response) in enumerate(observations, 1):
             parsed = parse_response(raw_response)
             calls.update({call["call_id"]: call for call in parsed["tool_calls"]})
@@ -157,6 +185,7 @@ async def verify():
             projected = cleaner.cap_payload({"inputs": cleaner.model_inputs(request["model"], request["input"], request.get("tools")), "outputs": cleaner.model_outputs(parsed)})
             assert run.inputs == projected["inputs"] and run.outputs == projected["outputs"], "模型参数、输出或 usage 与实际调用不一致。"
             assert run.extra["metadata"].get("step_id") == started[index - 1]["step_id"] and not run.error, "模型 span 状态或 step_id 不一致。"
+            usage_outputs.append((projected["outputs"], run.outputs))
         for event in created:
             call_id = event["call_id"]
             run = next(run for run in runs if run.run_type == "tool" and run.extra["metadata"].get("call_id") == call_id)
@@ -177,7 +206,7 @@ async def verify():
             "trace_url": url, "run_id": state["run_id"], "remote_spans": len(runs),
             "same_batch_covered": any(event.get("tool_request_count", 0) > 1 for event in events),
             "rejection_covered": state["tool_outcomes"]["rejected"] > 0,
-            "usage_covered": any(parse_response(raw)["usage"] is not None for _, raw in observations),
+            **summarize_usage_coverage(usage_outputs),
         }, ensure_ascii=False))
         print("PASS 真实模型与远端数据核对；同批/拒绝未覆盖项不因模型随机性判失败。")
         print("待人工核对：在上方私有 Trace 链接打开网页，检查参数、结果、失败状态、层级与耗时；脚本成功不等于网页验收完成。")
