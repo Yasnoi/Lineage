@@ -231,6 +231,22 @@ class RunTrace:
         metadata["checkpoint_error"] = code
         metadata["checkpoint_saved"] = checkpoint_id is not None and code is None
 
+    @_safe
+    def observe_read_budget(self, stage: str, error: str | None) -> None:
+        """Retain bounded, fixed diagnostics without executor exception data."""
+        if not self.enabled or self._finished or self._closed:
+            return
+        if (
+            type(stage) is not str or stage not in {"run_start", "model", "run_end"}
+            or type(error) is not str or error != "read_budget_unavailable"
+        ):
+            return
+        metadata = self._root.payload["extra"]["metadata"]
+        diagnostics = metadata.setdefault("read_budget_diagnostics", [])
+        diagnostic = {"stage": stage, "error_code": "read_budget_unavailable"}
+        if diagnostic not in diagnostics:
+            diagnostics.append(diagnostic)
+
     @staticmethod
     def _stamp_end(span: _Span) -> None:
         if "end_time" not in span.payload:
@@ -279,7 +295,7 @@ class RunTrace:
             sdk_logger.removeFilter(log_filter)
 
     @_safe
-    def set_model_step(self, step_id: str | None, model_call: int, *, remaining_model_calls=None, final_answer_call=False, read_budget=None) -> None:
+    def set_model_step(self, step_id: str | None, model_call: int, *, remaining_model_calls=None, final_answer_call=False, read_budget=None, read_budget_error=None) -> None:
         if self.enabled:
             if self._pending_model is not None:
                 self.model_complete(error_code="model_interrupted", stage="model_request")
@@ -288,6 +304,10 @@ class RunTrace:
             self._allowances = {
                 "remaining_model_calls": remaining_model_calls,
                 "final_answer_call": final_answer_call, "read_budget": read_budget,
+                "read_budget_error": (
+                    "read_budget_unavailable" if type(read_budget_error) is str
+                    and read_budget_error == "read_budget_unavailable" else None
+                ),
             }
 
     @_safe
@@ -404,20 +424,27 @@ class RunTrace:
         )
 
     @_safe
-    def finish(self, state=None, error_code=None, *, read_budget=None) -> None:
+    def finish(self, state=None, error_code=None, *, read_budget=None, read_budget_error=None) -> None:
         if not self.enabled or self._finished or self._closed:
             return
+        self.observe_read_budget("run_end", read_budget_error)
         if self._pending_model is not None:
             self.model_complete(error_code="model_interrupted", stage="model_request")
         self._finished = True
         self._root.payload["outputs"] = self._sanitizer.root_outputs(state)
         self._root.payload["extra"]["metadata"]["read_budget"] = read_budget
+        self._root.payload["extra"]["metadata"]["read_budget_error"] = (
+            "read_budget_unavailable" if type(read_budget_error) is str
+            and read_budget_error == "read_budget_unavailable" else None
+        )
         checkpoint_error = self._root.payload["extra"]["metadata"].get("checkpoint_error")
         failed = bool(error_code or checkpoint_error) or (isinstance(state, dict) and state.get("stop_reason") == "error")
         stopped = isinstance(state, dict) and state.get("stop_reason") == "max_model_calls"
         if failed:
             code = error_code or (state.get("error_code") if isinstance(state, dict) else None) or checkpoint_error
-            self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {"run_interrupted", "client_close_error"} else "agent_error"
+            self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {
+                "run_interrupted", "client_close_error", "invalid_input", "pre_execution_configuration_error",
+            } else "agent_error"
         elif stopped:
             self._root.payload["error"] = "max_model_calls"
         self._root.payload["extra"]["metadata"]["outcome"] = (

@@ -5,7 +5,7 @@ import asyncio
 import sys
 
 from lineage_agent.agent.checkpointing import CheckpointError
-from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, run_agent
+from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, PreExecutionConfigurationError, run_agent
 from lineage_agent.agent.sessions import SessionError, SessionManager, SessionTurn
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
@@ -118,6 +118,9 @@ async def interactive(settings: ModelSettings, dependencies: dict) -> int:
             continue
         try:
             turn = await sessions.run_turn(current, prompt)
+        except PreExecutionConfigurationError as exc:
+            print(f"配置错误：{exc}", file=sys.stderr)
+            continue
         except SessionError as exc:
             print(f"会话错误（{exc.code}）：{exc}", file=sys.stderr)
             continue

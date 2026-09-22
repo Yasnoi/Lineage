@@ -36,7 +36,9 @@ class SessionCheckpointer(InMemorySaver):
             super().__init__()
         except Exception:
             raise CheckpointError("checkpoint_create_error") from None
-        self._failures: dict[str, CheckpointError] = {}
+        # Raised exceptions retain frames through their traceback. Keep only
+        # the fixed reason across turns, and create a fresh exception per use.
+        self._failures: dict[str, str] = {}
         self._confirmed: dict[str, str] = {}
         self._recorders: dict[str, RunRecorder] = {}
 
@@ -51,7 +53,8 @@ class SessionCheckpointer(InMemorySaver):
         return self._confirmed.get(thread_id)
 
     def failure(self, thread_id: str) -> CheckpointError | None:
-        return self._failures.get(thread_id)
+        code = self._failures.get(thread_id)
+        return CheckpointError(code) if code is not None else None
 
     @staticmethod
     def _thread(config: dict[str, Any]) -> str:
@@ -67,7 +70,8 @@ class SessionCheckpointer(InMemorySaver):
             recorder.emit(event, **details)
 
     def _failed(self, thread_id: str, code: str, stage: str) -> CheckpointError:
-        failure = self._failures.setdefault(thread_id, CheckpointError(code))
+        safe_code = code if code in CHECKPOINT_ERRORS else "checkpoint_write_error"
+        failure = CheckpointError(self._failures.setdefault(thread_id, safe_code))
         self._emit(
             thread_id, "checkpoint.failed", stage=stage,
             checkpoint_id=self.last_confirmed(thread_id),

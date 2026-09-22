@@ -70,10 +70,16 @@ def build_graph(
         if state["model_calls"] >= max_model_calls:
             return finish(state, {"stop_reason": "max_model_calls", "error": None, "error_code": None}, "model", step_id)
         remaining = max_model_calls - state["model_calls"]
-        budget = read_budget_snapshot(execute_tool)
+        budget_error = None
+
+        def budget_unavailable() -> None:
+            nonlocal budget_error
+            budget_error = "read_budget_unavailable"
+
+        budget = read_budget_snapshot(execute_tool, on_unavailable=budget_unavailable)
         allowances = {
             "remaining_model_calls": remaining, "final_answer_call": remaining == 1,
-            "read_budget": budget,
+            "read_budget": budget, "read_budget_error": budget_error,
         }
         if not emit(
             "model.started", step_id, "model",
@@ -89,6 +95,7 @@ def build_graph(
 
         failure: tuple[str, str] | None = None
         if tracer is not None:
+            tracer.observe_read_budget("model", budget_error)
             tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
         instructions = f"本次用户请求剩余模型调用次数（包含当前调用）：{remaining}。"
         if budget is not None:

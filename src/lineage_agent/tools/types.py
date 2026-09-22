@@ -1,6 +1,7 @@
 """Callable tool interface and the result of one sequential batch."""
 
 from collections.abc import Awaitable, Callable
+from inspect import getattr_static
 from typing import Any, TypedDict
 
 
@@ -61,17 +62,38 @@ class ToolArgumentError(ValueError):
         super().__init__(message or explanation)
 
 
-def read_budget_snapshot(executor: ToolExecutor | None) -> dict[str, int] | None:
-    """Read optional numeric run metadata without exposing executor internals."""
-    snapshot = getattr(executor, "read_budget", None)
-    if not isinstance(snapshot, dict):
-        return None
-    keys = ("limit_bytes", "used_bytes", "remaining_bytes")
-    if not all(type(snapshot.get(key)) is int and snapshot[key] >= 0 for key in keys):
-        return None
-    if snapshot["used_bytes"] + snapshot["remaining_bytes"] != snapshot["limit_bytes"]:
-        return None
-    return {key: snapshot[key] for key in keys}
+def read_budget_snapshot(
+    executor: ToolExecutor | None,
+    *,
+    on_unavailable: Callable[[], None] | None = None,
+) -> dict[str, int] | None:
+    """Observe optional metadata; the executor still enforces its own budget."""
+    try:
+        try:
+            snapshot = getattr(executor, "read_budget")
+        except AttributeError:
+            # A declared property can itself raise AttributeError. Distinguish
+            # that failed getter from an executor without this optional field.
+            if getattr_static(executor, "read_budget", None) is None:
+                return None
+            raise
+        if snapshot is None:
+            return None
+        keys = ("limit_bytes", "used_bytes", "remaining_bytes")
+        if isinstance(snapshot, dict):
+            values = {key: snapshot[key] for key in keys}
+            if (
+                all(type(value) is int and value >= 0 for value in values.values())
+                and values["used_bytes"] + values["remaining_bytes"] == values["limit_bytes"]
+            ):
+                return values
+    except Exception:
+        # Never carry caller exception text or an old numeric snapshot into
+        # logs, prompts or tracing. Cancellation remains a BaseException.
+        pass
+    if on_unavailable is not None:
+        on_unavailable()
+    return None
 
 
 class ToolExecutionError(Exception):

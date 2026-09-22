@@ -6,7 +6,9 @@ from threading import Lock
 from uuid import uuid4
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
-from lineage_agent.agent.runtime import _run_agent, normalize_input, validate_tools
+from lineage_agent.agent.runtime import (
+    PreExecutionConfigurationError, _run_agent, normalize_input, validate_tools,
+)
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.types import ModelInput, ToolDefinition
@@ -96,6 +98,10 @@ class SessionManager:
                     session_id=session_id, checkpointer=self._checkpointer,
                     checkpoint_id=session.last_checkpoint_id,
                 )
+            except PreExecutionConfigurationError:
+                # This signal is produced only before entering the client or
+                # graph. No new checkpoint or execution must be resumed.
+                raise
             except BaseException:
                 # Cancellation is not a new request or an implicit resume. Its
                 # potentially partial writes cannot be used as a committed turn.
