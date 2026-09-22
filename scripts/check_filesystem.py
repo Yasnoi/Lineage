@@ -22,6 +22,7 @@ from lineage_agent.entrypoints import cli
 from lineage_agent.tools.filesystem import directory
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 from lineage_agent.tools.filesystem.paths import bind_project_root, resolve_project_path
+from lineage_agent.tools.filesystem.text import TEXT_TOOL
 from lineage_agent.tools.types import TOOL_ARGUMENT_REASONS, ToolArgumentError
 
 
@@ -289,7 +290,11 @@ async def rejected_then_success(root, scenario, *, path=None, arguments=None, at
             assert event["reason_message"] == TOOL_ARGUMENT_REASONS[expected_reason]
         assert first == {
             "ok": False,
-            "error": {"code": "invalid_arguments", "message": "工具参数未通过执行器校验。"},
+            "error": {
+                "code": "invalid_arguments", "message": "工具参数未通过执行器校验。",
+                "reason_code": expected_reason,
+                "reason_message": TOOL_ARGUMENT_REASONS[expected_reason],
+            },
         }
     return state, client, observed
 
@@ -580,7 +585,7 @@ async def check_configuration_and_cli(root, base):
             if project_root is None:
                 assert not client.requests[0].get("tools") and len(client.requests) == 1
             else:
-                assert client.requests[0]["tools"] == [DIRECTORY_TOOL] and len(client.requests) == 2
+                assert client.requests[0]["tools"] == [DIRECTORY_TOOL, TEXT_TOOL] and len(client.requests) == 2
 
 
 async def main():

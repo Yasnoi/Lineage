@@ -14,9 +14,11 @@ from lineage_agent.recording.summaries import (
 from lineage_agent.tools.types import (
     ToolArgumentError,
     ToolBatchResult,
+    ToolExecutionError,
     ToolExecutor,
     ToolOutcomes,
     safe_tool_argument_reason,
+    safe_tool_execution_reason,
 )
 
 if TYPE_CHECKING:
@@ -150,6 +152,12 @@ async def execute_calls(
                             getattr(exc, "reason_code", None)
                         )
                         output = _error("invalid_arguments", "工具参数未通过执行器校验。")
+                    except ToolExecutionError as exc:
+                        outcome = "failed"
+                        reason_code, reason_message = safe_tool_execution_reason(
+                            getattr(exc, "reason_code", None)
+                        )
+                        output = _error("execution_error", "工具执行失败。")
                     except Exception:
                         outcome = "failed"
                         output = _error("execution_error", "工具执行失败。")
@@ -164,6 +172,8 @@ async def execute_calls(
                         outcome = "succeeded"
                         output = {"ok": True, "result": result}
 
+        if reason_code is not None:
+            output["error"].update(reason_code=reason_code, reason_message=reason_message)
         outcomes[outcome] += 1
         if tracer is not None:
             tracer.tool_end(

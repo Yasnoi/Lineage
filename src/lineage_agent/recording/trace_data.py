@@ -8,6 +8,7 @@ from typing import Any
 
 from lineage_agent.models.types import ModelResult
 from lineage_agent.recording.summaries import summarize_value
+from lineage_agent.tools.types import safe_tool_argument_reason, safe_tool_execution_reason
 
 
 _MAX_TEXT = 4000
@@ -32,6 +33,7 @@ _ERROR_CODES = {
     "unknown_tool", "invalid_arguments", "execution_error", "logging_error", "tool_interrupted",
 }
 _ENTRY_TYPES = {"file", "directory", "symlink", "junction", "reparse_point", "other"}
+_FILESYSTEM_TOOLS = ("list_directory", "read_text_file")
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -105,7 +107,7 @@ class TraceSanitizer:
         decoded, valid = self._decode(raw)
         if not valid:
             return {"summary": summarize_value(raw), "omitted": "invalid_or_oversized_json"}
-        if name != "list_directory" or not isinstance(decoded, dict):
+        if name not in _FILESYSTEM_TOOLS or not isinstance(decoded, dict):
             return {"summary": summarize_value(decoded), "omitted": "unsupported_arguments"}
         result: dict[str, Any] = {}
         if isinstance(decoded.get("path"), str):
@@ -116,7 +118,7 @@ class TraceSanitizer:
         return result
 
     def tool_inputs(self, call: dict[str, Any]) -> dict[str, Any]:
-        """Retain call association and only approved directory arguments."""
+        """Retain call association and approved filesystem path arguments."""
         result: dict[str, Any] = {"arguments": self._arguments(call.get("name"), call.get("arguments"))}
         for key in ("name", "call_id"):
             if isinstance(call.get(key), str):
@@ -153,6 +155,22 @@ class TraceSanitizer:
         self._omissions(result, value, {"path", "entries", "limit", "truncated"})
         return result
 
+    def _text_file(self, value: Any) -> dict[str, Any]:
+        """Project read metadata only; file content is never a tool preview."""
+        if not isinstance(value, dict):
+            return {"summary": summarize_value(value), "omitted": "invalid_text_result"}
+        result: dict[str, Any] = {"content_omitted": True}
+        if isinstance(value.get("path"), str):
+            result["path"] = self._path(value["path"])
+        if value.get("encoding") in ("utf-8", "utf-8-sig"):
+            result["encoding"] = value["encoding"]
+        if type(value.get("bytes_read")) is int and value["bytes_read"] >= 0:
+            result["bytes_read"] = value["bytes_read"]
+        if type(value.get("complete")) is bool:
+            result["complete"] = value["complete"]
+        self._omissions(result, value, {"path", "encoding", "bytes_read", "complete", "content"})
+        return result
+
     def tool_outputs(self, output: dict[str, Any] | None, name: str | None = None) -> dict[str, Any]:
         """Decode the application envelope; unknown tools never expose results."""
         if not isinstance(output, dict):
@@ -163,16 +181,28 @@ class TraceSanitizer:
         if output.get("ok") is True:
             raw = output.get("result")
             decoded, valid = self._decode(raw)
-            result["result"] = (
-                self._directory(decoded) if name == "list_directory" and valid else
-                {"summary": summarize_value(raw), "omitted": "unsupported_result"}
-            )
+            if name == "list_directory" and valid:
+                result["result"] = self._directory(decoded)
+            elif name == "read_text_file" and valid:
+                result["result"] = self._text_file(decoded)
+            else:
+                result["result"] = {"summary": summarize_value(raw), "omitted": "unsupported_result"}
         elif output.get("ok") is False:
             error = output.get("error")
             code = error.get("code") if isinstance(error, dict) else None
-            # The error message may be supplied by external callers. Only codes
-            # belong in this projection; application-owned reasons are metadata.
+            # External messages are never trusted. Regenerate any reason from
+            # the same application-owned tables used by the executor and JSONL.
             result["error"] = {"code": code if isinstance(code, str) and code in _ERROR_CODES else "tool_error"}
+            if isinstance(error, dict) and "reason_code" in error:
+                reason = error["reason_code"]
+                if code == "invalid_arguments":
+                    reason_code, reason_message = safe_tool_argument_reason(reason)
+                elif code == "execution_error":
+                    reason_code, reason_message = safe_tool_execution_reason(reason)
+                else:
+                    reason_code = None
+                if reason_code is not None:
+                    result["error"].update(reason_code=reason_code, reason_message=reason_message)
         self._omissions(result, output, {"ok", "result", "error"})
         return result
 
@@ -426,9 +456,9 @@ class TraceSanitizer:
         return owner
 
     def _tool_definition(self, tool: Any) -> dict[str, Any]:
-        if not isinstance(tool, dict) or tool.get("type") != "function" or tool.get("name") != "list_directory":
+        if not isinstance(tool, dict) or tool.get("type") != "function" or tool.get("name") not in _FILESYSTEM_TOOLS:
             return {"summary": summarize_value(tool), "omitted": "unsupported_tool"}
-        result: dict[str, Any] = {"type": "function", "name": "list_directory"}
+        result: dict[str, Any] = {"type": "function", "name": tool["name"]}
         if type(tool.get("strict")) is bool:
             result["strict"] = tool["strict"]
         # Only retain actual recognized schema values; never synthesize a schema

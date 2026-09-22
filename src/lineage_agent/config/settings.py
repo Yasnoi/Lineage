@@ -24,6 +24,7 @@ class ModelSettings:
     log_dir: Path = Path("logs")
     project_root: Path | None = None
     directory_max_entries: int = 100
+    text_max_bytes: int = 65536
 
     def __post_init__(self) -> None:
         if (
@@ -38,6 +39,8 @@ class ModelSettings:
             or self.directory_max_entries <= 0
         ):
             raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。")
+        if type(self.text_max_bytes) is not int or self.text_max_bytes <= 0:
+            raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -102,6 +105,11 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     except ValueError as exc:
         raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。") from exc
 
+    try:
+        text_max_bytes = int(os.environ.get("TEXT_MAX_BYTES", "65536"))
+    except ValueError as exc:
+        raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。") from exc
+
     log_dir_value = os.environ.get("LOG_DIR", "logs").strip()
     if not log_dir_value:
         raise ConfigurationError("LOG_DIR 必须是有效的非空目录路径。")
@@ -122,4 +130,5 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         log_dir=log_dir,
         project_root=project_root,
         directory_max_entries=directory_max_entries,
+        text_max_bytes=text_max_bytes,
     )

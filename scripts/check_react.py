@@ -19,7 +19,9 @@ from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, generate_response
 from lineage_agent.recording.recorder import RunRecorder
 from lineage_agent.tools.execution import execute_calls
-from lineage_agent.tools.types import TOOL_ARGUMENT_REASONS, ToolArgumentError
+from lineage_agent.tools.types import (
+    TOOL_ARGUMENT_REASONS, TOOL_EXECUTION_REASONS, ToolArgumentError, ToolExecutionError,
+)
 
 
 CHECK_ID = str(uuid4())
@@ -359,7 +361,12 @@ def assert_batch_returned(state, client, requests, outcomes, attempts):
             assert set(envelope) == {"ok", "result"} and envelope["ok"] is True
         else:
             assert set(envelope) == {"ok", "error"} and envelope["ok"] is False
-            assert set(envelope["error"]) == {"code", "message"}
+            if "reason_code" in event:
+                assert set(envelope["error"]) == {"code", "message", "reason_code", "reason_message"}
+                assert envelope["error"]["reason_code"] == event["reason_code"]
+                assert envelope["error"]["reason_message"] == event["reason_message"]
+            else:
+                assert set(envelope["error"]) == {"code", "message"}
             assert envelope["error"]["code"] == recorded[0]["error_code"]
     next_model = [event for event in events if event["event"] == "model.started"][1]
     assert all(event["event_seq"] < next_model["event_seq"] for event in created)
@@ -742,7 +749,10 @@ async def check_safe_rejection_reasons():
         }
         assert json.loads(outputs(state)[0]["output"]) == {
             "ok": False,
-            "error": {"code": "invalid_arguments", "message": "工具参数未通过执行器校验。"},
+            "error": {
+                "code": "invalid_arguments", "message": "工具参数未通过执行器校验。",
+                "reason_code": expected, "reason_message": TOOL_ARGUMENT_REASONS[expected],
+            },
         }
         diagnostics = [
             event for event in read_events(state)
@@ -754,6 +764,39 @@ async def check_safe_rejection_reasons():
             assert event["reason_message"] == TOOL_ARGUMENT_REASONS[expected]
         assert secret not in Path(state["log_path"]).read_text(encoding="utf-8")
     assert ToolArgumentError(secret, reason_code=secret).reason_code == "argument_validation_failed"
+
+
+async def check_safe_execution_reasons():
+    secret = "FORBIDDEN_EXECUTION_REASON_108e"
+    for reason, expected in (
+        ("io_error", "io_error"), (secret, "execution_failed"),
+        ([secret], "execution_failed"), (None, "execution_failed"),
+    ):
+        async def fail(name, arguments):
+            failure = ToolExecutionError(reason_code="io_error")
+            failure.reason_code = reason
+            failure.args = (secret,)
+            raise failure
+
+        state, client = await run(
+            [response(call("safe_execution")), response(message())],
+            tools=[TOOL], execute_tool=fail,
+        )
+        counts(state, 2, 1, 1)
+        assert state["tool_outcomes"] == {
+            "succeeded": 0, "rejected": 0, "failed": 1, "skipped": 0,
+        }
+        error = json.loads(outputs(state)[0]["output"])["error"]
+        assert error == {
+            "code": "execution_error", "message": "工具执行失败。",
+            "reason_code": expected, "reason_message": TOOL_EXECUTION_REASONS[expected],
+        }
+        events = read_events(state)
+        diagnostics = [item for item in events if item["event"] in ("tool.failed", "tool.result_created")]
+        assert len(diagnostics) == 2
+        assert all(item["reason_code"] == expected and item["reason_message"] == error["reason_message"] for item in diagnostics)
+        assert secret not in json.dumps((state, client.requests, events))
+    assert ToolExecutionError(reason_code=secret).reason_code == "execution_failed"
 
 
 async def check_tool_trace_hooks():
@@ -1106,7 +1149,7 @@ def main():
         check_model_failures, check_usage_gaps_and_run_isolation,
         check_failure_history_and_final_display, check_protocol_protection,
         check_nested_and_concurrent_isolation, check_safe_summaries, check_safe_rejection_reasons,
-        check_tool_trace_hooks,
+        check_safe_execution_reasons, check_tool_trace_hooks,
         check_recording_failures, check_mixed_batches_and_return_types,
         check_duplicate_argument_keys, check_failure_event_recording_failures,
     )

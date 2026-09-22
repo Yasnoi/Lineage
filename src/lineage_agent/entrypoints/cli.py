@@ -8,6 +8,8 @@ from lineage_agent.agent.runtime import run_agent
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.tools.filesystem import directory
+from lineage_agent.tools.filesystem.executor import create_filesystem_executor
+from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
 
 def format_run_summary(state: AgentState) -> str:
@@ -38,14 +40,15 @@ def main() -> int:
         if settings.project_root is None:
             state = asyncio.run(run_agent(args.prompt, settings))
         else:
-            execute_tool = directory.create_directory_executor(
-                settings.project_root, max_entries=settings.directory_max_entries
+            execute_tool = create_filesystem_executor(
+                settings.project_root, max_entries=settings.directory_max_entries,
+                max_bytes=settings.text_max_bytes,
             )
             state = asyncio.run(
                 run_agent(
                     args.prompt,
                     settings,
-                    tools=[directory.DIRECTORY_TOOL],
+                    tools=[directory.DIRECTORY_TOOL, TEXT_TOOL],
                     execute_tool=execute_tool,
                 )
             )

@@ -22,7 +22,7 @@ from urllib3.util import Retry
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE
 from lineage_agent.recording.trace_data import TraceSanitizer
-from lineage_agent.tools.types import safe_tool_argument_reason
+from lineage_agent.tools.types import safe_tool_argument_reason, safe_tool_execution_reason
 
 
 QUEUE_SIZE = 128
@@ -345,7 +345,10 @@ class RunTrace:
             metadata.update(reason_code="logging_error", reason_message=LOG_FAILURE_MESSAGE,
                             skip_reason="logging_error")
         elif reason_code is not None:
-            code, message = safe_tool_argument_reason(reason_code)
+            code, message = (
+                safe_tool_execution_reason(reason_code) if outcome == "failed"
+                else safe_tool_argument_reason(reason_code)
+            )
             metadata.update(reason_code=code, reason_message=message)
         if outcome != "succeeded":
             raw_error = output.get("error", {}) if isinstance(output, dict) else {}
