@@ -2,13 +2,16 @@
 
 import os
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI, APIConnectionError, APIError, APIStatusError, APITimeoutError
 from openai.types.responses import Response
 
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.types import ModelInput, ModelResult, TokenUsage, ToolDefinition
+
+if TYPE_CHECKING:
+    from lineage_agent.recording.tracing import RunTrace
 
 
 class ModelError(RuntimeError):
@@ -43,6 +46,34 @@ def create_client(settings: ModelSettings) -> AsyncOpenAI:
 
 
 async def generate_response(
+    client: AsyncOpenAI,
+    model_name: str,
+    input: ModelInput,
+    *,
+    tools: list[ToolDefinition] | None = None,
+    tracer: "RunTrace | None" = None,
+) -> ModelResult:
+    """Observe the actual SDK request without changing its input or result."""
+    span = tracer.model_start(model_name, input, tools) if tracer is not None else None
+    try:
+        result = await _request_response(client, model_name, input, tools=tools)
+    except ModelError as exc:
+        if tracer is not None:
+            tracer.model_end(span, result=exc.result, error_code=exc.code, stage=exc.stage)
+        raise
+    except BaseException as exc:
+        if tracer is not None:
+            tracer.model_end(
+                span, error_code="model_error" if isinstance(exc, Exception) else "model_interrupted",
+                stage="model_request",
+            )
+        raise
+    if tracer is not None:
+        tracer.model_end(span, result=result)
+    return result
+
+
+async def _request_response(
     client: AsyncOpenAI,
     model_name: str,
     input: ModelInput,

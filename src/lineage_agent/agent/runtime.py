@@ -4,12 +4,15 @@ from copy import deepcopy
 from functools import partial
 from typing import Any
 
+from langsmith import tracing_context
+
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.responses import create_client, generate_response
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
+from lineage_agent.recording.tracing import start_trace
 from lineage_agent.tools.types import ToolExecutor
 
 
@@ -94,6 +97,7 @@ async def run_agent(
         "stop_reason": None,
         "error": None,
     }
+    tracer = start_trace(recorder.run_id, settings)
     try:
         if not recorder.emit(
             "run.started", input_item_count=len(input_items),
@@ -110,7 +114,8 @@ async def run_agent(
         else:
             async with create_client(settings) as client:
                 call_model = partial(
-                    generate_response, client, settings.model_name, tools=available_tools or None
+                    generate_response, client, settings.model_name,
+                    tools=available_tools or None, tracer=tracer,
                 )
                 graph = build_graph(
                     call_model,
@@ -118,15 +123,21 @@ async def run_agent(
                     execute_tool=execute_tool,
                     max_model_calls=settings.max_model_calls,
                     recorder=recorder,
+                    tracer=tracer,
                 )
-                state = await graph.ainvoke(
-                    state, config={"recursion_limit": 2 * settings.max_model_calls + 1},
-                )
+                # Only our explicit, filtered spans may leave the process. Environment
+                # flags must not enable LangGraph's automatic full-State recording.
+                with tracing_context(enabled=False, parent=False):
+                    state = await graph.ainvoke(
+                        state, config={"recursion_limit": 2 * settings.max_model_calls + 1},
+                    )
     except BaseException:
         # Preserve cancellation/configuration exceptions without logging their text.
         # There is no completed record if execution did not return a final State.
         recorder.emit("run.aborted", stage="runtime", error_code="run_interrupted")
         recorder.close()
+        tracer.finish(error_code="run_interrupted")
+        await tracer.close()
         raise
 
     if recorder.failed:
@@ -141,4 +152,6 @@ async def run_agent(
     state["log_complete"] = recorder.close()
     if not state["log_complete"]:
         state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+    tracer.finish(state)
+    await tracer.close()
     return state

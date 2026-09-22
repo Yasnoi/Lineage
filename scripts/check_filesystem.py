@@ -15,14 +15,14 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
-from check_react import LocalClient, audit_recording, call, counts, message, outputs, response
+from check_react import LocalClient, audit_recording, call, counts, message, outputs, read_events, response
 from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.entrypoints import cli
 from lineage_agent.tools.filesystem import directory
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 from lineage_agent.tools.filesystem.paths import bind_project_root, resolve_project_path
-from lineage_agent.tools.types import ToolArgumentError
+from lineage_agent.tools.types import TOOL_ARGUMENT_REASONS, ToolArgumentError
 
 
 CHECK_ID = str(uuid4())
@@ -256,7 +256,7 @@ async def check_limits(root):
             raise AssertionError("invalid directory limit accepted")
 
 
-async def rejected_then_success(root, scenario, *, path=None, arguments=None, attempts=2, expected_code="invalid_arguments", outcome="rejected"):
+async def rejected_then_success(root, scenario, *, path=None, arguments=None, attempts=2, expected_code="invalid_arguments", outcome="rejected", expected_reason=None):
     requested = [directory_call("fs_bad", path, arguments=arguments), directory_call("fs_good", ".")]
     real_scandir = os.scandir
     scanned = []
@@ -277,6 +277,20 @@ async def rejected_then_success(root, scenario, *, path=None, arguments=None, at
     assert [item["call_id"] for item in outputs(state)] == ["fs_bad", "fs_good"]
     assert scanned == [root], scanned
     assert len(observed) == attempts
+    if expected_reason is not None:
+        diagnostics = [
+            event for event in read_events(state)
+            if event.get("call_id") == "fs_bad"
+            and event["event"] in ("tool.rejected", "tool.result_created")
+        ]
+        assert len(diagnostics) == 2
+        for event in diagnostics:
+            assert event["reason_code"] == expected_reason
+            assert event["reason_message"] == TOOL_ARGUMENT_REASONS[expected_reason]
+        assert first == {
+            "ok": False,
+            "error": {"code": "invalid_arguments", "message": "工具参数未通过执行器校验。"},
+        }
     return state, client, observed
 
 
@@ -291,7 +305,10 @@ async def check_arguments(root):
         ("malformed_json", '{"path":', 1),
         ("non_object", '["."]', 1),
     ):
-        await rejected_then_success(root, scenario, arguments=arguments, attempts=attempts)
+        await rejected_then_success(
+            root, scenario, arguments=arguments, attempts=attempts,
+            expected_reason="invalid_argument_shape" if attempts == 2 else None,
+        )
 
 
 async def check_paths(root, sibling):
@@ -309,15 +326,26 @@ async def check_paths(root, sibling):
         ("reserved_device_nested", "child private/COM1.txt"),
         ("trailing_dot", "file."), ("trailing_space", "file "),
     ]
+    non_relative = {
+        "absolute_neighbor", "posix_absolute", "drive_absolute", "drive_relative",
+        "unc", "device", "device_namespace", "rooted_windows",
+    }
     for scenario, value in rejected:
-        await rejected_then_success(root, scenario, path=value)
+        reason = (
+            "empty_path" if scenario == "empty_path"
+            else "non_relative_path" if scenario in non_relative
+            else "disallowed_path_component"
+        )
+        await rejected_then_success(root, scenario, path=value, expected_reason=reason)
     for scenario, path in (
         ("missing_target", "missing_private"), ("literal_tilde", "~"),
         ("literal_environment_percent", "%USERPROFILE%"), ("literal_environment_dollar", "$HOME"),
     ):
         # Literals are not expanded. These names do not exist inside the fixture.
         await rejected_then_success(root, scenario, path=path, outcome="failed", expected_code="execution_error")
-    await rejected_then_success(root, "file_target", path="文件 private.txt")
+    await rejected_then_success(
+        root, "file_target", path="文件 private.txt", expected_reason="target_not_directory"
+    )
     assert bind_project_root(root) == root
     assert resolve_project_path(root, "文件 private.txt") == root / "文件 private.txt", "shared path rules must also accept files"
 
@@ -399,9 +427,15 @@ async def check_links(root, sibling):
             for index, (link, kind, is_dir) in enumerate(created):
                 assert entries[link.name] == {"name": link.name, "path": link.name, "type": kind}
                 assert str(sibling) not in json.dumps(result)
-                await rejected_then_success(root, f"{kind}_{index}_direct", path=link.name)
+                await rejected_then_success(
+                    root, f"{kind}_{index}_direct", path=link.name,
+                    expected_reason="link_or_reparse_forbidden",
+                )
                 if is_dir:
-                    await rejected_then_success(root, f"{kind}_{index}_intermediate", path=link.name + "/OUTSIDE_PRIVATE.txt")
+                    await rejected_then_success(
+                        root, f"{kind}_{index}_intermediate", path=link.name + "/OUTSIDE_PRIVATE.txt",
+                        expected_reason="link_or_reparse_forbidden",
+                    )
                 candidates = [link]
                 if is_dir and "outside" in link.name:
                     # This target exists and is a directory: missing/file rejection

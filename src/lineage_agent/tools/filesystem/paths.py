@@ -20,7 +20,9 @@ def _check_components(path: Path) -> os.stat_result:
     for component in (*reversed(path.parents), path):
         info = component.lstat()
         if is_link_or_reparse(info):
-            raise ToolArgumentError("不允许通过链接或重解析点访问项目目录。")
+            raise ToolArgumentError(
+                "不允许通过链接或重解析点访问项目目录。", reason_code="link_or_reparse_forbidden"
+            )
     return info
 
 
@@ -42,10 +44,10 @@ def bind_project_root(root: str | Path) -> Path:
 
 def _relative_parts(value: str) -> list[str]:
     if not isinstance(value, str) or not value:
-        raise ToolArgumentError("path 必须是非空项目内相对路径。")
+        raise ToolArgumentError("path 必须是非空项目内相对路径。", reason_code="empty_path")
     windows_path = PureWindowsPath(value)
     if windows_path.drive or windows_path.root:
-        raise ToolArgumentError("path 必须是项目内相对路径。")
+        raise ToolArgumentError("path 必须是项目内相对路径。", reason_code="non_relative_path")
     parts: list[str] = []
     for part in value.replace("\\", "/").split("/"):
         if part in ("", "."):
@@ -57,7 +59,7 @@ def _relative_parts(value: str) -> list[str]:
             or any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in part)
             or PureWindowsPath(part).is_reserved()
         ):
-            raise ToolArgumentError("path 包含不允许的路径组件。")
+            raise ToolArgumentError("path 包含不允许的路径组件。", reason_code="disallowed_path_component")
         parts.append(part)
     return parts
 
@@ -72,5 +74,5 @@ def resolve_project_path(root: Path, path: str) -> Path:
     _check_components(target)
     resolved = target.resolve(strict=True)
     if not resolved.is_relative_to(root):
-        raise ToolArgumentError("path 超出本次绑定的项目目录。")
+        raise ToolArgumentError("path 超出本次绑定的项目目录。", reason_code="outside_project_root")
     return resolved

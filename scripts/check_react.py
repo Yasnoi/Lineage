@@ -18,7 +18,8 @@ from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, generate_response
 from lineage_agent.recording.recorder import RunRecorder
-from lineage_agent.tools.types import ToolArgumentError
+from lineage_agent.tools.execution import execute_calls
+from lineage_agent.tools.types import TOOL_ARGUMENT_REASONS, ToolArgumentError
 
 
 CHECK_ID = str(uuid4())
@@ -717,6 +718,130 @@ async def check_safe_summaries():
         assert secret not in Path(item["log_path"]).read_text(encoding="utf-8")
 
 
+async def check_safe_rejection_reasons():
+    secret = "FORBIDDEN_REJECTION_TEXT_79B12"
+    for reason, expected in (
+        ("target_not_directory", "target_not_directory"),
+        (secret, "argument_validation_failed"),
+        ([secret], "argument_validation_failed"),
+        (None, "argument_validation_failed"),
+    ):
+        async def reject(name, arguments):
+            failure = ToolArgumentError(secret)
+            # Even a custom executor replacing the attribute cannot add raw text.
+            failure.reason_code = reason
+            raise failure
+
+        state, _ = await run(
+            [response(call("safe_rejection")), response(message())],
+            tools=[TOOL], execute_tool=reject,
+        )
+        counts(state, 2, 1, 1)
+        assert state["tool_outcomes"] == {
+            "succeeded": 0, "rejected": 1, "failed": 0, "skipped": 0,
+        }
+        assert json.loads(outputs(state)[0]["output"]) == {
+            "ok": False,
+            "error": {"code": "invalid_arguments", "message": "工具参数未通过执行器校验。"},
+        }
+        diagnostics = [
+            event for event in read_events(state)
+            if event["event"] in ("tool.rejected", "tool.result_created")
+        ]
+        assert len(diagnostics) == 2
+        for event in diagnostics:
+            assert event["reason_code"] == expected
+            assert event["reason_message"] == TOOL_ARGUMENT_REASONS[expected]
+        assert secret not in Path(state["log_path"]).read_text(encoding="utf-8")
+    assert ToolArgumentError(secret, reason_code=secret).reason_code == "argument_validation_failed"
+
+
+async def check_tool_trace_hooks():
+    class Tracer:
+        def __init__(self):
+            self.events = []
+
+        def tool_start(self, request, **metadata):
+            token = request["call_id"]
+            self.events.append(("start", token, metadata))
+            return token
+
+        def tool_end(self, token, **details):
+            self.events.append(("end", token, details))
+
+        def tool_skipped(self, request, **details):
+            self.events.append(("skipped", request["call_id"], details))
+
+    requests = [
+        call("unknown", name="not_available"), call("parsing", arguments="not-json"),
+        call("validation", arguments='{"key":42}'),
+        call("failure", arguments='{"key":"fail"}'), call("success"),
+    ]
+
+    async def executor(name, arguments):
+        if arguments.get("key") == "fail":
+            raise RuntimeError("untrusted tracer-hook failure text")
+        return await fixed_tool(name, arguments)
+
+    expected = await execute_calls(requests, [TOOL], executor)
+    tracer = Tracer()
+    actual = await execute_calls(requests, [TOOL], executor, tracer=tracer, step_id="step-test")
+    assert actual == expected
+    assert [(kind, identifier) for kind, identifier, _ in tracer.events] == [
+        (kind, request["call_id"]) for request in requests for kind in ("start", "end")
+    ]
+    for index, (start, end) in enumerate(zip(tracer.events[::2], tracer.events[1::2]), 1):
+        assert start[2] == {"step_id": "step-test", "request_index": index}
+        assert end[2]["outcome"] == (
+            "succeeded" if index == 5 else "failed" if index == 4 else "rejected"
+        )
+        assert end[2]["output"] == json.loads(actual["output_items"][index - 1]["output"])
+    assert tracer.events[5][2]["reason_code"] == "argument_validation_failed"
+
+    tracer = Tracer()
+    with recording_failure("tool.started"):
+        recorder = RunRecorder(CHECK_DIR)
+        try:
+            actual = await execute_calls(
+                [call("unstarted"), call("remaining")], [TOOL], fixed_tool,
+                recorder=recorder, tracer=tracer,
+            )
+        finally:
+            recorder.close()
+    assert actual["tool_calls"] == 0 and actual["output_items"] == []
+    assert actual["tool_outcomes"] == {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 2}
+    assert [(kind, identifier) for kind, identifier, _ in tracer.events] == [
+        ("start", "unstarted"), ("end", "unstarted"), ("skipped", "remaining"),
+    ]
+    assert tracer.events[1][2]["output"] is None
+    assert tracer.events[1][2]["outcome"] == "skipped"
+    assert tracer.events[1][2]["reason_code"] == "logging_error"
+
+    for event_name, first, outcome, attempts in (
+        ("tool.succeeded", call("first"), "succeeded", 1),
+        ("tool.result_created", call("first"), "succeeded", 1),
+        ("tool.rejected", call("first", name="not_available"), "rejected", 0),
+        ("tool.failed", call("first", arguments='{"key":"fail"}'), "failed", 1),
+    ):
+        tracer = Tracer()
+        with recording_failure(event_name):
+            recorder = RunRecorder(CHECK_DIR)
+            try:
+                actual = await execute_calls(
+                    [first, call("remaining")], [TOOL], executor, recorder=recorder, tracer=tracer,
+                )
+            finally:
+                recorder.close()
+        assert actual["tool_calls"] == attempts and len(actual["output_items"]) == 1
+        assert actual["tool_outcomes"][outcome] == 1
+        assert actual["tool_outcomes"]["skipped"] == 1
+        assert [(kind, identifier) for kind, identifier, _ in tracer.events] == [
+            ("start", "first"), ("end", "first"), ("skipped", "remaining"),
+        ]
+        assert tracer.events[1][2]["outcome"] == outcome
+        assert tracer.events[1][2]["output"] == json.loads(actual["output_items"][0]["output"])
+
+
 class FaultyFile:
     """Inject I/O errors and retain only safe metadata about failed operations."""
 
@@ -980,7 +1105,8 @@ def main():
         check_multiple_requests_and_context, check_limits, check_tool_errors,
         check_model_failures, check_usage_gaps_and_run_isolation,
         check_failure_history_and_final_display, check_protocol_protection,
-        check_nested_and_concurrent_isolation, check_safe_summaries,
+        check_nested_and_concurrent_isolation, check_safe_summaries, check_safe_rejection_reasons,
+        check_tool_trace_hooks,
         check_recording_failures, check_mixed_batches_and_return_types,
         check_duplicate_argument_keys, check_failure_event_recording_failures,
     )

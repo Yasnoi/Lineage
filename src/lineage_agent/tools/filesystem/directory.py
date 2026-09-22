@@ -63,11 +63,19 @@ def create_directory_executor(root: str | Path, *, max_entries: int = 100) -> To
             or set(arguments) != {"path"}
             or not isinstance(arguments["path"], str)
         ):
-            raise ToolArgumentError("list_directory 仅接受一个字符串字段 path。")
+            raise ToolArgumentError(
+                "list_directory 仅接受一个字符串字段 path。", reason_code="invalid_argument_shape"
+            )
         target = resolve_project_path(project_root, arguments["path"])
         info = target.lstat()
-        if is_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
-            raise ToolArgumentError("path 必须指向不经过链接的项目内目录。")
+        if is_link_or_reparse(info):
+            raise ToolArgumentError(
+                "path 必须指向不经过链接的项目内目录。", reason_code="link_or_reparse_forbidden"
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            raise ToolArgumentError(
+                "path 必须指向不经过链接的项目内目录。", reason_code="target_not_directory"
+            )
         relative = target.relative_to(project_root)
         entries = []
         truncated = False

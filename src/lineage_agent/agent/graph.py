@@ -1,6 +1,6 @@
 """Orchestrate one bounded ReAct loop with injected model and tool access."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -12,6 +12,9 @@ from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import summarize_value, tool_identity
 from lineage_agent.tools.execution import execute_calls
 from lineage_agent.tools.types import ToolExecutor
+
+if TYPE_CHECKING:
+    from lineage_agent.recording.tracing import RunTrace
 
 
 def _accumulate_usage(totals: UsageTotals, usage: TokenUsage | None) -> UsageTotals:
@@ -37,6 +40,7 @@ def build_graph(
     execute_tool: ToolExecutor | None = None,
     max_model_calls: int = 5,
     recorder: RunRecorder | None = None,
+    tracer: "RunTrace | None" = None,
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
@@ -64,6 +68,8 @@ def build_graph(
             return {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE}
 
         failure: tuple[str, str] | None = None
+        if tracer is not None:
+            tracer.set_model_step(step_id, state["model_calls"] + 1)
         try:
             result = await call_model(state["input"])
         except ModelError as exc:
@@ -144,8 +150,20 @@ def build_graph(
                     "tool.skipped", step_id, "model",
                     **tool_identity(call, index), stage="routing", reason=reason,
                 )
+                if tracer is not None:
+                    tracer.tool_skipped(
+                        call, step_id=step_id, request_index=index, reason=reason,
+                    )
         if recorder is not None and recorder.failed:
             update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+        if tracer is not None:
+            trace_failure = failure
+            if trace_failure is None and recorder is not None and recorder.failed:
+                trace_failure = ("logging_error", "recording")
+            tracer.model_complete(
+                error_code=trace_failure[0] if trace_failure else None,
+                stage=trace_failure[1] if trace_failure else None,
+            )
         return update
 
     async def tools_node(state: AgentState) -> dict[str, Any]:
@@ -155,6 +173,7 @@ def build_graph(
         batch = await execute_calls(
             result["tool_calls"], available_tools, execute_tool,
             recorder=recorder, step_id=step_id,
+            tracer=tracer,
         )
         update: dict[str, Any] = {
             "input": batch["output_items"],

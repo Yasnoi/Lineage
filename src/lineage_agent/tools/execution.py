@@ -2,7 +2,7 @@
 
 import json
 import math
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from lineage_agent.models.types import FunctionCall, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
@@ -16,7 +16,11 @@ from lineage_agent.tools.types import (
     ToolBatchResult,
     ToolExecutor,
     ToolOutcomes,
+    safe_tool_argument_reason,
 )
+
+if TYPE_CHECKING:
+    from lineage_agent.recording.tracing import RunTrace
 
 
 def _reject_constant(value: str) -> NoReturn:
@@ -51,6 +55,7 @@ async def execute_calls(
     *,
     recorder: RunRecorder | None = None,
     step_id: str | None = None,
+    tracer: "RunTrace | None" = None,
 ) -> ToolBatchResult:
     """Recover from tool errors; stop remaining calls if their record fails."""
     available_tools = {
@@ -70,7 +75,7 @@ async def execute_calls(
             return True
         return recorder.emit(event, step_id=step_id, node="tools", **details)
 
-    def skip_remaining(first_index: int) -> None:
+    def skip_remaining(first_index: int, *, first_traced: bool = False) -> None:
         outcomes["skipped"] += len(calls) - first_index
         for index in range(first_index, len(calls)):
             record(
@@ -80,10 +85,20 @@ async def execute_calls(
                 reason="logging_error",
                 error_code="logging_error",
             )
+            if tracer is not None and not (first_traced and index == first_index):
+                tracer.tool_skipped(
+                    calls[index], step_id=step_id, request_index=index + 1,
+                    reason="logging_error",
+                )
 
     for index, call in enumerate(calls):
+        token = (
+            tracer.tool_start(call, step_id=step_id, request_index=index + 1)
+            if tracer is not None else None
+        )
         identity = tool_identity(call, index + 1)
         arguments_summary = summarize_value(call["arguments"])
+        reason_code = reason_message = None
         outcome = "rejected"
         stage = "name_validation"
         if call["name"] not in available_tools:
@@ -116,7 +131,12 @@ async def execute_calls(
                         stage=stage,
                         arguments_summary=arguments_summary,
                     ):
-                        skip_remaining(index)
+                        if tracer is not None:
+                            tracer.tool_end(
+                                token, output=None, outcome="skipped", stage=stage,
+                                reason_code="logging_error", reason_message=LOG_FAILURE_MESSAGE,
+                            )
+                        skip_remaining(index, first_traced=True)
                         error = LOG_FAILURE_MESSAGE
                         break
                     tool_calls += 1
@@ -124,22 +144,39 @@ async def execute_calls(
                         result = await execute_tool(call["name"], arguments)
                         if not isinstance(result, str):
                             raise TypeError("Tool executors must return a string.")
-                    except ToolArgumentError:
+                    except ToolArgumentError as exc:
                         stage = "argument_validation"
+                        reason_code, reason_message = safe_tool_argument_reason(
+                            getattr(exc, "reason_code", None)
+                        )
                         output = _error("invalid_arguments", "工具参数未通过执行器校验。")
                     except Exception:
                         outcome = "failed"
                         output = _error("execution_error", "工具执行失败。")
+                    except BaseException:
+                        if tracer is not None:
+                            tracer.tool_end(
+                                token, output=_error("tool_interrupted", "工具执行被中断。"),
+                                outcome="failed", stage="execution",
+                            )
+                        raise
                     else:
                         outcome = "succeeded"
                         output = {"ok": True, "result": result}
 
         outcomes[outcome] += 1
+        if tracer is not None:
+            tracer.tool_end(
+                token, output=output, outcome=outcome, stage=stage,
+                reason_code=reason_code, reason_message=reason_message,
+            )
         details = {**identity, "stage": stage, "arguments_summary": arguments_summary}
         if output["ok"]:
             details["result_summary"] = summarize_value(output["result"])
         else:
             details["error_code"] = output["error"]["code"]
+        if reason_code is not None:
+            details.update(reason_code=reason_code, reason_message=reason_message)
         outcome_recorded = record(f"tool.{outcome}", **details)
 
         # Creating a protocol output is independent of recording execution success.
@@ -159,6 +196,8 @@ async def execute_calls(
         }
         if not output["ok"]:
             result_details["error_code"] = output["error"]["code"]
+        if reason_code is not None:
+            result_details.update(reason_code=reason_code, reason_message=reason_message)
         result_recorded = record("tool.result_created", **result_details)
         if not outcome_recorded or not result_recorded:
             skip_remaining(index + 1)

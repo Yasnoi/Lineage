@@ -56,6 +56,48 @@ CLI 仅保留一个用户输入参数，将最终模型回答写入 stdout，将
 
 SDK 自动重试已关闭，不使用服务端会话或 `previous_response_id`。每次请求都使用本地当前上下文。
 
+## 可选 LangSmith Tracing
+
+Tracing 用于在 LangSmith 网页查看运行、模型请求和逐条工具处理记录，不需要 Studio 或 Agent Server。默认关闭；关闭时不会创建 LangSmith 客户端或访问其服务，也不要求 LangSmith 账号或密钥。
+
+先在 [LangSmith](https://smith.langchain.com) 注册或登录账号，选择对应 Workspace，在设置中创建 API key。把以下配置加入本机 `.env`；LangSmith 密钥与模型 `API_KEY` 是两个独立凭据：
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-langsmith-api-key
+LANGSMITH_PROJECT=lineage-agent-dev
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_WORKSPACE_ID=
+```
+
+上述 endpoint 对应 GCP US。其他区域使用账号对应的官方 API endpoint，例如 GCP EU 为 `https://eu.api.smith.langchain.com`；区域必须与账号匹配。需要指定 Workspace（尤其密钥可访问多个 Workspace）时填写其 ID。未填写时不继承本机 LangSmith profile 的 Workspace。配置沿用 dotenv 规则：已有进程环境变量优先。
+
+启用后仍使用原命令：
+
+```powershell
+uv run lineage-agent "请列举项目根目录，只报告实际看到的条目"
+```
+
+在网页的 Tracing Projects 中打开配置的项目，按 metadata 中的 `run_id` 筛选 CLI 显示的运行标识。根记录与本地运行使用相同 UUID；模型记录包含 `step_id` 和 `model_call`，每条工具记录包含 `step_id`、`call_id` 和批内 `request_index`，可与 JSONL 对照。工具拒绝和失败标为错误，未执行请求标为 `skipped`；生成了协议结果不等于工具执行成功。模型记录保留可取得的 token usage，缺失值不会补零；兼容端点不保证提供 usage 或可计算的价格。
+
+关闭时将 `LANGSMITH_TRACING` 设为 `false`，并检查进程环境中是否存在覆盖值。发行给其他用户时保留此默认值，只提交 `.env.example`；不附带真实 `.env`、账号凭据或 `logs/`，也不依赖开发者本机 profile。
+
+### 上传范围
+
+开启即允许把本次对话与模型回复的可读文本、模型名称、usage、运行统计和时间上传到指定项目。目录工具允许上传 `path` 参数及返回的相对路径、条目名称/类型、条目上限与截断标志。模型上下文中重复出现的工具参数和结果使用相同过滤规则；未知工具、未知字段、无效 JSON 只保留摘要。超限数据明确标注截断，网页显示不一定包含完整输入。
+
+上传前在独立副本中移除已知凭据、掩码常见凭据字段和文本格式、替换绝对项目根路径。完整 State、原始响应对象、reasoning 内容、供应商扩展、配置环境、异常堆栈和文件附件不上传。目录工具不会读取文件正文；主动粘贴进对话的文本仍属于对话上传范围。过滤不能判断所有业务信息是否敏感，开启前应确认对话和文件名可以上传。
+
+追踪文本最多保留 4,000 字符、列表最多 128 项，每条上传记录最多 64 KiB；超过限制时留下截断标记。这些规则独立于 JSONL 摘要，不修改模型实际输入、工具参数、结果或 State。LangGraph 的自动 State 追踪在运行期间关闭，只提交应用显式构造的允许字段。
+
+### 故障与收尾
+
+每次运行使用有界队列和单个后台 daemon 线程发送已过滤记录。SDK 自动批次与上传重试关闭；连接和读取超时分别为 1 秒和 2 秒。异常、队列满或过滤失败仅输出固定安全提示，不改变 Agent 结果、退出码或调用次数，不触发模型/工具重试；JSONL 原有故障即停止策略保持不变。
+
+运行结束、异常或取消时最多等待 5 秒收尾，超时后不再等待，并提示追踪可能不完整。进程崩溃或强制终止可能丢失未上传记录。CLI 正常完成、HTTP 提交成功或队列排空都不代表远端记录已经完整可见，应在网页核对根记录及各个子记录。配置错误或不支持的 SDK 后台上传开关会安全关闭本次追踪。
+
+官方参考：[LangGraph 追踪](https://docs.langchain.com/langsmith/trace-with-langgraph)、[数据过滤](https://docs.langchain.com/langsmith/mask-inputs-outputs)、[显式记录](https://docs.langchain.com/langsmith/trace-with-api)、[LLM 输入输出与 usage](https://docs.langchain.com/langsmith/log-llm-trace)。
+
 ## 模块职责
 
 ```text
@@ -78,7 +120,9 @@ src/lineage_agent/
 │       └── directory.py  # 目录工具 Schema、字段校验和直接子项列举
 ├── recording/
 │   ├── recorder.py       # 每次运行的 JSONL 文件、事件和步骤标识
-│   └── summaries.py      # 确定性的参数与结果摘要
+│   ├── summaries.py      # 确定性的参数与结果摘要
+│   ├── tracing.py        # 可选追踪、关联和有限后台上传
+│   └── trace_data.py     # 上传白名单与数据清洗
 └── config/
     └── settings.py       # dotenv 加载与配置校验
 ```
@@ -216,6 +260,8 @@ state = asyncio.run(run_agent(
 
 日志不属于可恢复检查点，也不提供进程崩溃后的任务恢复或写入持久性保证。
 
+工具拒绝另含 `reason_code` 和固定 `reason_message`，例如 `target_not_directory`、`link_or_reparse_forbidden`、`non_relative_path`。这些是应用诊断，关闭追踪也保留；未知原因码使用安全默认值，不记录异常原文，也不改变传回模型的 `invalid_arguments` 协议结果。旧日志未保存的信息不能据此恢复。
+
 ## 独立验证
 
 从项目根目录执行：
@@ -230,8 +276,14 @@ uv run --locked python scripts/verify_function_calling.py
 # 真实临时目录与确定性模型：目录边界、截断、失败和实际回传
 uv run --locked python scripts/check_filesystem.py
 
+# 确定性追踪检查：真实 SDK 序列化、替身 HTTP、清洗和 CLI 有限退出
+uv run --locked python scripts/check_tracing.py
+
 # 当前 .env 端点：在非敏感临时目录中列举根目录、子目录并回答
 uv run --locked python scripts/verify_directory.py
+
+# 已配置 LangSmith 后：非敏感临时目录、真实模型、远端 Trace 查询
+uv run --locked python scripts/verify_tracing.py
 ```
 
 验证代码保留在独立脚本中，生产模块不导入脚本，CLI 不增加验证参数。`check_react.py` 和 `verify_function_calling.py` 自带临时固定结果工具；目录检查使用生产目录工具和真实临时目录。确定性检查使用标准库断言和模型替身，不需要测试框架或真实凭据。真实固定结果验证需至少两次模型调用额度；目录验证需至少三次额度，检查随机临时文件路径进入最终回答，不要求固定的实际调用次数，也不将一次回答视为具备代码理解能力。
@@ -243,6 +295,8 @@ uv run --locked python scripts/verify_directory.py
 目录检查覆盖 Unicode 名称、上下级目录、空目录、条目上限、参数及路径拒绝、同批失败后继续、不同根目录运行隔离、配置和 CLI。权限与中途 I/O 故障使用标注的注入；Windows symlink/junction 尝试创建真实样例，无法构造时单独报告跳过原因。工具真实返回值与后续 SDK 请求逐项比对，日志关联和安全摘要分别核对。
 
 这两类结果分别报告，确定性检查不能代替真实端点的 Function Calling 兼容性验证。
+
+`check_tracing.py` 不使用真实凭据或网络，核对上传载荷、同批逐条记录、开关前后的业务结果与统计，以及连接失败、HTTP 错误、初始化/清洗失败、队列溢出、取消和上传卡住时的 CLI 退出。`verify_tracing.py` 使用 `.env` 中的真实模型与 LangSmith 配置，仅访问临时样例目录；它查询远端记录、输出私有 Trace 链接和本地运行标识，并分别报告同批请求、拒绝是否在该次真实运行中出现。之后仍需登录网页核对参数、结果、调用关联和耗时。未执行该脚本或网页核对时，不应声称真实追踪已验收。
 
 当前只提供目录直接子项列举，不实现文本读取、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。
 
