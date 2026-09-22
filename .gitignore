@@ -12,3 +12,5 @@ docs/
 agents/
 AGENTS.md
 .idea/
+
+logs/

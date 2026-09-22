@@ -5,7 +5,20 @@ import asyncio
 import sys
 
 from lineage_agent.agent.runtime import run_agent
+from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, load_settings
+
+
+def format_run_summary(state: AgentState) -> str:
+    """Show program-recorded facts independently of the model's answer."""
+    outcomes = state["tool_outcomes"]
+    completeness = "完整" if state["log_complete"] else "不完整"
+    return (
+        f"运行标识：{state['run_id']}\n"
+        f"工具处理：成功 {outcomes['succeeded']}，拒绝 {outcomes['rejected']}，"
+        f"失败 {outcomes['failed']}，未执行 {outcomes['skipped']}\n"
+        f"运行日志（{completeness}）：{state['log_path']}"
+    )
 
 
 def main() -> int:
@@ -29,6 +42,7 @@ def main() -> int:
         print("已取消。", file=sys.stderr)
         return 130
 
+    print(format_run_summary(state), file=sys.stderr)
     if state["stop_reason"] == "completed" and state["result"] is not None:
         print(state["result"]["text"])
         return 0

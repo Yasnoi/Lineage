@@ -11,8 +11,19 @@ class ToolArgumentError(ValueError):
     """The executor rejected the arguments for a known tool."""
 
 
+class ToolOutcomes(TypedDict):
+    """Request dispositions, distinct from attempts to enter the executor."""
+
+    succeeded: int
+    rejected: int
+    failed: int
+    skipped: int
+
+
 class ToolBatchResult(TypedDict):
     """Protocol outputs and actual executor attempts for one batch."""
 
     output_items: list[dict[str, Any]]
     tool_calls: int
+    tool_outcomes: ToolOutcomes
+    error: str | None

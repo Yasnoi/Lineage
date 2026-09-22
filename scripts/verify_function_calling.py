@@ -36,10 +36,14 @@ async def verify():
 
     def report(label, state):
         print(f"{label}: {json.dumps({
+            'run_id': state['run_id'],
+            'log_path': state['log_path'],
+            'log_complete': state['log_complete'],
             'stop_reason': state['stop_reason'],
             'model_calls': state['model_calls'],
             'tool_requests': state['tool_requests'],
             'tool_calls': state['tool_calls'],
+            'tool_outcomes': state['tool_outcomes'],
             'last_usage': state['result']['usage'] if state['result'] else None,
             'usage_totals': state['usage_totals'],
         }, ensure_ascii=False)}")
@@ -53,6 +57,7 @@ async def verify():
     if (
         plain["stop_reason"] != "completed" or plain["model_calls"] != 1
         or plain["tool_requests"] != 0 or plain["tool_calls"] != 0
+        or not plain["log_complete"]
     ):
         raise AssertionError("真实端点无工具回归未通过。")
     print("PASS 真实端点无工具回归")
@@ -66,6 +71,7 @@ async def verify():
     if (
         state["stop_reason"] != "completed" or state["model_calls"] != 2
         or state["tool_requests"] != 1 or state["tool_calls"] != 1
+        or not state["log_complete"] or state["tool_outcomes"]["succeeded"] != 1
     ):
         raise AssertionError("真实端点未完成预期的两次模型调用、一次工具执行。")
     tool_outputs = [
@@ -76,6 +82,15 @@ async def verify():
     envelope = json.loads(tool_outputs[0]["output"])
     if envelope.get("ok") is not True or envelope["result"] not in state["result"]["text"]:
         raise AssertionError("最终回答未使用验证工具的固定返回结果。")
+    events = [
+        json.loads(line) for line in Path(state["log_path"]).read_text(encoding="utf-8").splitlines()
+    ]
+    created = [event["call_id"] for event in events if event["event"] == "tool.result_created"]
+    model_inputs = [
+        event["input_tool_result_call_ids"] for event in events if event["event"] == "model.started"
+    ]
+    if created != [tool_outputs[0]["call_id"]] or model_inputs != [[], created]:
+        raise AssertionError("运行日志未记录工具结果生成与后续模型请求的关联。")
     print("PASS 真实端点 Function Calling 与工具结果回传")
 
 

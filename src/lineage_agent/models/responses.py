@@ -1,6 +1,7 @@
 """Call an OpenAI-compatible Responses endpoint without graph dependencies."""
 
 import os
+from copy import deepcopy
 from typing import Any
 
 from openai import AsyncOpenAI, APIConnectionError, APIError, APIStatusError, APITimeoutError
@@ -13,9 +14,18 @@ from lineage_agent.models.types import ModelInput, ModelResult, TokenUsage, Tool
 class ModelError(RuntimeError):
     """A failed model attempt, optionally retaining its received response."""
 
-    def __init__(self, message: str, *, result: ModelResult | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: ModelResult | None = None,
+        code: str = "model_error",
+        stage: str = "model_request",
+    ) -> None:
         super().__init__(message)
         self.result = result
+        self.code = code
+        self.stage = stage
 
 
 def create_client(settings: ModelSettings) -> AsyncOpenAI:
@@ -54,16 +64,24 @@ async def generate_response(
         )
         return parse_response(response)
     except APITimeoutError as exc:
-        raise ModelError("模型请求超时，请检查连接或调整 TIMEOUT_SECONDS。") from exc
+        raise ModelError(
+            "模型请求超时，请检查连接或调整 TIMEOUT_SECONDS。", code="model_timeout"
+        ) from exc
     except APIConnectionError as exc:
-        raise ModelError("无法连接模型端点，请检查 BASE_URL 和网络连接。") from exc
+        raise ModelError(
+            "无法连接模型端点，请检查 BASE_URL 和网络连接。", code="connection_error"
+        ) from exc
     except APIStatusError as exc:
-        raise ModelError(f"模型端点返回 HTTP {exc.status_code}，请求失败。") from exc
+        raise ModelError("模型端点返回 HTTP 错误，请求失败。", code="http_error") from exc
     except APIError as exc:
         raise ModelError("模型请求失败，或端点返回了无法解析的响应。") from exc
     except (AttributeError, TypeError, ValueError) as exc:
         # Compatible endpoints may return malformed JSON or incomplete objects.
-        raise ModelError("模型端点返回的响应格式无效，无法读取完整回答。") from exc
+        raise ModelError(
+            "模型端点返回的响应格式无效，无法读取完整回答。",
+            code="invalid_response",
+            stage="response_validation",
+        ) from exc
 
 
 def _parse_usage(raw_usage: Any) -> TokenUsage | None:
@@ -86,15 +104,23 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
     """Parse one response without deciding whether to execute tools or finish."""
     try:
         raw = (
-            response
+            deepcopy(response)
             if isinstance(response, dict)
             else response.model_dump(mode="json", by_alias=True, exclude_unset=True)
         )
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ModelError("模型端点返回的响应格式无效，无法读取完整回答。") from exc
+        raise ModelError(
+            "模型端点返回的响应格式无效，无法读取完整回答。",
+            code="invalid_response",
+            stage="response_validation",
+        ) from exc
 
     if not isinstance(raw, dict):
-        raise ModelError("模型端点返回的响应格式无效，无法读取完整回答。")
+        raise ModelError(
+            "模型端点返回的响应格式无效，无法读取完整回答。",
+            code="invalid_response",
+            stage="response_validation",
+        )
 
     result: ModelResult = {
         "text": "",
@@ -105,14 +131,26 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
     }
     output = raw.get("output")
     if not isinstance(output, list):
-        raise ModelError("模型响应缺少有效的 output 列表。", result=result)
+        raise ModelError(
+            "模型响应缺少有效的 output 列表。",
+            result=result,
+            code="invalid_response",
+            stage="response_validation",
+        )
 
     texts: list[str] = []
     call_ids: set[str] = set()
-    protocol_error: str | None = None
+    protocol_error: tuple[str, str] | None = None
     for item in output:
         if not isinstance(item, dict):
-            protocol_error = "模型响应包含无效的协议项。"
+            protocol_error = protocol_error or (
+                "invalid_response", "模型响应包含无效的协议项。"
+            )
+            continue
+        if item.get("type") == "function_call_output":
+            protocol_error = protocol_error or (
+                "unexpected_tool_result", "模型响应包含未经应用执行的工具结果。"
+            )
             continue
         # Preserve all fields, including reasoning and endpoint-specific extensions.
         result["output_items"].append(item)
@@ -120,45 +158,69 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
             call_id = item.get("call_id")
             name = item.get("name")
             arguments = item.get("arguments")
+            if not isinstance(call_id, str) or not call_id.strip():
+                protocol_error = protocol_error or (
+                    "invalid_call_id", "模型工具请求缺少有效的 call_id，无法关联执行结果。"
+                )
+                continue
             if (
-                not isinstance(call_id, str)
-                or not call_id.strip()
-                or not isinstance(name, str)
+                not isinstance(name, str)
                 or not name.strip()
                 or not isinstance(arguments, str)
             ):
-                protocol_error = "模型工具请求缺少有效的 call_id、名称或参数字符串。"
+                protocol_error = protocol_error or (
+                    "invalid_response", "模型工具请求缺少有效的名称或参数字符串。"
+                )
                 continue
             result["tool_calls"].append(
                 {"call_id": call_id, "name": name, "arguments": arguments}
             )
             if call_id in call_ids:
-                protocol_error = "模型工具请求包含重复的 call_id，无法关联执行结果。"
+                protocol_error = protocol_error or (
+                    "invalid_call_id", "模型工具请求包含重复的 call_id，无法关联执行结果。"
+                )
             call_ids.add(call_id)
             if item.get("status") not in (None, "completed"):
-                protocol_error = "模型工具请求尚未完成，不能执行。"
+                protocol_error = protocol_error or (
+                    "incomplete_response", "模型工具请求尚未完成，不能执行。"
+                )
         elif item.get("type") == "message":
             content = item.get("content")
             if not isinstance(content, list):
-                protocol_error = "模型消息缺少有效的内容列表。"
+                protocol_error = protocol_error or (
+                    "invalid_response", "模型消息缺少有效的内容列表。"
+                )
                 continue
             if item.get("status") not in (None, "completed"):
-                protocol_error = "模型消息尚未完成，不能作为最终回答。"
+                protocol_error = protocol_error or (
+                    "incomplete_response", "模型消息尚未完成，不能作为最终回答。"
+                )
             for part in content:
                 if not isinstance(part, dict):
-                    protocol_error = "模型消息包含无效的内容项。"
+                    protocol_error = protocol_error or (
+                        "invalid_response", "模型消息包含无效的内容项。"
+                    )
                 elif part.get("type") == "output_text":
                     text = part.get("text")
                     if isinstance(text, str):
                         texts.append(text)
                     else:
-                        protocol_error = "模型消息中的文本格式无效。"
+                        protocol_error = protocol_error or (
+                            "invalid_response", "模型消息中的文本格式无效。"
+                        )
 
     result["text"] = "".join(texts)
     if raw.get("status") != "completed" or raw.get("error") is not None:
-        raise ModelError("模型响应未正常完成。", result=result)
+        raise ModelError(
+            "模型响应未正常完成。", result=result,
+            code="incomplete_response", stage="response_validation",
+        )
     if protocol_error is not None:
-        raise ModelError(protocol_error, result=result)
+        code, message = protocol_error
+        raise ModelError(message, result=result, code=code, stage="response_validation")
     if not result["text"].strip() and not result["tool_calls"]:
-        raise ModelError("模型没有返回文本回答或工具请求。", result=result)
+        raise ModelError(
+            "模型没有返回文本回答或工具请求。", result=result,
+            code="empty_response", stage="response_validation",
+        )
     return result

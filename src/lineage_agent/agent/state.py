@@ -4,6 +4,7 @@ from operator import add
 from typing import Annotated, Any, Literal, TypedDict
 
 from lineage_agent.models.types import ModelResult
+from lineage_agent.tools.types import ToolOutcomes
 
 
 class UsageTotals(TypedDict):
@@ -19,10 +20,14 @@ class AgentState(TypedDict):
     """Nodes append protocol items and replace the latest result and counters."""
 
     input: Annotated[list[dict[str, Any]], add]
+    run_id: str
+    log_path: str
+    log_complete: bool
     result: ModelResult | None
     model_calls: int
     tool_requests: int
     tool_calls: int
+    tool_outcomes: ToolOutcomes
     usage_totals: UsageTotals
     stop_reason: Literal["completed", "max_model_calls", "error"] | None
     error: str | None

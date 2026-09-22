@@ -21,6 +21,7 @@ class ModelSettings:
     model_name: str
     timeout_seconds: float = 60.0
     max_model_calls: int = 5
+    log_dir: Path = Path("logs")
 
     def __post_init__(self) -> None:
         if (
@@ -29,6 +30,12 @@ class ModelSettings:
             or self.max_model_calls <= 0
         ):
             raise ConfigurationError("MAX_MODEL_CALLS 必须是正整数。")
+        try:
+            if isinstance(self.log_dir, str) and not self.log_dir.strip():
+                raise ValueError("empty log directory")
+            object.__setattr__(self, "log_dir", Path(self.log_dir).resolve())
+        except (OSError, TypeError, ValueError) as exc:
+            raise ConfigurationError("LOG_DIR 必须是有效的非空目录路径。") from exc
 
 
 def load_settings(env_file: str | Path | None = None) -> ModelSettings:
@@ -72,9 +79,17 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     except ValueError as exc:
         raise ConfigurationError("MAX_MODEL_CALLS 必须是正整数。") from exc
 
+    log_dir_value = os.environ.get("LOG_DIR", "logs").strip()
+    if not log_dir_value:
+        raise ConfigurationError("LOG_DIR 必须是有效的非空目录路径。")
+    log_dir = Path(log_dir_value)
+    if not log_dir.is_absolute():
+        log_dir = dotenv_path.parent / log_dir
+
     return ModelSettings(
         base_url=base_url,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
         max_model_calls=max_model_calls,
+        log_dir=log_dir,
     )
