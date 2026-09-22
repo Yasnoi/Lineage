@@ -20,6 +20,7 @@ from langsmith import Client
 from urllib3.util import Retry
 
 from lineage_agent.config.settings import ModelSettings
+from lineage_agent.models.responses import MODEL_ERRORS
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE
 from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.types import safe_tool_argument_reason, safe_tool_execution_reason
@@ -36,12 +37,7 @@ _WARNINGS = {
     "overflow": "LangSmith 上传队列已满，部分追踪已丢弃；Agent 继续运行。",
     "timeout": "LangSmith 收尾等待超时，远端追踪可能不完整；已结束等待。",
 }
-_MODEL_ERRORS = {
-    "model_error", "model_timeout", "connection_error", "http_error",
-    "invalid_response", "unexpected_tool_result", "invalid_call_id",
-    "incomplete_response", "empty_response", "model_interrupted",
-    "duplicate_call_id", "logging_error",
-}
+_MODEL_ERRORS = set(MODEL_ERRORS) | {"model_interrupted", "logging_error"}
 _TOOL_ERRORS = {"unknown_tool", "invalid_arguments", "execution_error", "logging_error", "tool_interrupted"}
 _STAGES = {
     "model_request", "response_validation", "name_validation", "argument_parsing",
@@ -258,23 +254,28 @@ class RunTrace:
             sdk_logger.removeFilter(log_filter)
 
     @_safe
-    def set_model_step(self, step_id: str | None, model_call: int) -> None:
+    def set_model_step(self, step_id: str | None, model_call: int, *, remaining_model_calls=None, final_answer_call=False, read_budget=None) -> None:
         if self.enabled:
             if self._pending_model is not None:
                 self.model_complete(error_code="model_interrupted", stage="model_request")
             self._step_id = step_id
             self._model_call = model_call
+            self._allowances = {
+                "remaining_model_calls": remaining_model_calls,
+                "final_answer_call": final_answer_call, "read_budget": read_budget,
+            }
 
     @_safe
-    def model_start(self, model_name, input, tools) -> _Span | None:
+    def model_start(self, model_name, input, tools, *, instructions=None, tool_choice=None) -> _Span | None:
         if not self.enabled or self._closed or self._finished:
             return None
         return self._new_span(
             "OpenAI Responses", "llm",
-            self._sanitizer.model_inputs(model_name, input, tools),
+            self._sanitizer.model_inputs(model_name, input, tools, instructions=instructions, tool_choice=tool_choice),
             {"step_id": self._step_id, "model_call": self._model_call,
              "ls_provider": "openai", "ls_model_type": "chat",
              "ls_model_name": self._sanitizer.text(model_name),
+             **getattr(self, "_allowances", {}),
              "ls_invocation_params": {"use_responses_api": True}},
         )
 
@@ -378,17 +379,19 @@ class RunTrace:
         )
 
     @_safe
-    def finish(self, state=None, error_code=None) -> None:
+    def finish(self, state=None, error_code=None, *, read_budget=None) -> None:
         if not self.enabled or self._finished or self._closed:
             return
         if self._pending_model is not None:
             self.model_complete(error_code="model_interrupted", stage="model_request")
         self._finished = True
         self._root.payload["outputs"] = self._sanitizer.root_outputs(state)
+        self._root.payload["extra"]["metadata"]["read_budget"] = read_budget
         failed = bool(error_code) or (isinstance(state, dict) and state.get("stop_reason") == "error")
         stopped = isinstance(state, dict) and state.get("stop_reason") == "max_model_calls"
         if failed:
-            self._root.payload["error"] = error_code if error_code in {"logging_error", "run_interrupted"} else "agent_error"
+            code = error_code or (state.get("error_code") if isinstance(state, dict) else None)
+            self._root.payload["error"] = code if code in _MODEL_ERRORS | {"run_interrupted", "client_close_error"} else "agent_error"
         elif stopped:
             self._root.payload["error"] = "max_model_calls"
         self._root.payload["extra"]["metadata"]["outcome"] = (

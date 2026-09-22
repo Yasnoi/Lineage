@@ -54,12 +54,13 @@ async def verify():
         original_bytes = body.encode("utf-8")
         source = root / filename
         source.write_bytes(original_bytes)
-        if settings.text_max_bytes < len(original_bytes):
-            raise ConfigurationError("TEXT_MAX_BYTES 小于真实验证样例大小，请提高配置后再验证。")
+        if min(settings.text_max_bytes, settings.text_total_max_bytes) < len(original_bytes):
+            raise ConfigurationError("读取限额小于真实验证样例大小，请提高配置后再验证。")
 
         bound_executor = create_filesystem_executor(
             root, max_entries=settings.directory_max_entries,
             max_bytes=settings.text_max_bytes,
+            max_total_bytes=settings.text_total_max_bytes,
         )
         actual_results = []
 

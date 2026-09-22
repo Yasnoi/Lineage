@@ -114,7 +114,12 @@ class TraceSanitizer:
             result["path"] = self._path(decoded["path"])
         elif "path" in decoded:
             result["path"] = {"summary": summarize_value(decoded["path"])}
-        self._omissions(result, decoded, {"path"})
+        allowed = {"path"}
+        if name == "list_directory":
+            allowed.add("after")
+            if "after" in decoded and (decoded["after"] is None or isinstance(decoded["after"], str)):
+                result["after"] = self.text(decoded["after"]) if decoded["after"] is not None else None
+        self._omissions(result, decoded, allowed)
         return result
 
     def tool_inputs(self, call: dict[str, Any]) -> dict[str, Any]:
@@ -135,6 +140,9 @@ class TraceSanitizer:
             result["limit"] = value["limit"]
         if type(value.get("truncated")) is bool:
             result["truncated"] = value["truncated"]
+        for key in ("after", "next_after"):
+            if key in value and (value[key] is None or isinstance(value[key], str)):
+                result[key] = self.text(value[key]) if value[key] is not None else None
         entries = value.get("entries")
         if isinstance(entries, list):
             result["entries"] = []
@@ -152,7 +160,7 @@ class TraceSanitizer:
                 self._omissions(item, entry, {"name", "path", "type"})
                 result["entries"].append(item)
             self._omitted(result, "entries", len(entries), list(range(1, len(result["entries"]) + 1)))
-        self._omissions(result, value, {"path", "entries", "limit", "truncated"})
+        self._omissions(result, value, {"path", "entries", "limit", "truncated", "after", "next_after"})
         return result
 
     def _text_file(self, value: Any) -> dict[str, Any]:
@@ -404,9 +412,10 @@ class TraceSanitizer:
                     texts.append(content)
                 elif isinstance(content, list):
                     for part_index, part in enumerate(content):
-                        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text") and isinstance(part.get("text"), str):
+                        field = "refusal" if isinstance(part, dict) and part.get("type") == "refusal" else "text"
+                        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text", "refusal") and isinstance(part.get(field), str):
                             leaves.append((index, part_index))
-                            texts.append(part["text"])
+                            texts.append(part[field])
         # Match across every readable message before any item/part/text limit.
         cleaned = dict(zip(leaves, self._text_fragments(texts)))
         projected = []
@@ -436,9 +445,10 @@ class TraceSanitizer:
                     safe["content"] = []
                     part_indices = []
                     for part_index, part in enumerate(content):
-                        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text") and isinstance(part.get("text"), str):
+                        field = "refusal" if isinstance(part, dict) and part.get("type") == "refusal" else "text"
+                        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text", "refusal") and isinstance(part.get(field), str):
                             if len(safe["content"]) < _MAX_ITEMS:
-                                safe["content"].append({"type": part["type"], "text": cleaned[index, part_index]})
+                                safe["content"].append({"type": part["type"], field: cleaned[index, part_index]})
                                 part_indices.append(part_index + 1)
                     self._omitted(safe, "content", len(content), part_indices)
                 else:
@@ -470,8 +480,8 @@ class TraceSanitizer:
                 schema["type"] = "object"
             if type(parameters.get("additionalProperties")) is bool:
                 schema["additionalProperties"] = parameters["additionalProperties"]
-            if parameters.get("required") == ["path"]:
-                schema["required"] = ["path"]
+            if parameters.get("required") == ["path"] or tool["name"] == "list_directory" and parameters.get("required") == ["path", "after"]:
+                schema["required"] = list(parameters["required"])
             properties = parameters.get("properties")
             path = properties.get("path") if isinstance(properties, dict) else None
             if isinstance(path, dict):
@@ -482,14 +492,27 @@ class TraceSanitizer:
                     path_schema["minLength"] = path["minLength"]
                 self._omissions(path_schema, path, {"type", "minLength"})
                 schema["properties"] = {"path": path_schema}
+            after = properties.get("after") if isinstance(properties, dict) else None
+            if tool["name"] == "list_directory" and isinstance(after, dict):
+                after_schema: dict[str, Any] = {}
+                if after.get("type") == ["string", "null"]:
+                    after_schema["type"] = ["string", "null"]
+                if type(after.get("minLength")) is int and after["minLength"] >= 0:
+                    after_schema["minLength"] = after["minLength"]
+                self._omissions(after_schema, after, {"type", "minLength"})
+                schema.setdefault("properties", {})["after"] = after_schema
             self._omissions(schema, parameters, {"type", "properties", "required", "additionalProperties"})
             result["parameters"] = schema
         self._omissions(result, tool, {"type", "name", "parameters", "strict"})
         return result
 
-    def model_inputs(self, model_name: str, input: Any, tools: Any) -> dict[str, Any]:
+    def model_inputs(self, model_name: str, input: Any, tools: Any, *, instructions=None, tool_choice=None) -> dict[str, Any]:
         """Project Responses messages and nested tool envelopes before upload."""
         result: dict[str, Any] = {"model": self.text(model_name), **self._items(input, key="input")}
+        if isinstance(instructions, str):
+            result["instructions"] = self.text(instructions)
+        if tool_choice in ("none", "auto", "required"):
+            result["tool_choice"] = tool_choice
         if isinstance(tools, list) and tools:
             # Do not include arbitrary descriptions or schema extension values.
             result["tools"] = [self._tool_definition(tool) for tool in tools[:_MAX_ITEMS]]
@@ -507,6 +530,7 @@ class TraceSanitizer:
         if result is None:
             return {}
         output: dict[str, Any] = self._items(result.get("output_items"), key="output")
+        output["has_refusal"] = result.get("has_refusal") is True
         usage: dict[str, Any] = self._usage(result.get("usage"))
         raw = result.get("raw_response")
         raw_usage = raw.get("usage") if isinstance(raw, dict) else None
@@ -529,8 +553,18 @@ class TraceSanitizer:
             return {}
         result: dict[str, Any] = {}
         final = state.get("result")
-        if state.get("stop_reason") == "completed" and isinstance(final, dict) and isinstance(final.get("text"), str):
+        cleanup = state.get("cleanup_error")
+        completed = state.get("stop_reason") == "completed" or isinstance(cleanup, dict) and cleanup.get("previous_stop_reason") == "completed"
+        if completed and isinstance(final, dict) and isinstance(final.get("text"), str):
             result["text"] = self.text(final["text"])
+        if isinstance(final, dict):
+            result["has_refusal"] = final.get("has_refusal") is True
+        if isinstance(cleanup, dict) and cleanup.get("code") == "client_close_error":
+            previous = cleanup.get("previous_stop_reason")
+            result["cleanup_error"] = {
+                "code": "client_close_error",
+                "previous_stop_reason": previous if previous in ("completed", "max_model_calls", "error") else None,
+            }
         for key in ("model_calls", "tool_requests", "tool_calls"):
             if type(state.get(key)) is int and state[key] >= 0:
                 result[key] = state[key]
@@ -577,7 +611,8 @@ class TraceSanitizer:
         if not isinstance(value, dict):
             return value
         result = {key: cls._wire(item) for key, item in value.items()}
-        field = {"function_call": "arguments", "function_call_output": "output"}.get(value.get("type"))
+        kind = value.get("type")
+        field = {"function_call": "arguments", "function_call_output": "output"}.get(kind) if isinstance(kind, str) else None
         if field and isinstance(result.get(field), dict):
             result[field] = json.dumps(result[field], ensure_ascii=False, separators=(",", ":"))
         return result

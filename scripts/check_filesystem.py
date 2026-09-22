@@ -169,7 +169,7 @@ async def check_listing(root):
     assert all(item["path"] == item["name"] for item in first["entries"])
     assert second == {
         "path": "child private", "entries": [{"name": "nested.txt", "path": "child private/nested.txt", "type": "file"}],
-        "limit": 100, "truncated": False,
+        "limit": 100, "truncated": False, "after": None, "next_after": None,
     }
     assert client.requests[0]["tools"] == [DIRECTORY_TOOL]
     assert len(observed) == 2 and snapshot(root) == before
@@ -245,9 +245,9 @@ async def check_limits(root):
             )
         result = json.loads(decoded_results(state)[0]["result"])
         assert len(probes) == 1 and probes[0].closed
-        assert len(probes[0].yielded) == min(6, limit + 1)
+        assert len(probes[0].yielded) == 6
         assert result["limit"] == limit and result["truncated"] is expected_truncation
-        assert [item["name"] for item in result["entries"]] == sorted(probes[0].yielded[:limit], key=lambda name: (name.casefold(), name))
+        assert [item["name"] for item in result["entries"]] == sorted(probes[0].yielded, key=lambda name: (name.casefold(), name))[:limit]
     for invalid in (True, False, 0, -1, 1.5, "2", None):
         try:
             create_directory_executor(root, max_entries=invalid)
@@ -383,7 +383,8 @@ async def check_io_failures(root):
         counts(state, 2, 2, 2)
         assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 0, "failed": 1, "skipped": 0}
         first, second = decoded_results(state)
-        assert first == {"ok": False, "error": {"code": "execution_error", "message": "工具执行失败。"}}
+        assert first["ok"] is False and first["error"]["code"] == "execution_error"
+        assert first["error"]["reason_code"] == ("permission_denied" if scenario == "permission_injection" else "io_error")
         assert second["ok"] is True and "result" not in observed[0]
         assert calls == [root, root]
         assert all(probe.closed for probe in probes)

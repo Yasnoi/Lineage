@@ -25,8 +25,33 @@ class ModelSettings:
     project_root: Path | None = None
     directory_max_entries: int = 100
     text_max_bytes: int = 65536
+    text_total_max_bytes: int = 262144
 
     def __post_init__(self) -> None:
+        try:
+            if not isinstance(self.base_url, str) or not self.base_url.strip():
+                raise ValueError
+            base_url = self.base_url.strip()
+            parsed = urlsplit(base_url)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or any(char.isspace() or ord(char) < 32 for char in base_url)):
+                raise ValueError
+            parsed.port
+        except ValueError as exc:
+            raise ConfigurationError("BASE_URL 必须是包含有效主机名的 HTTP 或 HTTPS 地址。") from exc
+        if not isinstance(self.model_name, str) or not self.model_name.strip():
+            raise ConfigurationError("MODEL_NAME 必须是非空字符串。")
+        try:
+            valid_timeout = (
+                type(self.timeout_seconds) in (int, float)
+                and math.isfinite(self.timeout_seconds) and self.timeout_seconds > 0
+            )
+        except OverflowError:
+            valid_timeout = False
+        if not valid_timeout:
+            raise ConfigurationError("TIMEOUT_SECONDS 必须是有限正数。")
+        object.__setattr__(self, "base_url", base_url)
+        object.__setattr__(self, "model_name", self.model_name.strip())
         if (
             not isinstance(self.max_model_calls, int)
             or isinstance(self.max_model_calls, bool)
@@ -41,6 +66,8 @@ class ModelSettings:
             raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。")
         if type(self.text_max_bytes) is not int or self.text_max_bytes <= 0:
             raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。")
+        if type(self.text_total_max_bytes) is not int or self.text_total_max_bytes <= 0:
+            raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -69,31 +96,10 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
 
     base_url = os.environ.get("BASE_URL", "").strip()
     model_name = os.environ.get("MODEL_NAME", "").strip()
-    if not base_url:
-        raise ConfigurationError("请在 .env 或环境变量中设置 BASE_URL。")
-    if not model_name:
-        raise ConfigurationError("请在 .env 或环境变量中设置 MODEL_NAME。")
-
-    try:
-        parsed_url = urlsplit(base_url)
-        valid_url = (
-            parsed_url.scheme in {"http", "https"}
-            and bool(parsed_url.hostname)
-            and not any(character.isspace() for character in base_url)
-        )
-        # Accessing port also rejects malformed or out-of-range port values.
-        parsed_url.port
-    except ValueError:
-        valid_url = False
-    if not valid_url:
-        raise ConfigurationError("BASE_URL 必须是包含有效主机名的 HTTP 或 HTTPS 地址。")
-
     try:
         timeout_seconds = float(os.environ.get("TIMEOUT_SECONDS", "60"))
     except ValueError as exc:
         raise ConfigurationError("TIMEOUT_SECONDS 必须是有限正数。") from exc
-    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        raise ConfigurationError("TIMEOUT_SECONDS 必须是有限正数。")
 
     try:
         max_model_calls = int(os.environ.get("MAX_MODEL_CALLS", "5"))
@@ -109,6 +115,10 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         text_max_bytes = int(os.environ.get("TEXT_MAX_BYTES", "65536"))
     except ValueError as exc:
         raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。") from exc
+    try:
+        text_total_max_bytes = int(os.environ.get("TEXT_TOTAL_MAX_BYTES", "262144"))
+    except ValueError as exc:
+        raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。") from exc
 
     log_dir_value = os.environ.get("LOG_DIR", "logs").strip()
     if not log_dir_value:
@@ -131,4 +141,5 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         project_root=project_root,
         directory_max_entries=directory_max_entries,
         text_max_bytes=text_max_bytes,
+        text_total_max_bytes=text_total_max_bytes,
     )

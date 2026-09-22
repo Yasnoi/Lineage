@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import sys
 
-from lineage_agent.agent.runtime import run_agent
+from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, run_agent
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.tools.filesystem import directory
@@ -43,6 +43,7 @@ def main() -> int:
             execute_tool = create_filesystem_executor(
                 settings.project_root, max_entries=settings.directory_max_entries,
                 max_bytes=settings.text_max_bytes,
+                max_total_bytes=settings.text_total_max_bytes,
             )
             state = asyncio.run(
                 run_agent(
@@ -70,5 +71,9 @@ def main() -> int:
         )
         return 3
 
+    if (state.get("cleanup_error") or {}).get("previous_stop_reason") == "completed" and state["result"] is not None:
+        print(state["result"]["text"])
+    if state.get("cleanup_error") and state.get("error_code") != "client_close_error":
+        print(f"收尾失败：{CLIENT_CLOSE_MESSAGE}", file=sys.stderr)
     print(f"运行失败：{state['error'] or '未获得最终回答。'}", file=sys.stderr)
     return 1

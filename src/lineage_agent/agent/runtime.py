@@ -13,7 +13,10 @@ from lineage_agent.models.responses import create_client, generate_response
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.tracing import start_trace
-from lineage_agent.tools.types import ToolExecutor
+from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
+
+
+CLIENT_CLOSE_MESSAGE = "模型客户端关闭失败；已取得的回答与统计予以保留。"
 
 
 def _input_association_error(items: list[dict[str, Any]]) -> tuple[str, int] | None:
@@ -76,6 +79,11 @@ async def run_agent(
         names.add(tool["name"])
     if available_tools and not callable(execute_tool):
         raise ConfigurationError("提供工具定义时必须同时提供工具执行器。")
+    bind_run = getattr(execute_tool, "bind_run", None)
+    if callable(bind_run):
+        execute_tool = bind_run()
+        if not callable(execute_tool):
+            raise ConfigurationError("工具执行器 bind_run 必须返回可调用的运行实例。")
 
     recorder = RunRecorder(settings.log_dir)
     state: AgentState = {
@@ -96,62 +104,89 @@ async def run_agent(
         },
         "stop_reason": None,
         "error": None,
+        "error_code": None,
+        "cleanup_error": None,
     }
     tracer = start_trace(recorder.run_id, settings)
+    client_manager = None
+    primary_error: BaseException | None = None
     try:
         if not recorder.emit(
             "run.started", input_item_count=len(input_items),
             max_model_calls=settings.max_model_calls,
+            read_budget=read_budget_snapshot(execute_tool),
         ):
-            state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+            state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
         elif invalid := _input_association_error(input_items):
             code, index = invalid
             recorder.emit(
                 "run.input_rejected", stage="input_validation",
                 error_code=code, input_index=index,
             )
-            state.update(stop_reason="error", error="初始上下文中的工具请求与结果无法唯一关联。")
+            state.update(stop_reason="error", error="初始上下文中的工具请求与结果无法唯一关联。", error_code=code)
         else:
-            async with create_client(settings) as client:
-                call_model = partial(
-                    generate_response, client, settings.model_name,
-                    tools=available_tools or None, tracer=tracer,
+            client_manager = create_client(settings)
+            client = await client_manager.__aenter__()
+            call_model = partial(
+                generate_response, client, settings.model_name,
+                tools=available_tools or None, tracer=tracer,
+            )
+            graph = build_graph(
+                call_model,
+                tools=available_tools,
+                execute_tool=execute_tool,
+                max_model_calls=settings.max_model_calls,
+                recorder=recorder,
+                tracer=tracer,
+            )
+            # Only our explicit, filtered spans may leave the process. Environment
+            # flags must not enable LangGraph's automatic full-State recording.
+            with tracing_context(enabled=False, parent=False):
+                state = await graph.ainvoke(
+                    state, config={"recursion_limit": 2 * settings.max_model_calls + 1},
                 )
-                graph = build_graph(
-                    call_model,
-                    tools=available_tools,
-                    execute_tool=execute_tool,
-                    max_model_calls=settings.max_model_calls,
-                    recorder=recorder,
-                    tracer=tracer,
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        if client_manager is not None:
+            try:
+                await client_manager.__aexit__(
+                    type(primary_error) if primary_error is not None else None,
+                    primary_error, primary_error.__traceback__ if primary_error is not None else None,
                 )
-                # Only our explicit, filtered spans may leave the process. Environment
-                # flags must not enable LangGraph's automatic full-State recording.
-                with tracing_context(enabled=False, parent=False):
-                    state = await graph.ainvoke(
-                        state, config={"recursion_limit": 2 * settings.max_model_calls + 1},
-                    )
-    except BaseException:
+            except BaseException as exc:
+                if isinstance(exc, Exception):
+                    previous = state["stop_reason"]
+                    state["cleanup_error"] = {"code": "client_close_error", "previous_stop_reason": previous}
+                    recorder.emit("run.cleanup_failed", stage="client_close", error_code="client_close_error")
+                    if state["stop_reason"] != "error":
+                        state.update(stop_reason="error", error=CLIENT_CLOSE_MESSAGE, error_code="client_close_error")
+                elif primary_error is None:
+                    primary_error = exc
+    if primary_error is not None:
         # Preserve cancellation/configuration exceptions without logging their text.
         # There is no completed record if execution did not return a final State.
         recorder.emit("run.aborted", stage="runtime", error_code="run_interrupted")
         recorder.close()
         tracer.finish(error_code="run_interrupted")
         await tracer.close()
-        raise
+        raise primary_error
 
     if recorder.failed:
-        state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+        state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
     recorder.emit(
         "run.ended", stop_reason=state["stop_reason"],
         model_calls=state["model_calls"], tool_requests=state["tool_requests"],
         tool_calls=state["tool_calls"], tool_outcomes=state["tool_outcomes"],
         last_usage=state["result"]["usage"] if state["result"] is not None else None,
         usage_totals=state["usage_totals"],
+        error_code=state["error_code"], cleanup_error=state["cleanup_error"],
+        has_refusal=state["result"].get("has_refusal", False) if state["result"] is not None else False,
+        read_budget=read_budget_snapshot(execute_tool),
     )
     state["log_complete"] = recorder.close()
     if not state["log_complete"]:
-        state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
-    tracer.finish(state)
+        state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
+    tracer.finish(state, read_budget=read_budget_snapshot(execute_tool))
     await tracer.close()
     return state

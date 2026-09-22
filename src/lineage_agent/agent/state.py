@@ -31,3 +31,5 @@ class AgentState(TypedDict):
     usage_totals: UsageTotals
     stop_reason: Literal["completed", "max_model_calls", "error"] | None
     error: str | None
+    error_code: str | None
+    cleanup_error: dict[str, str | None] | None

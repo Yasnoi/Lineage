@@ -182,7 +182,13 @@ async def verify():
             parsed = parse_response(raw_response)
             calls.update({call["call_id"]: call for call in parsed["tool_calls"]})
             run = next(run for run in runs if run.run_type == "llm" and run.extra["metadata"].get("model_call") == index)
-            projected = cleaner.cap_payload({"inputs": cleaner.model_inputs(request["model"], request["input"], request.get("tools")), "outputs": cleaner.model_outputs(parsed)})
+            projected = cleaner.cap_payload({
+                "inputs": cleaner.model_inputs(
+                    request["model"], request["input"], request.get("tools"),
+                    instructions=request.get("instructions"), tool_choice=request.get("tool_choice"),
+                ),
+                "outputs": cleaner.model_outputs(parsed),
+            })
             assert run.inputs == projected["inputs"] and run.outputs == projected["outputs"], "模型参数、输出或 usage 与实际调用不一致。"
             assert run.extra["metadata"].get("step_id") == started[index - 1]["step_id"] and not run.error, "模型 span 状态或 step_id 不一致。"
             usage_outputs.append((projected["outputs"], run.outputs))

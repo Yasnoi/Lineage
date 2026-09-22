@@ -28,10 +28,11 @@ class ModelResult(TypedDict):
     """One model call's output and usage, including replayable protocol items."""
 
     text: str
+    has_refusal: bool
     raw_response: dict[str, Any]
     output_items: list[dict[str, Any]]
     tool_calls: list[FunctionCall]
     usage: TokenUsage | None
 
 
-type ModelCall = Callable[[ModelInput], Awaitable[ModelResult]]
+type ModelCall = Callable[..., Awaitable[ModelResult]]

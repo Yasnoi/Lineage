@@ -6,12 +6,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from lineage_agent.agent.state import AgentState, UsageTotals
-from lineage_agent.models.responses import ModelError
+from lineage_agent.models.responses import ModelError, safe_model_error
 from lineage_agent.models.types import ModelCall, TokenUsage, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import summarize_value, tool_identity
 from lineage_agent.tools.execution import execute_calls
-from lineage_agent.tools.types import ToolExecutor
+from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 
 if TYPE_CHECKING:
     from lineage_agent.recording.tracing import RunTrace
@@ -55,23 +55,38 @@ def build_graph(
     async def model_node(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
         if state["model_calls"] >= max_model_calls:
-            return {"stop_reason": "max_model_calls", "error": None}
+            return {"stop_reason": "max_model_calls", "error": None, "error_code": None}
+        remaining = max_model_calls - state["model_calls"]
+        budget = read_budget_snapshot(execute_tool)
+        allowances = {
+            "remaining_model_calls": remaining, "final_answer_call": remaining == 1,
+            "read_budget": budget,
+        }
         if not emit(
             "model.started", step_id, "model",
             model_call=state["model_calls"] + 1,
+            **allowances,
             input_item_count=len(state["input"]),
             input_tool_result_call_ids=[
                 item["call_id"] for item in state["input"]
                 if item.get("type") == "function_call_output"
             ],
         ):
-            return {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE}
+            return {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error"}
 
         failure: tuple[str, str] | None = None
         if tracer is not None:
-            tracer.set_model_step(step_id, state["model_calls"] + 1)
+            tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
+        instructions = f"本次用户请求剩余模型调用次数（包含当前调用）：{remaining}。"
+        if budget is not None:
+            instructions += f"本次运行剩余成功读取额度：{budget['remaining_bytes']} 字节。"
+        if remaining == 1:
+            instructions += "这是最后一次调用，不得请求工具；请依据已有资料回答，资料不足时明确说明。"
         try:
-            result = await call_model(state["input"])
+            result = await call_model(
+                state["input"], instructions=instructions,
+                tool_choice="none" if remaining == 1 else None,
+            )
         except ModelError as exc:
             result = exc.result
             failure = (exc.code, exc.stage)
@@ -82,7 +97,10 @@ def build_graph(
 
         model_calls = state["model_calls"] + 1
         output_items = result["output_items"] if result is not None else []
-        requests = [item for item in output_items if item.get("type") == "function_call"]
+        raw_items = result["raw_response"].get("output", []) if result is not None else []
+        requests = [
+            item for item in raw_items if isinstance(item, dict) and item.get("type") == "function_call"
+        ] if isinstance(raw_items, list) else []
         update: dict[str, Any] = {
             "input": output_items,
             "result": result,
@@ -94,6 +112,7 @@ def build_graph(
             ),
             "stop_reason": None,
             "error": None,
+            "error_code": None,
         }
         if result is not None:
             emit(
@@ -106,6 +125,7 @@ def build_graph(
                     for index, call in enumerate(requests, 1)
                 ],
                 usage=result["usage"],
+                has_refusal=result.get("has_refusal", False),
             )
 
         if failure is None and result is None:
@@ -128,15 +148,14 @@ def build_graph(
                 failure = ("empty_response", "response_validation")
 
         if failure is not None:
-            code, stage = failure
+            code, explanation, stage = safe_model_error(failure[0])
             emit("model.failed", step_id, "model", error_code=code, stage=stage)
             update.update(
                 stop_reason="error",
-                error="模型响应未通过协议校验。" if stage == "response_validation"
-                else "模型调用失败。",
+                error=explanation, error_code=code,
             )
         if recorder is not None and recorder.failed:
-            update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+            update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
 
         if update["stop_reason"] is not None and requests:
             reason = (
@@ -155,7 +174,7 @@ def build_graph(
                         call, step_id=step_id, request_index=index, reason=reason,
                     )
         if recorder is not None and recorder.failed:
-            update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE)
+            update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
         if tracer is not None:
             trace_failure = failure
             if trace_failure is None and recorder is not None and recorder.failed:
@@ -184,7 +203,7 @@ def build_graph(
             },
         }
         if batch["error"] is not None:
-            update.update(stop_reason="error", error=batch["error"])
+            update.update(stop_reason="error", error=batch["error"], error_code="logging_error")
         return update
 
     def after_model(state: AgentState) -> str:

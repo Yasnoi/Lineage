@@ -2,7 +2,7 @@
 
 基于 LangGraph 和 Responses API 的最小 ReAct 循环。Agent 可以直接回答，也可以请求工具，在工具结果回传后继续调用模型，直到给出最终回答或达到模型调用上限。
 
-每次 `run_agent` 处理一次用户请求，使用异步、非流式模型调用，状态只在本次运行中保留。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以列举该项目目录的直接子项，并读取限额内的 Markdown/TXT 普通文件。目录结构或单个文件正文都不能证明已经理解整个项目。
+每次 `run_agent` 处理一次用户请求，使用异步、非流式模型调用，状态只在本次运行中保留。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以列举该项目目录的直接子项，并读取限额内的 UTF-8 普通文本文件（包括源码和配置）。目录结构或单个文件正文都不能证明已经理解整个项目。
 
 ## 运行
 
@@ -27,13 +27,14 @@ LOG_DIR=logs
 PROJECT_ROOT=
 DIRECTORY_MAX_ENTRIES=100
 TEXT_MAX_BYTES=65536
+TEXT_TOTAL_MAX_BYTES=262144
 ```
 
-`BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；超时默认为 60 秒且必须为有限正数，模型调用上限默认为 5 次且必须为正整数。
+`BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；超时默认为 60 秒且必须为有限正数，模型调用上限默认为 5 次且必须为正整数。连接地址、模型名称及超时由配置对象共同校验，直接构造与 dotenv 加载遵循相同规则；超时不接受布尔值。
 
-`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为 100，`TEXT_MAX_BYTES` 默认为 65,536 字节（64 KiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
+`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为 100，`TEXT_MAX_BYTES` 默认为 65,536 字节（64 KiB），`TEXT_TOTAL_MAX_BYTES` 为每次运行成功读取的累计额度，默认 262,144 字节（256 KiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
 
-配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；已有进程环境变量优先。真实 `.env` 已加入忽略规则，密钥仅用于创建模型客户端，不进入 Agent State 或应用日志。
+配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；已有进程环境变量优先。真实 `.env` 已加入忽略规则，连接配置本身不进入 Agent State 或应用日志；但根目录内的文件正文另受下述文件访问授权规则约束。
 
 ```powershell
 uv run lineage-agent "请用一句话介绍你自己"
@@ -42,7 +43,7 @@ uv run lineage-agent "请用一句话介绍你自己"
 启用目录和读取工具时，在 `.env` 中将 `PROJECT_ROOT` 设置为要分析的目录，例如 `C:/path/to/project`，再运行：
 
 ```powershell
-uv run lineage-agent "请先列举项目根目录，再选择其中的 Markdown 或 TXT 文件读取；根据实际正文回答，并标明来源路径"
+uv run lineage-agent "请先分页列举项目根目录，再选择其中的源码或配置文件读取；根据实际正文回答，并标明来源路径"
 ```
 
 被分析项目可以与 Lineage Agent 自身目录不同。相对 `PROJECT_ROOT` 以 dotenv 文件所在目录为基准；无效根目录在调用模型前报告配置错误。恢复无工具 CLI 时，将配置中的 `PROJECT_ROOT` 留空，并确保进程环境没有覆盖该值。
@@ -53,7 +54,7 @@ uv run lineage-agent "请先列举项目根目录，再选择其中的 Markdown 
 uv run python -m lineage_agent "请用一句话介绍你自己"
 ```
 
-CLI 仅保留一个用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性和实际工具处理统计写入 stderr。退出码 `0` 表示得到最终回答，`1` 表示模型、协议或日志错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。
+CLI 仅保留一个用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性和实际工具处理统计写入 stderr。退出码 `0` 表示得到最终回答，`1` 表示模型、协议、日志或客户端关闭错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。若已得到最终回答但客户端关闭失败，仍展示该回答，同时报告关闭失败并退出 `1`；若收尾前未完成，则不展示中间文本。
 
 SDK 自动重试已关闭，不使用服务端会话或 `previous_response_id`。每次请求都使用本地当前上下文。
 
@@ -85,7 +86,7 @@ uv run lineage-agent "请列举项目根目录，只报告实际看到的条目"
 
 ### 上传范围
 
-开启即允许把本次对话与模型回复的可读文本、模型名称、usage、运行统计和时间上传到指定项目。目录工具允许上传 `path` 参数及返回的相对路径、条目名称/类型、条目上限与截断标志。读取工具只允许上传 `path` 参数及结果中的 `path`、`encoding`、`bytes_read`、`complete`，以 `content_omitted=true` 标明正文被省略。失败结果保留错误大类及应用固定表中的安全原因，忽略外部传入的错误说明。独立工具记录和模型上下文中的工具结果使用相同过滤规则；未知工具、未知字段、无效 JSON 只保留摘要。超限数据明确标注省略，网页显示不一定包含完整输入。
+开启即允许把本次对话与模型回复的可读文本、模型名称、usage、运行统计和时间上传到指定项目。目录工具允许上传 `path`、`after` 参数及返回的相对路径、条目名称/类型、条目上限、截断标志和 `after/next_after`。模型记录还含剩余调用数、最后回答轮标志、读取预算快照和拒答标志；运行收尾失败保留安全错误码。读取工具只允许上传 `path` 参数及结果中的 `path`、`encoding`、`bytes_read`、`complete`，以 `content_omitted=true` 标明正文被省略。失败结果保留错误大类及应用固定表中的安全原因，忽略外部传入的错误说明。独立工具记录和模型上下文中的工具结果使用相同过滤规则；未知工具、未知字段、无效 JSON 只保留摘要。超限数据明确标注省略，网页显示不一定包含完整输入。
 
 上传前在独立副本中移除已知凭据、掩码常见凭据字段和文本格式、替换绝对项目根路径。已知凭据跨消息或文本分段时也先匹配再截断；引号内的逗号、分号和转义不会提前结束凭据遮盖。未闭合引号会遮盖剩余逻辑文本，非结构化的未加引号凭据值保守遮盖到行尾。完整 State、原始响应对象、reasoning 内容、供应商扩展、配置环境、异常堆栈和文件附件不上传。读取结果中的完整正文会发送给配置的模型端点；若模型回答引用正文，该引用仍按模型文本规则进入 Tracing，主动粘贴的正文也属于对话范围。因此不能保证文件内容绝不会进入外部追踪服务。过滤不能识别任意未知秘密，开启前应确认对话、文件名和可能引用的内容可以上传。
 
@@ -142,13 +143,13 @@ src/lineage_agent/
 
 程序入口为 `await run_agent(input, settings, *, tools=None, execute_tool=None)`，返回最终 State，并在成功或失败后关闭客户端。`input` 可以是字符串，也可以是包含消息、工具请求、工具结果及 reasoning 等内容的完整 Responses 协议项列表；传入列表会被复制，调用方的数据不被原地修改。
 
-初始上下文中的 `function_call` 与 `function_call_output` 必须使用非空字符串 `call_id`，请求先于结果且一一对应；缺失、重复或无法配对时返回错误终态，模型调用次数为零。其他协议项原样保留。模型响应不得夹带由应用生成的 `function_call_output`，否则按协议错误终止；字典形式的响应同样深拷贝，避免不同运行共享嵌套数据。
+初始上下文中的 `function_call` 与 `function_call_output` 必须使用非空字符串 `call_id`，请求先于结果且一一对应；缺失、重复或无法配对时返回错误终态，模型调用次数为零。其他协议项原样保留。模型响应不得夹带由应用生成的 `function_call_output`，否则按协议错误终止；字典形式的响应同样深拷贝，避免不同运行共享嵌套数据。输出消息只接受 `type="message"`、`role="assistant"`，其他角色、缺失角色、伪装输入消息或非消息项夹带角色均按协议错误拒绝，不进入后续上下文。合法 `refusal` 内容与 `output_text` 按顺序合为展示文本；纯拒答是有效回答，与请求失败区分。
 
-模型接口为 `await generate_response(client, model_name, input, *, tools=None)`。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
+模型接口为 `await generate_response(client, model_name, input, *, tools=None, instructions=None, tool_choice=None)`（可另注入追踪器）。内部图调用模型函数时传入应用生成的 `instructions` 和 `tool_choice`。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
 
 ## 目录列举
 
-`list_directory` 只接受 `{"path": "."}` 形式的参数；`path` 必填且为字符串，不接受额外字段。`.` 表示绑定根目录，也可以传入 `src`、`src/package` 等相对路径。Schema 使用严格模式，工具仍自行执行字段和路径校验。
+`list_directory` 使用 `{"path": ".", "after": null}`；`path` 必填且为字符串，`after` 为上一页最后一个条目的名称，第一页为 `null`。严格 Schema 要求这两个字段，应用兼容旧调用只传 `path`。不接受额外字段；游标拒绝非字符串、空字符串及路径分隔符，只用于排序定位，不参与路径拼接。`.` 表示绑定根目录，也可以传入 `src`、`src/package` 等相对路径。Schema 使用严格模式，工具仍自行执行字段和路径校验。
 
 Python 运行接口 `run_agent` 不自动根据配置启用工具。调用方可以显式绑定目录，再通过现有接口注入；省略 `tools` 和 `execute_tool` 即为无工具运行：
 
@@ -178,25 +179,29 @@ state = asyncio.run(run_agent(
   "path": ".",
   "entries": [{"name": "src", "path": "src", "type": "directory"}],
   "limit": 100,
-  "truncated": false
+  "truncated": false,
+  "after": null,
+  "next_after": null
 }
 ```
 
 所有返回路径均相对于项目根目录，使用 `/` 分隔。类型包括 `file`、`directory`、`symlink`、`junction`、`reparse_point` 和 `other`。不读取正文，也不展开链接目标；不返回绝对路径或链接的外部目标。
 
-仅使用 Python 标准库 `os.scandir`，按文件系统枚举顺序最多消费上限加一项，保留前 N 项后按 `(name.casefold(), name)` 排序。超出上限时 `truncated=true`，未返回项不能视为不存在；排序仅针对已保留子集，不保证是全目录排序的前 N 项，重复列举也不保证得到同一子集。空目录成功返回空列表且 `truncated=false`。本轮限制条目数，不提供分页、总字节预算或严格执行耗时上限。
+使用 Python 标准库 `os.scandir` 和有界候选堆，每页扫描整个目录，按 `(name.casefold(), name)` 选出游标之后的前 N 项，最多保留 N+1 个候选用于判断是否还有下一页。`truncated=true` 时以返回的 `next_after` 请求同一路径的下一页。稳定目录连续翻页不遗漏、不重复；`truncated=false` 只表示当前游标之后没有更多条目，不证明此前页面已被读取。
+
+空目录或游标之后没有条目时返回空列表、`truncated=false`、`next_after=null`。目录变化时不提供快照保证：插入到游标之前的条目需从第一页重新发现。分页限制候选内存和返回条目数，不限制扫描总量、耗时或结果总字节数。
 
 不应用隐藏项或 `.gitignore` 过滤，`.git` 等目录项也包含在列举范围内。链接条目可以显示自身名称和类型，但不能作为目标或中间路径进入，即使链接指向根目录内部也会拒绝。其他特殊条目仅报告类型，不展开。
 
 路径接受 `/` 和 `\` 分隔，拒绝任何 `..` 组件、绝对路径、盘符相对路径、UNC/设备路径、ADS、控制字符、Windows 保留字符和设备名，以及组件末尾的点或空格。不展开环境变量或 `~`。根目录自身及祖先不得经过符号链接或 Windows reparse point；每次访问重新检查路径组件，并使用解析后的路径进行范围核对。
 
-字段、路径范围、链接和非目录目标通过 `ToolArgumentError` 计为拒绝；不存在、权限不足及其他 I/O 错误计为执行失败。枚举或条目分类中途发生异常时，整次调用失败，不返回部分成功结果；同批后续请求仍按原有规则处理。成功列举不是文件系统快照，枚举期间的新增或删除可能影响结果。
+字段、路径范围、链接和非目录目标通过 `ToolArgumentError` 计为拒绝；不存在、权限不足及其他 I/O 错误计为执行失败，分别使用 `file_not_found`、`permission_denied` 和 `io_error` 安全原因码。枚举或条目分类中途发生异常时，整次调用失败，不返回部分成功结果；同批后续请求仍按原有规则处理。成功列举不是文件系统快照，枚举期间的新增或删除可能影响结果。
 
 这些是应用层的路径访问检查，检查与实际操作并非原子，不能抵御恶意并发替换目录的所有情况，不构成操作系统安全沙箱。日志继续只记录参数和结果的类型、长度等安全摘要，不新增原始路径或文件名预览。
 
 ## 纯文本读取
 
-`read_text_file` 只接受 `{"path": "docs/说明.md"}` 形式的参数。路径必填且为字符串，不接受额外字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，扩展名为大小写不敏感的 `.md` 或 `.txt`。
+`read_text_file` 只接受 `{"path": "docs/说明.md"}` 形式的参数。路径必填且为字符串，不接受额外字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，不按扩展名限制；源码、配置、隐藏文件以及 Dockerfile、Makefile 等无扩展名文本均可读取。项目根目录就是文件访问授权边界，不额外设置敏感文件黑名单。根内 `.env`、凭据配置等也可能被读取并发送到模型；绑定根目录即授权其中符合访问和文本规则的文件。
 
 通过程序同时开放两个工具：
 
@@ -206,15 +211,15 @@ from lineage_agent.tools.filesystem.text import TEXT_TOOL, create_text_executor
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 
 executor = create_filesystem_executor(
-    "C:/path/to/project", max_entries=100, max_bytes=65536,
+    "C:/path/to/project", max_entries=100, max_bytes=65536, max_total_bytes=262144,
 )
 state = asyncio.run(run_agent(
-    "先列举目录，再读取实际发现的 Markdown 或 TXT 文件，依据正文回答并标明来源",
+    "先分页列举目录，再读取实际发现的源码或配置文件，依据正文回答并标明来源",
     settings, tools=[DIRECTORY_TOOL, TEXT_TOOL], execute_tool=executor,
 ))
 ```
 
-此例沿用上一节的 `asyncio`、`run_agent` 和 `settings`。只开放读取时，使用 `create_text_executor(root, max_bytes=65536)` 和 `[TEXT_TOOL]`；只开放目录时，原 `create_directory_executor` 用法不变。`run_agent` 本身不根据配置自动启用工具。
+此例沿用上一节的 `asyncio`、`run_agent` 和 `settings`。只开放读取时，使用 `create_text_executor(root, max_bytes=65536, max_total_bytes=262144)` 和 `[TEXT_TOOL]`；只开放目录时，原 `create_directory_executor` 用法不变。`run_agent` 本身不根据配置自动启用工具。
 
 完整成功结果的内层 JSON 为：
 
@@ -230,16 +235,22 @@ state = asyncio.run(run_agent(
 
 `bytes_read` 为原始文件字节数，包含 BOM；有 UTF-8 BOM 时 `encoding` 为 `utf-8-sig`，正文去除开头的 BOM。严格解码，不忽略或替换错误字节；保留 CRLF、LF、CR，不归一化换行。空文件返回空正文、零字节及 `complete=true`。C0 控制字符除 TAB、LF、CR 外均拒绝，DEL 也拒绝；这是基础筛查，不是完整二进制格式识别。
 
-打开前检查类型和大小，打开后通过文件描述符再次检查。读取采用无缓冲二进制模式，累计最多读取 `max_bytes + 1` 字节；额外字节仅用于识别超限。已知大小超限时不读正文，读取过程中发现超限也不返回部分内容。不存在分页或截断成功状态；中途 I/O 或解码失败不会伪装为空文件。成功结果是本次读取到 EOF 的完整内容，不是文件版本快照。
+打开前检查类型和大小，打开后通过文件描述符再次检查。读取采用无缓冲二进制模式，累计最多读取 `min(max_bytes, 本次运行剩余成功读取额度) + 1` 字节；额外字节仅用于识别超限。已知大小超限时不读正文，读取过程中发现超限也不返回部分内容。不存在分页或截断成功状态；中途 I/O 或解码失败不会伪装为空文件。成功结果是本次读取到 EOF 的完整内容，不是文件版本快照。
 
 | 情况 | 分类 | 安全原因码 |
 | --- | --- | --- |
 | 字段错误 | 拒绝 / `invalid_arguments` | `invalid_text_argument_shape` |
 | 路径或链接拒绝 | 拒绝 / `invalid_arguments` | 沿用公共路径原因码 |
-| 非普通文件、格式不支持 | 拒绝 / `invalid_arguments` | `target_not_regular_file`、`unsupported_extension` |
-| 超限、异常控制字符 | 拒绝 / `invalid_arguments` | `file_too_large`、`non_text_content` |
+| 非普通文件 | 拒绝 / `invalid_arguments` | `target_not_regular_file` |
+| 单文件超限、累计额度不足、异常控制字符 | 拒绝 / `invalid_arguments` | `file_too_large`、`read_budget_exceeded`、`non_text_content` |
 | 非 UTF-8 | 失败 / `execution_error` | `decode_error` |
 | 不存在、权限不足、其他 I/O | 失败 / `execution_error` | `file_not_found`、`permission_denied`、`io_error` |
+
+成功读取按 `bytes_read` 累计，包含 BOM，重复读取重复计量。完整读取、校验和结果序列化成功后才扣减，失败不占成功正文额度；随后日志失败也不撤销已发生的扣减。余额不足拒绝当前文件，但同批较小文件仍可执行，空文件不消耗额度。
+
+内置文本/组合执行器为可调用对象，提供 `bind_run()`；每次 `run_agent` 自动获得独立预算实例，同一执行器连续或交错复用不串用计量。直接调用执行器时预算持续到该实例结束，需显式 `bind_run()` 才能开启另一份预算。组合执行器只绑定一次根目录，每次访问仍重新校验路径。只读 `read_budget` 快照含 `limit_bytes/used_bytes/remaining_bytes`，供调用额度提示、结束日志和 Tracing 使用，不在 State 重复存储。包装执行器时应转发 `bind_run()` 和 `read_budget`；普通异步函数仍可注入，但自定义输出没有内置读取预算。
+
+累计额度仅限制本次新返回的文件正文字节数，不保证整个模型上下文的 Token 或序列化字节数有界，也不限制历史输入、目录结果或任意自定义工具输出。文件 I/O 仍同步执行，慢磁盘可能占用事件循环。
 
 原因通过固定表进入模型错误结果、JSONL 和 Tracing，不携带原始异常或正文。正文只作为关联原 `call_id` 的工具结果发送给模型，不提升为 system/developer 指令；不自动跟随链接、读取引用文件或执行其中命令。模型之后请求其他工具仍受绑定根目录和参数检查限制。文件正文会发送给配置的模型端点，选择根目录和输入文件时应考虑这一点。
 
@@ -258,9 +269,11 @@ state = asyncio.run(run_agent(
 | `tool_outcomes` | 实际成功、校验拒绝、执行失败和未执行数量 | 本次运行内累加 `succeeded/rejected/failed/skipped`，不统计调用方传入的历史结果 |
 | `usage_totals` | 本次 Agent 处理一次用户请求期间的已知 Token 小计 | 每次模型尝试后累加实际报告的数据 |
 | `stop_reason` | `completed`、`max_model_calls` 或 `error` | 运行中为 `None`，结束时写入 |
-| `error` | 导致整个循环终止的错误 | 正常运行为空；可恢复工具错误保存在工具结果中 |
+| `error` | 导致整个循环终止的安全说明 | 正常运行为空；可恢复工具错误保存在工具结果中 |
+| `error_code` | 终止的固定错误码 | 正常为空；区分模型、协议、日志与关闭失败 |
+| `cleanup_error` | 收尾错误及收尾前终止原因 | 正常为空；关闭失败保留 `code=client_close_error`、`previous_stop_reason` |
 
-`ModelResult` 包含 `text`、`raw_response`、`output_items`、`tool_calls` 和 `usage`。工具请求保留 `call_id`、名称及原始参数字符串；原始响应保留可序列化的协议数据。下一轮上下文仅追加 `output_items`，包括 reasoning 和端点扩展字段，不追加整个响应对象，也不重复追加历史。
+`ModelResult` 包含 `text`、`has_refusal`、`raw_response`、`output_items`、`tool_calls` 和 `usage`。工具请求保留 `call_id`、名称及原始参数字符串；原始响应保留可序列化的协议数据。下一轮上下文仅追加 `output_items`，包括 reasoning 和端点扩展字段，不追加整个响应对象，也不重复追加历史。
 
 `result.usage` **仅表示最近一次模型调用**的输入、输出和总 Token。未报告 usage 时为 `None`；部分字段缺失时相应值为 `None`，不沿用上一轮。
 
@@ -286,7 +299,9 @@ state = asyncio.run(run_agent(
 
 执行器返回非字符串同样计为一次执行尝试和一次失败，返回 `execution_error`；不自动将返回值转换成字符串或 JSON。同批成功、失败和拒绝结果均按原请求顺序关联，全部处理后才发起下一次模型请求。若写入拒绝或失败事件时日志故障，已有统计及已生成结果仍留在 State，剩余请求跳过且不再调用模型；State 中存在错误结果并不表示它已经回传。
 
-第 N 次模型调用若已产生最终回答，仍可正常完成；若继续请求工具，则以 `max_model_calls` 结束，不执行该批工具。模型或协议错误以 `error` 结束，返回已产生的上下文、计数、可取得的响应及 usage，而不是丢失失败节点的统计。配置或输入错误在调用模型前报告。
+每次模型请求通过应用生成的 `instructions` 提供剩余次数（含当前调用），以及可取得的读取余额。默认最多 5 次，其中最后一次专用于回答，设置 `tool_choice="none"`，要求依据已有资料作答或明确说明资料不足。`MAX_MODEL_CALLS=1` 时从第一次起就禁用工具。若兼容端点仍返回工具请求，则保留请求事实，以 `max_model_calls` 结束，不执行该批工具，也不发起第 N+1 次请求。模型错误说明和阶段由固定错误码生成，超时、连接、HTTP 与协议错误可区分，不展示任意异常文本。模型或协议错误以 `error` 结束，返回已产生的上下文、计数、可取得的响应及 usage，而不是丢失失败节点的统计。配置或输入错误在调用模型前报告。
+
+客户端关闭只尝试一次。已有最终 State 时关闭失败保留回答、上下文、统计及 usage，并记录 `client_close_error`；已有主要错误不被关闭错误覆盖，取消或配置异常继续传播。日志仍尝试完成，`log_complete` 只描述日志完整性，Tracing 上传失败仍不阻断业务。
 
 当前只保证模型调用轮数有界，不对单次工具执行设置超时。单个异步工具如果长期不返回，模型轮数上限不能终止它。
 
@@ -300,9 +315,10 @@ state = asyncio.run(run_agent(
 
 | 事件 | 记录的事实 |
 | --- | --- |
-| `run.started` / `run.ended` | 开始与终止；结束时含调用统计、工具处理统计、最近 usage 和本次请求累计 usage |
+| `run.started` / `run.ended` | 开始与终止；结束时含调用统计、工具处理统计、最近及累计 usage、读取预算快照、拒答与收尾错误 |
+| `run.cleanup_failed` | 客户端关闭失败；已有主要错误、回答与统计保留，日志完整性另行判断 |
 | `run.input_rejected` | 初始工具关联校验失败，含协议项位置与错误码 |
-| `model.started` | 模型调用即将发起，含实际输入中全部、有序的 `input_tool_result_call_ids` |
+| `model.started` | 模型调用即将发起，含剩余调用次数、最后回答轮标志、读取预算及实际输入中全部、有序的 `input_tool_result_call_ids` |
 | `model.returned` / `model.failed` | 可取得的响应摘要与 usage，或固定错误码及失败阶段 |
 | `tool.rejected` / `tool.started` / `tool.succeeded` / `tool.failed` | 名称、JSON、字段校验或实际执行的结果 |
 | `tool.result_created` | 对应 `call_id` 的协议结果已经生成，与执行成功分开记录 |
@@ -341,6 +357,12 @@ uv run --locked python scripts/check_tracing.py
 # 读取工具追踪：正文省略、模型引用、元数据和上传故障
 uv run --locked python scripts/check_text_tracing.py
 
+# Review 回归：协议、收尾、配置、分页、读取预算和最后回答轮
+uv run --locked python scripts/check_review_fixes.py
+
+# 当前 .env 端点：分页发现、源码/配置读取及最后回答轮兼容性
+uv run --locked python scripts/verify_review_fixes.py
+
 # 当前 .env 端点：在非敏感临时目录中列举根目录、子目录并回答
 uv run --locked python scripts/verify_directory.py
 
@@ -365,10 +387,12 @@ uv run --locked python scripts/verify_tracing.py
 
 `verify_tracing.py` 使用 `.env` 中的真实模型与 LangSmith 配置，仅访问临时样例目录；它查询远端记录、输出私有 Trace 链接和本地运行标识，并分别报告同批请求、拒绝是否在该次真实运行中出现。usage 按最终投影与远端一致的字段报告每次调用的 `none`、`partial` 或 `full` 及汇总数量；合法零值有效，缺失字段不补零，`usage_covered=true` 仅表示至少一次调用有有效 token 字段。之后仍需登录网页核对参数、结果、调用关联和耗时。确定性检查不能证明真实服务接收或网页显示正确；真实远端与网页验收仍待执行。
 
+`check_review_fixes.py` 另核对输出角色与拒答、直接配置校验、关闭失败叠加错误、分页候选内存、累计预算及执行器复用隔离、最后回答轮和新追踪字段。`verify_review_fixes.py` 使用随机非敏感 Python/TOML 文件验证分页、正文与来源引用，另发起一次仅允许回答的真实调用检查 `tool_choice="none"`。
+
 `check_text.py` 使用真实临时文件，检查字节边界及实际读取量、短读和增长、UTF-8/BOM/换行、控制字符、路径拒绝、批次继续、隔离和文件未修改。权限、读取中途故障及元数据变化采用明确标注的注入；真实链接无法创建时报告跳过原因。`check_text_tracing.py` 使用真实 SDK 序列化和替身 HTTP，区分被省略的工具正文与允许按模型文本规则处理的回答引用，比较开关及上传故障下的实际模型请求和统计，不代表远端网页验收。
 
 `verify_text.py` 需要至少三次模型调用额度，并在不含敏感信息的临时目录内验证“列举 → 读取 → 回答”。文件名和正文识别码不预先出现在提示中，检查真实模型请求携带完整正文，最终回答引用内容与来源；实际调用次数不固定。
 
-当前提供目录直接子项列举和限额内 Markdown/TXT 读取，不实现 PDF/Word 转换、分页、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。两类文件工具均不提供严格耗时保证，也不构成操作系统安全沙箱。
+当前提供目录直接子项分页列举和限额内 UTF-8 普通文本读取，不实现 PDF/Word 转换、正文分页、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、持久化或恢复机制。两类文件工具均不提供严格耗时保证，也不构成操作系统安全沙箱。
 
 项目设计依据见 [技术选型](docs/技术选型.md) 和 [开发阶段划分](docs/开发阶段划分.md)。

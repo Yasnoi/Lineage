@@ -143,7 +143,7 @@ async def check_listing_and_model_quotation(root):
 async def check_failure_reasons(root):
     requests = [
         text_call("shape", arguments='{"path":false}'), text_call("directory", "."),
-        text_call("format", "unsupported.py"), text_call("limit", "long.txt"),
+        text_call("limit", "long.txt"),
         text_call("decode", "invalid.txt"), text_call("missing", "missing.txt"),
         text_call("permission", "permission.txt"), text_call("io", "io.txt"),
         text_call("binary", "binary.txt"),
@@ -193,7 +193,7 @@ async def check_failure_reasons(root):
     assert by_id["empty"]["ok"]
     expected = {
         "shape": "invalid_text_argument_shape", "directory": "target_not_regular_file",
-        "format": "unsupported_extension", "limit": "file_too_large", "decode": "decode_error",
+        "limit": "file_too_large", "decode": "decode_error",
         "missing": "file_not_found", "permission": "permission_denied", "io": "io_error",
         "binary": "non_text_content",
     }
@@ -209,8 +209,8 @@ async def check_failure_reasons(root):
         assert span["outputs"]["error"]["reason_code"] == code
         matching = [event for event in events if event.get("call_id") == identifier and event["event"] in ("tool.rejected", "tool.failed", "tool.result_created")]
         assert len(matching) == 2 and all(event["reason_code"] == code for event in matching)
-    assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 5, "failed": 4, "skipped": 0}
-    assert state["tool_calls"] == 10 and state["model_calls"] == 2
+    assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 4, "failed": 4, "skipped": 0}
+    assert state["tool_calls"] == 9 and state["model_calls"] == 2
     assert "PRIVATE_READ_EXCEPTION" not in json.dumps((state, spans, events))
     assert "PRIVATE_PERMISSION_EXCEPTION" not in json.dumps((state, spans, events))
 

@@ -9,7 +9,8 @@ type ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
 
 TOOL_ARGUMENT_REASONS = {
     "argument_validation_failed": "工具参数未通过执行器校验。",
-    "invalid_argument_shape": "list_directory 仅接受一个字符串字段 path。",
+    "invalid_argument_shape": "list_directory 需要字符串 path 及可空字符串 after，不允许其他字段。",
+    "invalid_directory_cursor": "after 必须为空值或不含路径分隔符的非空条目名称。",
     "empty_path": "path 必须是非空项目内相对路径。",
     "non_relative_path": "path 必须是项目内相对路径。",
     "disallowed_path_component": "path 包含不允许的路径组件。",
@@ -20,6 +21,7 @@ TOOL_ARGUMENT_REASONS = {
     "target_not_regular_file": "path 的目标不是普通文件。",
     "unsupported_extension": "仅支持扩展名为 .md 或 .txt 的文件。",
     "file_too_large": "文件超过本次配置的字节上限，未返回正文。",
+    "read_budget_exceeded": "文件超过本次运行剩余的成功读取额度，未返回正文；可尝试较小文件。",
     "non_text_content": "文件包含不支持的控制字符，未返回正文。",
 }
 
@@ -27,9 +29,9 @@ TOOL_ARGUMENT_REASONS = {
 TOOL_EXECUTION_REASONS = {
     "execution_failed": "工具执行失败。",
     "decode_error": "文件无法按严格 UTF-8 解码，未返回正文。",
-    "file_not_found": "请求的文件或其中间目录不存在。",
-    "permission_denied": "没有访问请求文件所需的权限。",
-    "io_error": "读取文件时发生 I/O 错误，未返回正文。",
+    "file_not_found": "请求的文件、目录或中间路径不存在。",
+    "permission_denied": "没有访问请求文件或目录所需的权限。",
+    "io_error": "访问文件或目录时发生 I/O 错误，未返回部分结果。",
 }
 
 
@@ -55,8 +57,21 @@ class ToolArgumentError(ValueError):
     """The executor rejected the arguments for a known tool."""
 
     def __init__(self, message: str = "", *, reason_code: str = "argument_validation_failed") -> None:
-        super().__init__(message)
-        self.reason_code, _ = safe_tool_argument_reason(reason_code)
+        self.reason_code, explanation = safe_tool_argument_reason(reason_code)
+        super().__init__(message or explanation)
+
+
+def read_budget_snapshot(executor: ToolExecutor | None) -> dict[str, int] | None:
+    """Read optional numeric run metadata without exposing executor internals."""
+    snapshot = getattr(executor, "read_budget", None)
+    if not isinstance(snapshot, dict):
+        return None
+    keys = ("limit_bytes", "used_bytes", "remaining_bytes")
+    if not all(type(snapshot.get(key)) is int and snapshot[key] >= 0 for key in keys):
+        return None
+    if snapshot["used_bytes"] + snapshot["remaining_bytes"] != snapshot["limit_bytes"]:
+        return None
+    return {key: snapshot[key] for key in keys}
 
 
 class ToolExecutionError(Exception):

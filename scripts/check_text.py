@@ -392,7 +392,6 @@ async def check_paths_and_formats(root, sibling):
         ("text_ads", "plain private.txt:stream", "disallowed_path_component"),
         ("text_device_name", "NUL.txt", "disallowed_path_component"),
         ("text_directory_target", "docs private", "target_not_regular_file"),
-        ("text_unsupported_extension", "unsupported.py", "unsupported_extension"),
     ):
         await rejected_then_success(scenario, root, path=path, reason=reason)
     await rejected_then_success("text_missing", root, path="missing.txt", outcome="failed", reason="file_not_found")

@@ -3,23 +3,41 @@
 from pathlib import Path
 from typing import Any
 
-from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
-from lineage_agent.tools.filesystem.text import TEXT_TOOL, create_text_executor
+from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, directory_executor
+from lineage_agent.tools.filesystem.paths import bind_project_root
+from lineage_agent.tools.filesystem.text import TEXT_TOOL, TextExecutor
 from lineage_agent.tools.types import ToolArgumentError, ToolExecutor
 
 
 def create_filesystem_executor(
     root: str | Path, *, max_entries: int = 100, max_bytes: int = 65536,
+    max_total_bytes: int = 262144,
 ) -> ToolExecutor:
     """Bind both capabilities; run_agent's supplied schemas control exposure."""
-    directory = create_directory_executor(root, max_entries=max_entries)
-    text = create_text_executor(root, max_bytes=max_bytes)
+    project_root = bind_project_root(root)
+    return FilesystemExecutor(
+        directory_executor(project_root, max_entries=max_entries),
+        TextExecutor(project_root, max_bytes, max_total_bytes),
+    )
 
-    async def execute_tool(name: str, arguments: dict[str, Any]) -> str:
+
+class FilesystemExecutor:
+    """Name dispatch with a separate text budget for each bound run."""
+
+    def __init__(self, directory: ToolExecutor, text: TextExecutor) -> None:
+        self._directory = directory
+        self._text = text
+
+    def bind_run(self) -> "FilesystemExecutor":
+        return FilesystemExecutor(self._directory, self._text.bind_run())
+
+    @property
+    def read_budget(self) -> dict[str, int]:
+        return self._text.read_budget
+
+    async def __call__(self, name: str, arguments: dict[str, Any]) -> str:
         if name == DIRECTORY_TOOL["name"]:
-            return await directory(name, arguments)
+            return await self._directory(name, arguments)
         if name == TEXT_TOOL["name"]:
-            return await text(name, arguments)
+            return await self._text(name, arguments)
         raise ToolArgumentError()
-
-    return execute_tool

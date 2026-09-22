@@ -14,17 +14,40 @@ if TYPE_CHECKING:
     from lineage_agent.recording.tracing import RunTrace
 
 
+MODEL_ERRORS = {
+    "model_error": ("模型调用失败。", "model_request"),
+    "model_timeout": ("模型请求超时，请检查连接或调整 TIMEOUT_SECONDS。", "model_request"),
+    "connection_error": ("无法连接模型端点，请检查 BASE_URL 和网络连接。", "model_request"),
+    "http_error": ("模型端点返回 HTTP 错误，请求失败。", "model_request"),
+    "invalid_response": ("模型端点返回的响应格式无效。", "response_validation"),
+    "invalid_output_role": ("模型输出消息具有不允许的角色或消息格式。", "response_validation"),
+    "unexpected_tool_result": ("模型响应包含未经应用执行的工具结果。", "response_validation"),
+    "invalid_call_id": ("模型工具请求缺少有效且唯一的 call_id。", "response_validation"),
+    "duplicate_call_id": ("模型工具请求重复使用 call_id，无法关联结果。", "response_validation"),
+    "incomplete_response": ("模型响应未正常完成。", "response_validation"),
+    "empty_response": ("模型没有返回文本回答、拒答或工具请求。", "response_validation"),
+}
+
+
+def safe_model_error(code: object) -> tuple[str, str, str]:
+    """Derive both message and stage from application-owned codes."""
+    code = code if type(code) is str and code in MODEL_ERRORS else "model_error"
+    message, stage = MODEL_ERRORS[code]
+    return code, message, stage
+
+
 class ModelError(RuntimeError):
-    """A failed model attempt, optionally retaining its received response."""
+    """A failed attempt; legacy message/stage arguments are never trusted."""
 
     def __init__(
         self,
-        message: str,
+        message: str = "",
         *,
         result: ModelResult | None = None,
         code: str = "model_error",
         stage: str = "model_request",
     ) -> None:
+        code, message, stage = safe_model_error(code)
         super().__init__(message)
         self.result = result
         self.code = code
@@ -52,11 +75,19 @@ async def generate_response(
     *,
     tools: list[ToolDefinition] | None = None,
     tracer: "RunTrace | None" = None,
+    instructions: str | None = None,
+    tool_choice: str | None = None,
 ) -> ModelResult:
     """Observe the actual SDK request without changing its input or result."""
-    span = tracer.model_start(model_name, input, tools) if tracer is not None else None
+    span = (
+        tracer.model_start(model_name, input, tools, instructions=instructions, tool_choice=tool_choice)
+        if tracer is not None else None
+    )
     try:
-        result = await _request_response(client, model_name, input, tools=tools)
+        result = await _request_response(
+            client, model_name, input, tools=tools,
+            instructions=instructions, tool_choice=tool_choice,
+        )
     except ModelError as exc:
         if tracer is not None:
             tracer.model_end(span, result=exc.result, error_code=exc.code, stage=exc.stage)
@@ -79,11 +110,17 @@ async def _request_response(
     input: ModelInput,
     *,
     tools: list[ToolDefinition] | None = None,
+    instructions: str | None = None,
+    tool_choice: str | None = None,
 ) -> ModelResult:
     """Make one non-streaming request and preserve its full response body."""
     optional: dict[str, Any] = {}
     if tools:
         optional["tools"] = tools
+    if instructions is not None:
+        optional["instructions"] = instructions
+    if tool_choice is not None:
+        optional["tool_choice"] = tool_choice
 
     try:
         response = await client.responses.create(
@@ -95,24 +132,15 @@ async def _request_response(
         )
         return parse_response(response)
     except APITimeoutError as exc:
-        raise ModelError(
-            "模型请求超时，请检查连接或调整 TIMEOUT_SECONDS。", code="model_timeout"
-        ) from exc
+        raise ModelError(code="model_timeout") from exc
     except APIConnectionError as exc:
-        raise ModelError(
-            "无法连接模型端点，请检查 BASE_URL 和网络连接。", code="connection_error"
-        ) from exc
+        raise ModelError(code="connection_error") from exc
     except APIStatusError as exc:
-        raise ModelError("模型端点返回 HTTP 错误，请求失败。", code="http_error") from exc
+        raise ModelError(code="http_error") from exc
     except APIError as exc:
-        raise ModelError("模型请求失败，或端点返回了无法解析的响应。") from exc
+        raise ModelError() from exc
     except (AttributeError, TypeError, ValueError) as exc:
-        # Compatible endpoints may return malformed JSON or incomplete objects.
-        raise ModelError(
-            "模型端点返回的响应格式无效，无法读取完整回答。",
-            code="invalid_response",
-            stage="response_validation",
-        ) from exc
+        raise ModelError(code="invalid_response") from exc
 
 
 def _parse_usage(raw_usage: Any) -> TokenUsage | None:
@@ -140,21 +168,14 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
             else response.model_dump(mode="json", by_alias=True, exclude_unset=True)
         )
     except (AttributeError, TypeError, ValueError) as exc:
-        raise ModelError(
-            "模型端点返回的响应格式无效，无法读取完整回答。",
-            code="invalid_response",
-            stage="response_validation",
-        ) from exc
+        raise ModelError(code="invalid_response") from exc
 
     if not isinstance(raw, dict):
-        raise ModelError(
-            "模型端点返回的响应格式无效，无法读取完整回答。",
-            code="invalid_response",
-            stage="response_validation",
-        )
+        raise ModelError(code="invalid_response")
 
     result: ModelResult = {
         "text": "",
+        "has_refusal": False,
         "raw_response": raw,
         "output_items": [],
         "tool_calls": [],
@@ -162,96 +183,66 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
     }
     output = raw.get("output")
     if not isinstance(output, list):
-        raise ModelError(
-            "模型响应缺少有效的 output 列表。",
-            result=result,
-            code="invalid_response",
-            stage="response_validation",
-        )
+        raise ModelError(result=result, code="invalid_response")
 
     texts: list[str] = []
     call_ids: set[str] = set()
-    protocol_error: tuple[str, str] | None = None
+    protocol_error: str | None = None
     for item in output:
         if not isinstance(item, dict):
-            protocol_error = protocol_error or (
-                "invalid_response", "模型响应包含无效的协议项。"
-            )
+            protocol_error = protocol_error or "invalid_response"
             continue
-        if item.get("type") == "function_call_output":
-            protocol_error = protocol_error or (
-                "unexpected_tool_result", "模型响应包含未经应用执行的工具结果。"
-            )
+        kind = item.get("type")
+        if kind == "function_call_output":
+            protocol_error = protocol_error or "unexpected_tool_result"
             continue
-        # Preserve all fields, including reasoning and endpoint-specific extensions.
-        result["output_items"].append(item)
-        if item.get("type") == "function_call":
-            call_id = item.get("call_id")
-            name = item.get("name")
-            arguments = item.get("arguments")
-            if not isinstance(call_id, str) or not call_id.strip():
-                protocol_error = protocol_error or (
-                    "invalid_call_id", "模型工具请求缺少有效的 call_id，无法关联执行结果。"
-                )
-                continue
-            if (
-                not isinstance(name, str)
-                or not name.strip()
-                or not isinstance(arguments, str)
+        if (
+            (kind == "message" and item.get("role") != "assistant")
+            or (kind != "message" and "role" in item)
+            or not isinstance(kind, str)
+            or kind in ("input_message", "input_text", "input_image", "input_file")
+        ):
+            protocol_error = protocol_error or "invalid_output_role"
+            continue
+        if kind == "message":
+            content = item.get("content")
+            if not isinstance(content, list) or any(
+                not isinstance(part, dict)
+                or part.get("type") not in ("output_text", "refusal")
+                or not isinstance(part.get("refusal" if part.get("type") == "refusal" else "text"), str)
+                for part in content
             ):
-                protocol_error = protocol_error or (
-                    "invalid_response", "模型工具请求缺少有效的名称或参数字符串。"
-                )
+                protocol_error = protocol_error or "invalid_response"
                 continue
-            result["tool_calls"].append(
-                {"call_id": call_id, "name": name, "arguments": arguments}
-            )
+            if item.get("status") not in (None, "completed"):
+                protocol_error = protocol_error or "incomplete_response"
+            for part in content:
+                refusal = part["type"] == "refusal"
+                result["has_refusal"] |= refusal
+                texts.append(part["refusal" if refusal else "text"])
+        # Preserve valid messages, reasoning and endpoint extensions. Retain
+        # malformed calls as evidence, but the graph will not execute them.
+        result["output_items"].append(item)
+        if kind == "function_call":
+            call_id, name, arguments = item.get("call_id"), item.get("name"), item.get("arguments")
+            if not isinstance(call_id, str) or not call_id.strip():
+                protocol_error = protocol_error or "invalid_call_id"
+                continue
+            if not isinstance(name, str) or not name.strip() or not isinstance(arguments, str):
+                protocol_error = protocol_error or "invalid_response"
+                continue
+            result["tool_calls"].append({"call_id": call_id, "name": name, "arguments": arguments})
             if call_id in call_ids:
-                protocol_error = protocol_error or (
-                    "invalid_call_id", "模型工具请求包含重复的 call_id，无法关联执行结果。"
-                )
+                protocol_error = protocol_error or "invalid_call_id"
             call_ids.add(call_id)
             if item.get("status") not in (None, "completed"):
-                protocol_error = protocol_error or (
-                    "incomplete_response", "模型工具请求尚未完成，不能执行。"
-                )
-        elif item.get("type") == "message":
-            content = item.get("content")
-            if not isinstance(content, list):
-                protocol_error = protocol_error or (
-                    "invalid_response", "模型消息缺少有效的内容列表。"
-                )
-                continue
-            if item.get("status") not in (None, "completed"):
-                protocol_error = protocol_error or (
-                    "incomplete_response", "模型消息尚未完成，不能作为最终回答。"
-                )
-            for part in content:
-                if not isinstance(part, dict):
-                    protocol_error = protocol_error or (
-                        "invalid_response", "模型消息包含无效的内容项。"
-                    )
-                elif part.get("type") == "output_text":
-                    text = part.get("text")
-                    if isinstance(text, str):
-                        texts.append(text)
-                    else:
-                        protocol_error = protocol_error or (
-                            "invalid_response", "模型消息中的文本格式无效。"
-                        )
+                protocol_error = protocol_error or "incomplete_response"
 
     result["text"] = "".join(texts)
     if raw.get("status") != "completed" or raw.get("error") is not None:
-        raise ModelError(
-            "模型响应未正常完成。", result=result,
-            code="incomplete_response", stage="response_validation",
-        )
+        raise ModelError(result=result, code="incomplete_response")
     if protocol_error is not None:
-        code, message = protocol_error
-        raise ModelError(message, result=result, code=code, stage="response_validation")
+        raise ModelError(result=result, code=protocol_error)
     if not result["text"].strip() and not result["tool_calls"]:
-        raise ModelError(
-            "模型没有返回文本回答或工具请求。", result=result,
-            code="empty_response", stage="response_validation",
-        )
+        raise ModelError(result=result, code="empty_response")
     return result
