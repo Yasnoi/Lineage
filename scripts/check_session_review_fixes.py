@@ -30,6 +30,7 @@ from check_sessions import audit_turn, checkpoint_fault, config, saved_state
 from check_text import snapshot
 from check_tracing import capture
 from lineage_agent.agent import runtime, sessions
+from lineage_agent.agent.graph import FINAL_ANSWER_INSTRUCTIONS
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ConfigurationError
@@ -96,6 +97,13 @@ async def run_turn(manager, sid, replies, *, scenario, prompt="question", observ
     closed_resources(manager, sid, observed)
     assert client.close_calls == (1 if factory.called else 0)
     audit_turn(result, client, scenario, observations)
+    starts = [event for event in read_events(result.state) if event["event"] == "model.started"]
+    for request, event in zip(client.requests, starts, strict=True):
+        if event["final_answer_call"]:
+            assert request["instructions"] == FINAL_ANSWER_INSTRUCTIONS and request["tool_choice"] == "none"
+        else:
+            assert "instructions" not in request and "tool_choice" not in request
+        assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
     assert PRIVATE not in json.dumps(read_events(result.state), ensure_ascii=False)
     assert PRIVATE not in (result.state["error"] or "")
     if result.checkpoint_complete:
@@ -256,7 +264,7 @@ async def check_metadata_stages_and_tracing():
         for position, event in enumerate(relevant, 1):
             assert event.get("read_budget_error") == ("read_budget_unavailable" if position == index else None)
             assert (event["read_budget"] is None) == (position == index)
-        assert ("成功读取额度" not in client.requests[0]["instructions"]) == (index == 2)
+        assert "instructions" not in client.requests[0], "metadata availability must not alter model instructions"
         assert PRIVATE not in json.dumps(transport.sent, ensure_ascii=False)
         assert PRIVATE not in stderr.getvalue()
         if enabled:
@@ -267,6 +275,8 @@ async def check_metadata_stages_and_tracing():
             assert "read_budget_unavailable" in json.dumps(transport.sent)
             model = next(span for span in transport.sent if span["run_type"] == "llm")
             assert model["extra"]["metadata"].get("read_budget_error") == relevant[1].get("read_budget_error")
+            assert model["extra"]["metadata"]["read_budget"] == relevant[1]["read_budget"]
+            assert "instructions" not in model["inputs"]
             assert metadata["checkpoint_saved"] is True
         else:
             assert not transport.sent
@@ -296,7 +306,9 @@ async def check_metadata_keeps_real_budget():
         assert client.requests[1]["input"][-2:] == results
         assert real_executor.read_budget == {"limit_bytes": 4, "used_bytes": 4, "remaining_bytes": 0}
         assert snapshot(root) == before
-        assert all("成功读取额度" not in request["instructions"] for request in client.requests)
+        assert all("instructions" not in request and request["tools"] == [TEXT_TOOL] for request in client.requests)
+        starts = [event for event in read_events(result.state) if event["event"] == "model.started"]
+        assert all(event["read_budget"] is None and event["read_budget_error"] == "read_budget_unavailable" for event in starts)
         assert PRIVATE not in json.dumps(transport.sent)
 
 

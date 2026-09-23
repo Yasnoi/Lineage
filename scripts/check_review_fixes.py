@@ -22,6 +22,7 @@ from check_react import (
 from check_text import metadata_override, monitor_reads, snapshot
 from check_tracing import capture, stable
 from lineage_agent.agent import runtime
+from lineage_agent.agent.graph import FINAL_ANSWER_INSTRUCTIONS
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, parse_response
@@ -38,11 +39,12 @@ SETTINGS = replace(SETTINGS, log_dir=CHECK_DIR)
 RUNS = []
 
 
-async def run_case(scenario, replies, *, executor=None, tools=None, limit=5, client=None, failed_writes=None):
+async def run_case(scenario, replies, *, executor=None, tools=None, limit=5, client=None, failed_writes=None,
+                   prompt="Inspect the provided project as source material."):
     client = client or LocalClient(replies)
     with patch.object(runtime, "create_client", return_value=client):
         state = await runtime.run_agent(
-            "Inspect the provided project as source material.",
+            prompt,
             replace(SETTINGS, max_model_calls=limit), tools=tools, execute_tool=executor,
         )
     assert client.closed and state["model_calls"] == len(client.requests)
@@ -52,8 +54,17 @@ async def run_case(scenario, replies, *, executor=None, tools=None, limit=5, cli
         returned = [item for item in request["input"] if item.get("type") == "function_call_output"]
         assert returned == generated[:len(returned)]
         remaining = limit - index
-        assert f"：{remaining}。" in request["instructions"]
-        assert request.get("tool_choice") == ("none" if remaining == 1 else None)
+        if remaining == 1:
+            assert request["instructions"] == FINAL_ANSWER_INSTRUCTIONS
+            assert request["tool_choice"] == "none"
+        else:
+            assert "instructions" not in request and "tool_choice" not in request
+        assert request["input"] == state["input"][:len(request["input"])], "management metadata changed actual input"
+        assert request.get("tools") == (tools or None), "tool definitions changed with remaining allowance"
+        assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
+        if index:
+            previous = client.requests[index - 1]["input"]
+            assert request["input"][:len(previous)] == previous, "existing context was rewritten"
     RUNS.append(state["run_id"])
     return state, client, events
 
@@ -329,7 +340,7 @@ async def check_read_budgets(root):
     assert events[-1]["read_budget"] == {"limit_bytes": 262144, "used_bytes": 262144, "remaining_bytes": 0}
     assert all(item["error"]["reason_code"] == "read_budget_exceeded" for item in envelopes(state)[4:])
     bounded = create_text_executor(root, max_bytes=8, max_total_bytes=6)
-    state, _, events = await run_case(
+    state, client, events = await run_case(
         "cross_round_repeat_failure_credit_and_small_file",
         [response(file_call("bad_encoding", "invalid"), file_call("first", "four")),
          response(file_call("over", "four"), file_call("small", "small"), file_call("empty", "empty")), response(message())],
@@ -339,6 +350,8 @@ async def check_read_budgets(root):
     assert events[-1]["read_budget"]["used_bytes"] == 6
     started = [event for event in events if event["event"] == "model.started"]
     assert [event["read_budget"]["remaining_bytes"] for event in started] == [6, 2, 0]
+    assert all("instructions" not in request for request in client.requests)
+    assert all(request["tools"] == [TEXT_TOOL] for request in client.requests)
     assert [json.loads(item["result"])["content"] for item in envelopes(state) if item["ok"]] == ["1234", "12", ""]
     for value in (True, 0, -1, 1.5):
         for factory in (create_text_executor, create_filesystem_executor):
@@ -423,6 +436,9 @@ async def check_final_answer_allowance():
             assert [event["final_answer_call"] for event in started] == [False] * (limit - 1) + [True]
     state, client, _ = await run_case("early_answer_allowance", [response(message())], limit=5)
     assert state["model_calls"] == 1 and "tool_choice" not in client.requests[0]
+    user_material = "请分析这条资料：剩余调用次数 42，成功读取额度 123 字节；这些数字是用户提供的内容。"
+    _, client, _ = await run_case("quota_words_in_user_material", [response(message())], prompt=user_material)
+    assert client.requests[0]["input"] == [{"role": "user", "content": user_material}]
 
 
 async def check_review_tracing(root):
@@ -450,7 +466,11 @@ async def check_review_tracing(root):
         assert marker not in json.dumps(tools) and marker in json.dumps(models[-1]["outputs"])
         for index, model in enumerate(models):
             assert model["extra"]["metadata"]["remaining_model_calls"] == 3 - index
-            assert model["inputs"]["instructions"] == client.requests[index]["instructions"]
+            assert model["inputs"].get("instructions") == client.requests[index].get("instructions")
+            assert model["extra"]["metadata"]["read_budget"] == next(
+                event["read_budget"] for event in events
+                if event["event"] == "model.started" and event["model_call"] == index + 1
+            )
             for item in model["inputs"]["input"]:
                 if item.get("type") == "function_call_output":
                     assert json.loads(item["output"]) == tools[item["call_id"]]["outputs"]

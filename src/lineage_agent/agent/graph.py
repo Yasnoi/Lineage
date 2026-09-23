@@ -9,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Overwrite
 
-from lineage_agent.agent.state import AgentState, CompactionState, UsageTotals
+from lineage_agent.agent.state import AgentState, CompactionRequestOptions, CompactionState, UsageTotals
 from lineage_agent.agent.compaction import SummaryCall, build_compaction_nodes
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
@@ -26,6 +26,9 @@ from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 
 if TYPE_CHECKING:
     from lineage_agent.recording.tracing import RunTrace
+
+
+FINAL_ANSWER_INSTRUCTIONS = "本次仅根据已有资料回答；资料不足时明确说明，不再请求工具。"
 
 
 def _accumulate_usage(totals: UsageTotals, usage: TokenUsage | None) -> UsageTotals:
@@ -116,16 +119,14 @@ def build_graph(
             "remaining_model_calls": remaining, "final_answer_call": remaining == 1,
             "read_budget": budget, "read_budget_error": budget_error,
         }
-        instructions = f"本次用户请求剩余模型调用次数（包含当前调用）：{remaining}。"
-        if budget is not None:
-            instructions += f"本次运行剩余成功读取额度：{budget['remaining_bytes']} 字节。"
-        if remaining == 1:
-            instructions += "这是最后一次调用，不得请求工具；请依据已有资料回答，资料不足时明确说明。"
+        # Quotas remain execution metadata. Only the final-call behavior belongs
+        # in the model request; compaction checks reuse these exact options.
+        request_options: CompactionRequestOptions = {
+            "instructions": FINAL_ANSWER_INSTRUCTIONS if remaining == 1 else None,
+            "tool_choice": "none" if remaining == 1 else None,
+        }
         try:
-            request = prepare_model_request(
-                state["input"], instructions=instructions,
-                tool_choice="none" if remaining == 1 else None,
-            )
+            request = prepare_model_request(state["input"], **request_options)
             context_budget = check_context_budget(
                 request, state["context_risks"], settings, step_id=step_id,
             )
@@ -152,7 +153,7 @@ def build_graph(
                 compaction = {
                     "request_no": state["model_calls"] + 1, "summary_id": str(uuid4()),
                     "status": "preparing", "reason": None,
-                    "request_options": {"instructions": instructions, "tool_choice": "none" if remaining == 1 else None},
+                    "request_options": request_options,
                     "old_version_id": state["active_context"]["version_id"],
                 }
                 return finish(state, {

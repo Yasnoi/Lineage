@@ -31,7 +31,7 @@ class ActiveContext(TypedDict):
 
 
 class CompactionRequestOptions(TypedDict):
-    instructions: str
+    instructions: str | None
     tool_choice: Literal["none"] | None
 
 

@@ -104,7 +104,8 @@ def captured_measurements():
         return measure
 
     with patch.object(graph, "check_context_budget", side_effect=wrap(graph.check_context_budget, "business")), \
-            patch.object(compaction, "check_context_budget", side_effect=wrap(compaction.check_context_budget, "compaction")):
+            patch.object(compaction, "check_context_budget", side_effect=wrap(compaction.check_context_budget, "compaction")), \
+            patch.object(context, "check_context_budget", side_effect=wrap(context.check_context_budget, "selection")):
         yield observations
 
 
@@ -149,6 +150,12 @@ def audit(turn, client, scenario, observations=None):
         assert event["input_tool_result_call_ids"] == [item["call_id"] for item in results]
         assert len(results) == len({item["call_id"] for item in results})
         assert request["truncation"] == "disabled"
+        if event["final_answer_call"]:
+            assert request["instructions"] == graph.FINAL_ANSWER_INSTRUCTIONS
+            assert request["tool_choice"] == "none"
+        else:
+            assert "instructions" not in request and "tool_choice" not in request
+        assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
     for request in summaries:
         material_for(request)
     assert PRIVATE not in json.dumps(events, ensure_ascii=False)
@@ -468,6 +475,87 @@ async def check_activation_and_stable_reuse():
     assert actual.requests[0]["input"] == state["input"] + [{"role": "user", "content": "Short follow-up"}]
 
 
+async def check_request_options_through_compaction():
+    """Selection, candidate and SDK delivery share the same business options."""
+    for max_calls in (5, 1):
+        settings = replace(SETTINGS, max_model_calls=max_calls)
+
+        async def unused_executor(name, arguments):
+            raise AssertionError("this scenario must not execute a tool")
+
+        manager, sid, old = await seed(
+            settings=settings, tools=[TOOL], executor=unused_executor,
+            prefix=f"request_options_{max_calls}",
+        )
+        expected_options = {
+            "instructions": graph.FINAL_ANSWER_INSTRUCTIONS if max_calls == 1 else None,
+            "tool_choice": "none" if max_calls == 1 else None,
+        }
+        selected_options, sent_versions = [], []
+        original_select, original_create = context.ContextRecords.select, Client.create
+
+        async def observed_select(records, state, settings, prepare_request, **options):
+            assert options == expected_options == state["compaction"]["request_options"]
+            selected_options.append(deepcopy(options))
+            return await original_select(records, state, settings, prepare_request, **options)
+
+        async def observed_create(client, **request):
+            if not is_summary(request):
+                # Inspect the real saved graph snapshot at SDK entry, not just
+                # the later log claim that activation was confirmed.
+                saver = manager._checkpointer
+                checkpoint_id = saver.last_confirmed(sid)
+                saved = await saver.read_confirmed(sid, checkpoint_id)
+                values = saved.checkpoint["channel_values"]
+                assert values["compaction"]["status"] == "pending_save"
+                assert values["active_context"]["version_id"] == values["compaction"]["candidate_version_id"]
+                assert values["input"] == request["input"]
+                assert values["compaction"]["request_options"] == expected_options
+                sent_versions.append((checkpoint_id, values["active_context"]["version_id"]))
+            return await original_create(client, **request)
+
+        # Quota discussion supplied by the user remains ordinary task material;
+        # only application-generated per-call management prompts are removed.
+        prompt = TRIGGER + " 用户资料提到剩余读取额度 123 字节；请保留这段问题。"
+        with captured_measurements() as measured, \
+                patch.object(context.ContextRecords, "select", observed_select), \
+                patch.object(Client, "create", observed_create):
+            turn, client = await run(
+                manager, sid, prompt, [response(message("answered after confirmed activation"))],
+                scenario=f"compaction_request_options_{max_calls}",
+            )
+        assert turn.state["stop_reason"] == "completed"
+        assert selected_options == [expected_options]
+        assert turn.state["model_calls"] == turn.state["summary_calls"] == 1
+        summary_request, business = client.requests
+        assert summary_request["instructions"] == SUMMARY_INSTRUCTIONS
+        assert business["input"][-1] == {"role": "user", "content": prompt}
+        assert business["input"][-5:-1] == old[-1].state["input"][-4:]
+        assert business["tools"] == [TOOL]
+        options_sent = {key: value for key, value in expected_options.items() if value is not None}
+        assert {key: business[key] for key in expected_options if key in business} == options_sent
+        selection = [item for item in measured if item["purpose"] == "selection"]
+        candidates = [item for item in measured if item["purpose"] == "compaction" and not is_summary(item["request"])]
+        assert selection and len(candidates) == 1
+        assert candidates[0]["request"] == business
+        for observation in selection:
+            assert {key: value for key, value in observation["request"].items() if key != "input"} == {
+                key: value for key, value in business.items() if key != "input"
+            }
+        current = turn.state["compaction"]
+        assert sent_versions == [(current["confirmed_checkpoint_id"], current["candidate_version_id"])]
+        print(json.dumps({
+            "scenario": f"request_options_saved_before_sdk_{max_calls}",
+            "session_id": sid, "run_id": turn.state["run_id"],
+            "summary_id": current["summary_id"], "version_id": current["candidate_version_id"],
+            "checkpoint_id": current["confirmed_checkpoint_id"],
+            "final_answer_call": max_calls == 1, "selection_checks": len(selection),
+            "candidate_checks": len(candidates), "call_ids": [],
+            "steps": [item["step_id"] for item in read_events(turn.state) if item["event"] == "context_budget.checked"],
+            "log_path": turn.state["log_path"],
+        }, ensure_ascii=False))
+
+
 async def check_refusal_boundaries():
     manager = SessionManager()
     sid = manager.create_session(SETTINGS)
@@ -657,8 +745,9 @@ async def check_repeated_compaction():
     settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=1)
     # Use a real executor invocation producing enough new material for a second
     # recovery in the same user request; each business request gets at most one.
+    # Leave headroom beyond the trigger without relying on quota prompt bytes.
     async def large_result(name, arguments):
-        return "REAL_TOOL_RESULT_" + "z" * 6500
+        return "REAL_TOOL_RESULT_" + "z" * 6700
 
     # Sessions bind the executor at creation; construct this session correctly
     # through its public API instead of replacing a live permission binding.
@@ -696,7 +785,7 @@ async def check_unattempted_recovery_record():
     settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=5)
 
     async def large_result(name, arguments):
-        return "z" * 6500
+        return "z" * 6700
 
     manager, sid, old = await seed(
         settings=settings, count=8, tools=[TOOL], executor=large_result,
@@ -961,7 +1050,8 @@ async def main():
     checks = (
         check_configuration, check_stable_history_and_records,
         check_selection_read_path, check_compaction_status_consumers,
-        check_activation_and_stable_reuse, check_refusal_boundaries,
+        check_activation_and_stable_reuse, check_request_options_through_compaction,
+        check_refusal_boundaries,
         check_summary_failure_cases, check_usage_missing,
         check_summary_and_candidate_budget_boundaries,
         check_opaque_barriers_and_omissions, check_real_file_and_failure_source,

@@ -89,6 +89,11 @@ def audit(state, client, measured, *, scenario, turn=None, faults=None):
         assert value["request"] == request, "budget measured a different request from the one dispatched"
         assert request["max_output_tokens"] == value["diagnostic"]["output_reserve_tokens"]
         assert request["truncation"] == "disabled" and request["stream"] is False and request["store"] is False
+        if started["final_answer_call"]:
+            assert request["instructions"] == graph.FINAL_ANSWER_INSTRUCTIONS and request["tool_choice"] == "none"
+        else:
+            assert "instructions" not in request and "tool_choice" not in request
+        assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
         recorded = next(event for event in checks if event["step_id"] == started["step_id"])
         assert events.index(recorded) < events.index(started)
         assert recorded["input_tool_result_call_ids"] == [
@@ -210,7 +215,12 @@ async def check_transparent_request_and_boundary():
         if delta != 1:
             assert not actual.requests and state["history_end"] == 0
             assert state["usage_totals"] == {"input_tokens": None, "output_tokens": None, "total_tokens": None, "missing_usage_calls": 0}
-    state, _, _ = await run([response(message())], tools=[TOOL], executor=fixed_tool, scenario="schema_and_instructions_in_budget")
+    state, actual, checked = await run(
+        [response(message())], tools=[TOOL], executor=fixed_tool,
+        settings=replace(SETTINGS, max_model_calls=1), scenario="schema_and_final_instructions_in_budget",
+    )
+    assert actual.requests[0]["instructions"] == graph.FINAL_ANSWER_INSTRUCTIONS
+    assert checked[0]["request"] == actual.requests[0]
     prepared = prepare_request(SETTINGS.model_name, original, tools=[TOOL], instructions="预算指令", tool_choice="none", max_output_tokens=4096)
     diag = check_context_budget(prepared, [None], SETTINGS, step_id="unit")
     assert diag["transparent_tokens"] == compact_bytes(prepared)
@@ -360,13 +370,19 @@ async def check_file_sessions_isolation():
             historical[name] = deepcopy(turn.state)
             assert json.loads(json.loads(outputs(turn.state)[0]["output"])["result"])["content"] == f"FACT_{name}_BODY"
             assert actual.requests[1]["input"][-1] == outputs(turn.state)[0]
+            starts = [event for event in read_events(turn.state) if event["event"] == "model.started"]
+            assert [event["read_budget"]["remaining_bytes"] for event in starts] == [11, 0]
+            assert all("instructions" not in request and request["tools"] == [TEXT_TOOL] for request in actual.requests)
         for name, sid, _, settings in reversed(cases):
             turn, actual, _ = await run([response(message(f"FACT_{name}_BODY"))], manager=manager, sid=sid, prompt="Recall the source", scenario=f"root_{name}_followup")
             assert actual.requests[0]["input"] == historical[name]["input"] + [{"role": "user", "content": "Recall the source"}]
             assert ("FACT_B_BODY" if name == "A" else "FACT_A_BODY") not in json.dumps(actual.requests)
             assert turn.state["model_calls"] == 1 and turn.state["tool_calls"] == 0
             assert turn.state["context_budget"]["limit_tokens"] == settings.context_budget_tokens
-            assert "11 字节" in actual.requests[0]["instructions"], "new turns must receive fresh tool allowance"
+            started = next(event for event in read_events(turn.state) if event["event"] == "model.started")
+            assert started["read_budget"] == {"limit_bytes": 11, "used_bytes": 0, "remaining_bytes": 11}
+            assert started["remaining_model_calls"] == settings.max_model_calls
+            assert "instructions" not in actual.requests[0] and actual.requests[0]["tools"] == [TEXT_TOOL]
         assert snapshot(base) == before and Path.cwd() == cwd
 
 

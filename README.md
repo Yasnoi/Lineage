@@ -126,7 +126,7 @@ asyncio.run(main())
 
 ## 模型请求的上下文预算
 
-每次业务模型调用前检查实际准备的请求，包括首次调用、工具回传后的调用，以及应用动态生成的剩余次数/读取额度提示和工具定义。检查通过时沿用同一请求副本发送，不改变历史的内容、顺序或工具关联。实际请求设置 `max_output_tokens=MAX_OUTPUT_TOKENS` 和 `truncation="disabled"`，不请求端点自动截断或压缩；输出额度同时用于预留可见回答和推理输出空间。动态提示仍位于请求的 `instructions`，历史稳定追加不等于保证供应商缓存命中。
+每次业务模型调用前检查实际准备的请求，包括首次调用、工具回传后的调用、工具定义，以及适用的固定收尾说明和 `tool_choice`。普通业务请求省略 `instructions` 和 `tool_choice`，不播报剩余调用次数或读取额度。检查通过时沿用同一请求副本发送，不改变历史的内容、顺序或工具关联；摘要选源和候选检查也复用相同业务请求选项。实际请求设置 `max_output_tokens=MAX_OUTPUT_TOKENS` 和 `truncation="disabled"`，不请求端点自动截断或压缩；输出额度同时用于预留可见回答和推理输出空间。指令与历史稳定不保证供应商 Prompt Cache 命中，最后回答轮仍会切换为明确的收尾策略。
 
 本地方法名为 `utf8_json_opaque_v1`，采用透明内容估算加不透明（opaque）内容风险预留，不调用 Provider 计数服务，也不依赖 tokenizer：
 
@@ -293,7 +293,7 @@ src/lineage_agent/
 
 初始上下文中的 `function_call` 与 `function_call_output` 必须使用非空字符串 `call_id`，请求先于结果且一一对应；缺失、重复或无法配对时返回错误终态，模型调用次数为零。其他协议项原样保留。模型响应不得夹带由应用生成的 `function_call_output`，否则按协议错误终止；字典形式的响应同样深拷贝，避免不同运行共享嵌套数据。输出消息只接受 `type="message"`、`role="assistant"`，其他角色、缺失角色、伪装输入消息或非消息项夹带角色均按协议错误拒绝，不进入后续上下文。合法 `refusal` 内容与 `output_text` 按顺序合为展示文本；纯拒答是有效回答，与请求失败区分。
 
-独立模型接口为 `await generate_response(client, model_name, input, *, tools=None, instructions=None, tool_choice=None, max_output_tokens=4096)`（可另注入追踪器）；该兼容入口只负责单次请求，完整的调用前预算检查通过 `run_agent` 或 `SessionManager.run_turn` 使用。图先准备包含应用 `instructions` 和 `tool_choice` 的请求、完成预算检查，再调用 `send_prepared_response` 发送同一份参数。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
+独立模型接口为 `await generate_response(client, model_name, input, *, tools=None, instructions=None, tool_choice=None, max_output_tokens=4096)`（可另注入追踪器）；该兼容入口只负责单次请求，完整的调用前预算检查通过 `run_agent` 或 `SessionManager.run_turn` 使用。图按普通或收尾策略准备请求，适用时包含 `instructions` 和 `tool_choice`，完成预算检查后调用 `send_prepared_response` 发送同一份参数。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
 
 ## 目录列举
 
@@ -396,7 +396,7 @@ state = asyncio.run(run_agent(
 
 成功读取按 `bytes_read` 累计，包含 BOM，重复读取重复计量。完整读取、校验和结果序列化成功后才扣减，失败不占成功正文额度；随后日志失败也不撤销已发生的扣减。余额不足拒绝当前文件，但同批较小文件仍可执行，空文件不消耗额度。
 
-内置文本/组合执行器为可调用对象，提供 `bind_run()`；每次 `run_agent` 自动获得独立预算实例，同一执行器连续或交错复用不串用计量。直接调用执行器时预算持续到该实例结束，需显式 `bind_run()` 才能开启另一份预算。组合执行器只绑定一次根目录，每次访问仍重新校验路径。只读 `read_budget` 快照含 `limit_bytes/used_bytes/remaining_bytes`，供调用额度提示、结束日志和 Tracing 使用，不在 State 重复存储。包装执行器时应转发 `bind_run()` 和 `read_budget`；普通异步函数仍可注入，但自定义输出没有内置读取预算。
+内置文本/组合执行器为可调用对象，提供 `bind_run()`；每次 `run_agent` 自动获得独立预算实例，同一执行器连续或交错复用不串用计量。直接调用执行器时预算持续到该实例结束，需显式 `bind_run()` 才能开启另一份预算。组合执行器只绑定一次根目录，每次访问仍重新校验路径。只读 `read_budget` 快照含 `limit_bytes/used_bytes/remaining_bytes`，供运行记录和 Tracing 观测使用，不转换为模型额度提示，也不在 State 重复存储。包装执行器时应转发 `bind_run()` 和 `read_budget`；普通异步函数仍可注入，但自定义输出没有内置读取预算。
 
 累计额度仅限制本次新返回的文件正文字节数，不保证整个模型上下文的 Token 或序列化字节数有界，也不限制历史输入、目录结果或任意自定义工具输出。文件 I/O 仍同步执行，慢磁盘可能占用事件循环。
 
@@ -441,7 +441,7 @@ state = asyncio.run(run_agent(
 
 执行器是异步可调用对象：`execute_tool(name, arguments) -> str`。提供工具定义时须同时注入执行器；工具定义、执行器及调用上限作为运行依赖，不存入 State。
 
-执行器可选提供 `bind_run()` 和 `read_budget`：前者为新请求创建独立额度，后者仅提供 `limit_bytes/used_bytes/remaining_bytes` 的观测快照。普通异步函数无需实现这两项；包装内置执行器时，应按需要转发这两个能力。没有 `read_budget` 属性或明确返回 `None` 均表示未提供额度元数据，属于正常情况；提供了无效的非 `None` 快照，或属性读取、快照验证发生普通异常时，以 `read_budget_unavailable` 安全诊断降级为未知，省略对应额度提示，不补零或沿用旧值，不改变业务结果、保存结果或工具内部的实际额度约束。取消等控制异常仍按原规则传播。收尾只读取一次额度，JSONL 和 Tracing 使用同一份观测。
+执行器可选提供 `bind_run()` 和 `read_budget`：前者为新请求创建独立额度，后者仅提供 `limit_bytes/used_bytes/remaining_bytes` 的观测快照。普通异步函数无需实现这两项；包装内置执行器时，应按需要转发这两个能力。没有 `read_budget` 属性或明确返回 `None` 均表示未提供额度元数据，属于正常情况；提供了无效的非 `None` 快照，或属性读取、快照验证发生普通异常时，以 `read_budget_unavailable` 安全诊断降级为未知，不补零或沿用旧值，不改变业务结果、保存结果或工具内部的实际额度约束。取消等控制异常仍按原规则传播。收尾只读取一次额度，JSONL 和 Tracing 使用同一份观测。
 
 纯工具请求是有效模型响应；文本与工具请求并存时先处理工具。每批按请求顺序串行执行，所有结果按 `call_id` 回传后再调用模型。工具名称必须属于本次提供的定义，参数必须可解析为 JSON 对象；具体字段由执行器校验，不提供通用 JSON Schema 校验引擎。
 
@@ -455,7 +455,9 @@ state = asyncio.run(run_agent(
 
 执行器返回非字符串同样计为一次执行尝试和一次失败，返回 `execution_error`；不自动将返回值转换成字符串或 JSON。同批成功、失败和拒绝结果均按原请求顺序关联，全部处理后才发起下一次模型请求。若写入拒绝或失败事件时日志故障，已有统计及已生成结果仍留在 State，剩余请求跳过且不再调用模型；State 中存在错误结果并不表示它已经回传。
 
-每次业务模型请求通过应用生成的 `instructions` 提供剩余次数（含当前调用），以及可取得的读取余额。默认最多 5 次，其中最后一次专用于回答，设置 `tool_choice="none"`，要求依据已有资料作答或明确说明资料不足。`MAX_MODEL_CALLS=1` 时从第一次起就禁用工具。若兼容端点仍返回工具请求，则保留请求事实，以 `max_model_calls` 结束，不执行该批工具，也不发起第 N+1 次请求。模型错误说明和阶段由固定错误码生成，超时、连接、HTTP 与协议错误可区分，不展示任意异常文本。模型或协议错误以 `error` 结束，返回已产生的上下文、计数、可取得的响应及 usage，而不是丢失失败节点的统计。配置或输入错误在调用模型前报告。
+剩余调用次数包含即将发出的本次业务调用。大于一次时，普通业务请求不注入额度指令；只剩一次时，`instructions` 固定为“本次仅根据已有资料回答；资料不足时明确说明，不再请求工具。”，同时设置 `tool_choice="none"`。默认最多 5 次，`MAX_MODEL_CALLS=1` 时从第一次起就采用该收尾策略。调用次数、读取额度、用量及预算判断由 Agent 代码管理，并保留在 JSONL 和 Tracing 中，不改写消息或工具定义来逐轮播报。读取拒绝及失败仍作为关联原调用的工具事实进入模型上下文，不会随额度提示一并删除。
+
+调用次数耗尽后不发起额外请求。若兼容端点在末轮仍返回工具请求，则保留请求事实，以 `max_model_calls` 结束，不执行该批工具，也不发起第 N+1 次请求。模型错误说明和阶段由固定错误码生成，超时、连接、HTTP 与协议错误可区分，不展示任意异常文本。模型或协议错误以 `error` 结束，返回已产生的上下文、计数、可取得的响应及 usage，而不是丢失失败节点的统计。配置或输入错误在调用模型前报告。摘要模型的固定任务指令和独立调用统计不受这一业务请求策略影响。
 
 客户端关闭只尝试一次。已有最终 State 时关闭失败保留回答、上下文、统计及 usage，并记录 `client_close_error`；已有主要错误不被关闭错误覆盖，取消或配置异常继续传播。日志仍尝试完成，`log_complete` 只描述日志完整性，Tracing 上传失败仍不阻断业务。
 
@@ -574,7 +576,9 @@ uv run --locked python scripts/verify_tracing.py
 
 `verify_tracing.py` 使用 `.env` 中的真实模型与 LangSmith 配置，仅访问临时样例目录；它查询远端记录、输出私有 Trace 链接和本地运行标识，并分别报告同批请求、拒绝是否在该次真实运行中出现。usage 按最终投影与远端一致的字段报告每次调用的 `none`、`partial` 或 `full` 及汇总数量；合法零值有效，缺失字段不补零，`usage_covered=true` 仅表示至少一次调用有有效 token 字段。之后仍需登录网页核对参数、结果、调用关联和耗时。确定性检查不能证明真实服务接收或网页显示正确；真实远端与网页验收仍待执行。
 
-`check_review_fixes.py` 另核对输出角色与拒答、直接配置校验、关闭失败叠加错误、分页候选内存、累计预算及执行器复用隔离、最后回答轮和新追踪字段。`verify_review_fixes.py` 使用随机非敏感 Python/TOML 文件验证分页、正文与来源引用，另发起一次仅允许回答的真实调用检查 `tool_choice="none"`。
+`check_review_fixes.py` 另核对输出角色与拒答、直接配置校验、关闭失败叠加错误、分页候选内存、累计预算及执行器复用隔离、最后回答轮和追踪字段。`verify_review_fixes.py` 使用随机非敏感 Python/TOML 文件验证分页、正文与来源引用，另发起一次仅允许回答的真实调用。脚本捕获实际 SDK 请求，检查普通请求省略额度指令、末轮使用固定收尾说明及 `tool_choice="none"`、上下文稳定追加，以及工具定义不随额度变化；读取额度仍与运行记录核对。
+
+真实验证单独报告端点实际返回的 `usage.input_tokens_details.cached_tokens`。只有有效的非负整数才作为缓存观测，缺失或无效标为不可观测，不推算为零。该观测不证明提示词调整带来缓存收益；一次命中或未命中也不能替代功能验收。
 
 `check_text.py` 使用真实临时文件，检查字节边界及实际读取量、短读和增长、UTF-8/BOM/换行、控制字符、路径拒绝、批次继续、隔离和文件未修改。权限、读取中途故障及元数据变化采用明确标注的注入；真实链接无法创建时报告跳过原因。`check_text_tracing.py` 使用真实 SDK 序列化和替身 HTTP，区分被省略的工具正文与允许按模型文本规则处理的回答引用，比较开关及上传故障下的实际模型请求和统计，不代表远端网页验收。
 

@@ -206,7 +206,7 @@ class ContextRecords:
 
     async def select(
         self, state: AgentState, settings: ModelSettings,
-        prepare_request: Callable[..., dict[str, Any]], instructions: str,
+        prepare_request: Callable[..., dict[str, Any]], instructions: str | None,
         tool_choice: Literal["none"] | None,
     ) -> tuple[CompactionSelection | None, str | None]:
         """Choose enough whole old turns for the target with a full summary reserve."""
