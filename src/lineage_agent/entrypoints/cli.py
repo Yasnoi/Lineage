@@ -7,12 +7,20 @@ import sys
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, PreExecutionConfigurationError, run_agent
 from lineage_agent.agent.sessions import SessionError, SessionManager, SessionTurn
-from lineage_agent.agent.state import AgentState
+from lineage_agent.agent.state import AgentState, CompactionStatus
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.filesystem import directory
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
+
+
+_COMPACTION_STAGE_LABELS: dict[CompactionStatus, str] = {
+    "preparing": "准备摘要", "summary_budget_rejected": "摘要预算拒绝",
+    "candidate": "候选已生成", "pending_save": "版本等待保存确认",
+    "confirmed": "版本保存已确认", "used": "新版本已用于业务请求",
+    "stopped": "未切换并停止", "failed": "压缩失败",
+}
 
 
 def format_run_summary(state: AgentState) -> str:
@@ -33,12 +41,7 @@ def format_run_summary(state: AgentState) -> str:
         summary += f"\n活动上下文版本：{active['version_id']}"
     compaction = TraceSanitizer.compaction(state.get("compaction"))
     if compaction:
-        stage = {
-            "preparing": "准备摘要", "summary_budget_rejected": "摘要预算拒绝",
-            "candidate": "候选已生成", "pending_save": "版本等待保存确认",
-            "confirmed": "版本保存已确认", "used": "新版本已用于业务请求",
-            "stopped": "未切换并停止", "failed": "压缩失败",
-        }.get(compaction.get("status"), "未确认")
+        stage = _COMPACTION_STAGE_LABELS.get(compaction.get("status"), "未确认")
         summary += f"\n上下文压缩：{stage}"
         if compaction.get("reason"):
             summary += f"（{compaction['reason']}）"

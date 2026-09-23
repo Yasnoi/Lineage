@@ -2,26 +2,37 @@
 
 from copy import deepcopy
 import json
-from typing import Any, TypedDict
+from collections.abc import Callable
+from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
+from langgraph.checkpoint.base import CheckpointTuple
+
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.state import (
+    ActiveContext, AgentState, CompactionSources, RecordReference, SummaryReference,
+)
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import check_context_budget
+from lineage_agent.tools.types import ToolOutcomes
 
 
-class TurnReference(TypedDict):
-    run_id: str
-    checkpoint_id: str
-    item_count: int
+class TurnSlice(TypedDict):
+    """Only the confirmed facts needed to select and describe source material."""
+
+    admitted_input: list[dict[str, Any]]
+    stop_reason: Literal["completed", "max_model_calls", "context_budget_exceeded", "error"] | None
+    error_code: str | None
+    tool_outcomes: ToolOutcomes
 
 
-class ActiveContext(TypedDict):
-    version_id: str
-    parent_version_id: str | None
-    summary: dict[str, str] | None
-    turns: list[TurnReference]
-    turn_start: int
+class CompactionSelection(TypedDict):
+    sources: CompactionSources
+    material: dict[str, Any]
+    allowed_source_ids: list[str]
+    removed_items: int
+    removed_turns: int
+    reserved_candidate_tokens: int
 
 
 def new_context() -> ActiveContext:
@@ -33,8 +44,10 @@ def json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
-async def read_record(saver: SessionCheckpointer, session_id: str, ref: dict) -> dict:
-    """Read only confirmed snapshots; never resume, reset, or heal a failed thread."""
+async def _read_final_turn(
+    saver: SessionCheckpointer, session_id: str, ref: RecordReference,
+) -> tuple[CheckpointTuple, int, int]:
+    """Load one fixed final checkpoint and validate its run and turn boundaries."""
     saved = await saver.read_confirmed(session_id, ref["checkpoint_id"])
     final = saved.checkpoint["channel_values"]
     if final.get("run_id") != ref["run_id"]:
@@ -45,6 +58,34 @@ async def read_record(saver: SessionCheckpointer, session_id: str, ref: dict) ->
     if (type(start) is not int or type(boundary) is not int or not isinstance(items, list)
             or not 0 <= start <= boundary <= len(items)):
         raise CheckpointError("checkpoint_read_error")
+    return saved, start, boundary
+
+
+async def read_turn_slice(
+    saver: SessionCheckpointer, session_id: str, ref: RecordReference,
+) -> TurnSlice:
+    """Select facts without reconstructing the run's model/summary call archive.
+
+    The native saver still deserializes the final checkpoint. Do not traverse
+    its parents or copy unrelated raw responses just to select this turn.
+    """
+    saved, start, boundary = await _read_final_turn(saver, session_id, ref)
+    final = saved.checkpoint["channel_values"]
+    return deepcopy({
+        "admitted_input": final["input"][start:boundary],
+        "stop_reason": final.get("stop_reason"),
+        "error_code": final.get("error_code"),
+        "tool_outcomes": final.get("tool_outcomes"),
+    })
+
+
+async def read_record(
+    saver: SessionCheckpointer, session_id: str, ref: RecordReference,
+) -> dict[str, Any]:
+    """Read only confirmed snapshots; never resume, reset, or heal a failed thread."""
+    saved, start, boundary = await _read_final_turn(saver, session_id, ref)
+    final = saved.checkpoint["channel_values"]
+    items = final["input"]
     model_results, summary_results = {}, {}
     cursor = saved
     seen = set()
@@ -151,7 +192,7 @@ class ContextRecords:
             raise CheckpointError("checkpoint_read_error")
         return checkpoint_id
 
-    async def summary(self, ref: dict | None) -> dict | None:
+    async def summary(self, ref: SummaryReference | None) -> dict[str, list[dict[str, Any]]] | None:
         if ref is None:
             return None
         saved = await self.saver.read_confirmed(self.session_id, ref["checkpoint_id"])
@@ -163,8 +204,11 @@ class ContextRecords:
             raise CheckpointError("checkpoint_read_error")
         return deepcopy(document)
 
-    async def select(self, state: dict, settings: ModelSettings, prepare_request, instructions: str,
-                     tool_choice: str | None) -> tuple[dict | None, str | None]:
+    async def select(
+        self, state: AgentState, settings: ModelSettings,
+        prepare_request: Callable[..., dict[str, Any]], instructions: str,
+        tool_choice: Literal["none"] | None,
+    ) -> tuple[CompactionSelection | None, str | None]:
         """Choose enough whole old turns for the target with a full summary reserve."""
         active = state["active_context"]
         turns = active["turns"]
@@ -178,7 +222,7 @@ class ContextRecords:
         removed = offset
         placeholder = {"role": "assistant", "content": ""}
         for index, ref in enumerate(turns[:eligible]):
-            record = await read_record(self.saver, self.session_id, ref)
+            record = await read_turn_slice(self.saver, self.session_id, ref)
             items = record["admitted_input"]
             if len(items) != ref["item_count"] or items != state["input"][offset:offset + len(items)]:
                 raise CheckpointError("checkpoint_read_error")

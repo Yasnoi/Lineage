@@ -1,17 +1,30 @@
 """One bounded recovery per business request, with separate save barriers."""
 
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from langgraph.types import Overwrite
 
 from lineage_agent.agent.checkpointing import CheckpointError
+from lineage_agent.agent.context import ContextRecords
+from lineage_agent.agent.state import ActiveContext, AgentState, CompactionState, UsageTotals
+from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
 from lineage_agent.models.responses import ModelError
 from lineage_agent.models.summarization import (
     SummaryError, parse_summary, prepare_summary_request, summary_budget_settings,
 )
-from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE
+from lineage_agent.models.types import ModelResult, TokenUsage
+from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
+
+if TYPE_CHECKING:
+    from lineage_agent.recording.tracing import RunTrace
+
+
+type SummaryCall = Callable[[dict[str, Any], dict[str, Any]], Awaitable[ModelResult]]
+type CompactionNode = Callable[[AgentState], Awaitable[dict[str, Any]]]
 
 
 def safe_compaction_error(reason: str) -> str:
@@ -24,13 +37,23 @@ def safe_compaction_error(reason: str) -> str:
     }.get(reason, "上下文预算无法通过本次有界压缩恢复，未发起对应业务请求。")
 
 
-def build_compaction_nodes(*, settings, records, call_summary, prepare_model_request,
-                           recorder, tracer, finish, accumulate_usage, validate_input):
+def build_compaction_nodes(
+    *, settings: ModelSettings, records: ContextRecords | None,
+    call_summary: SummaryCall | None,
+    prepare_model_request: Callable[..., dict[str, Any]],
+    recorder: RunRecorder | None, tracer: "RunTrace | None",
+    finish: Callable[[AgentState, dict[str, Any], str, str | None], dict[str, Any]],
+    accumulate_usage: Callable[[UsageTotals, TokenUsage | None], UsageTotals],
+    validate_input: Callable[[list[dict[str, Any]]], tuple[str, int] | None],
+) -> tuple[CompactionNode, CompactionNode]:
     """Nodes preserve the old version until a validated activation is saved."""
-    def emit(event, step_id, *, node="summary", **details):
+    def emit(event: str, step_id: str | None, *, node: str = "summary", **details: Any) -> bool:
         return recorder is None or recorder.emit(event, step_id=step_id, node=node, **details)
 
-    def stop(state, compaction, reason, step_id, *, failed=False, update=None, node="summary"):
+    def stop(
+        state: AgentState, compaction: CompactionState, reason: str, step_id: str | None,
+        *, failed: bool = False, update: dict[str, Any] | None = None, node: str = "summary",
+    ) -> dict[str, Any]:
         compaction.update(status="failed" if failed else "stopped", reason=reason)
         values = dict(update or {})
         values.update(
@@ -47,9 +70,10 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
             tracer.observe_compaction(compaction)
         return finish(state, values, node, step_id)
 
-    async def summarize(state):
+    async def summarize(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
         compaction = deepcopy(state["compaction"])
+        assert compaction is not None
         compaction["step_id"] = step_id
         options = compaction["request_options"]
         if records is None:
@@ -61,9 +85,14 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
         except Exception:
             return stop(state, compaction, "context_measurement_error", step_id, failed=True)
         if selected is None:
+            assert reason is not None
             return stop(state, compaction, reason, step_id, failed=reason == "context_measurement_error")
-        material = selected.pop("material")
-        compaction.update(selected)
+        material = selected["material"]
+        compaction.update(
+            sources=selected["sources"], allowed_source_ids=selected["allowed_source_ids"],
+            removed_items=selected["removed_items"], removed_turns=selected["removed_turns"],
+            reserved_candidate_tokens=selected["reserved_candidate_tokens"],
+        )
         if not emit("compaction.started", step_id, summary_id=compaction["summary_id"],
                     request_no=compaction["request_no"], sources=compaction["sources"],
                     old_version_id=state["active_context"]["version_id"]):
@@ -93,6 +122,7 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
         metadata = {**compaction, "summary_call": count,
                     "source_bytes": len(request["input"][0]["content"].encode("utf-8"))}
         try:
+            assert call_summary is not None
             result = await call_summary(request, metadata)
         except ModelError as exc:
             result, failure = exc.result, "summary_model_error"
@@ -100,7 +130,7 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
         except Exception:
             result, failure = None, "summary_model_error"
         usage = result["usage"] if result is not None else None
-        update = {
+        update: dict[str, Any] = {
             "summary_calls": count, "summary_result": result,
             "summary_usage_totals": accumulate_usage(state["summary_usage_totals"], usage),
             "usage_totals": accumulate_usage(state["usage_totals"], usage),
@@ -134,9 +164,10 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
             tracer.observe_compaction(compaction)
         return finish(state, update, "summary", step_id)
 
-    async def activate(state):
+    async def activate(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
         compaction = deepcopy(state["compaction"])
+        assert compaction is not None and records is not None
         summary_checkpoint_id = records.confirmed()
         saved = await records.saver.read_confirmed(records.session_id, summary_checkpoint_id)
         saved_candidate = saved.checkpoint["channel_values"].get("compaction")
@@ -163,7 +194,7 @@ def build_compaction_nodes(*, settings, records, call_summary, prepare_model_req
                 or budget["required_tokens"] >= state["context_budget"]["required_tokens"]):
             return stop(state, compaction, "summary_not_effective", step_id, node="activate_context")
         previous = state["active_context"]
-        active = {
+        active: ActiveContext = {
             "version_id": compaction["candidate_version_id"], "parent_version_id": previous["version_id"],
             "summary": {"summary_id": compaction["summary_id"], "checkpoint_id": summary_checkpoint_id},
             "turns": deepcopy(previous["turns"][compaction["removed_turns"]:]),

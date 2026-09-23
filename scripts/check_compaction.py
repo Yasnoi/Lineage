@@ -13,6 +13,7 @@ import json
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import get_args
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -24,11 +25,14 @@ from check_sessions import checkpoint_fault, saved_state
 from check_session_review_fixes import resources, closed_resources
 from check_text import snapshot
 from check_tracing import capture
-from lineage_agent.agent import compaction, graph, runtime
+from lineage_agent.agent import compaction, context, graph, runtime
+from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.sessions import SessionError, SessionManager
+from lineage_agent.agent.state import CompactionStatus
 from lineage_agent.config.settings import ConfigurationError
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
@@ -150,6 +154,19 @@ def audit(turn, client, scenario, observations=None):
     assert PRIVATE not in json.dumps(events, ensure_ascii=False)
     assert PRIVATE not in (state.get("error") or "")
     compaction = state.get("compaction") or {}
+    if compaction:
+        assert compaction["status"] in get_args(CompactionStatus)
+        assert {"request_no", "status", "reason"} <= compaction.keys()
+        # Exercise the contract on actual graph states, not constructed examples.
+        if compaction["status"] in {"preparing", "candidate", "pending_save", "confirmed", "used"}:
+            assert {"summary_id", "request_options", "old_version_id"} <= compaction.keys()
+        if compaction["status"] in {"candidate", "pending_save", "confirmed", "used"}:
+            assert {"sources", "removed_items", "removed_turns", "document", "message",
+                    "candidate_version_id", "summary_bytes", "summary_call"} <= compaction.keys()
+        if compaction["status"] in {"pending_save", "confirmed", "used"}:
+            assert {"summary_checkpoint_id", "candidate_budget"} <= compaction.keys()
+        if compaction["status"] in {"confirmed", "used"}:
+            assert compaction["confirmed_checkpoint_id"]
     active = state["active_context"]
     print(json.dumps({
         "scenario": scenario, "session_id": turn.session_id, "run_id": state["run_id"],
@@ -245,6 +262,168 @@ async def check_stable_history_and_records():
     record["input"][0]["content"] = "MUTATE_RETURNED_RECORD"
     turns[0].state["input"][0]["content"] = "MUTATE_RETURNED_STATE"
     assert await manager.get_record(sid, turns[0].state["run_id"]) == before
+
+
+async def check_turn_slice(manager, turn):
+    """Compare fixed-checkpoint selection with the unchanged public archive."""
+    saver, sid = manager._checkpointer, turn.session_id
+    ref = {"run_id": turn.state["run_id"], "checkpoint_id": turn.checkpoint_id}
+    with patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+        original = await manager.get_record(sid, ref["run_id"])
+    full_reads = reads.await_count
+    assert full_reads >= 1
+    if turn.state["model_calls"] or turn.state["summary_calls"]:
+        assert full_reads > 1
+    with patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+        selected = await context.read_turn_slice(saver, sid, ref)
+    reads.assert_awaited_once_with(sid, turn.checkpoint_id)
+    expected = {key: original[key] for key in ("admitted_input", "stop_reason", "error_code", "tool_outcomes")}
+    assert selected == expected
+    selected["admitted_input"].clear()
+    selected["tool_outcomes"]["skipped"] = 999
+    assert await context.read_turn_slice(saver, sid, ref) == expected
+    assert await manager.get_record(sid, ref["run_id"]) == original
+
+    class CopyForbidden:
+        def __deepcopy__(self, memo):
+            raise AssertionError("selection copied an unrelated response archive")
+
+    read_confirmed = saver.read_confirmed
+
+    async def observed_snapshot(thread_id, checkpoint_id):
+        saved = await read_confirmed(thread_id, checkpoint_id)
+        # Change only this newly deserialized observation; never write it back.
+        values = saved.checkpoint["channel_values"]
+        values["result"] = CopyForbidden()
+        values["summary_result"] = CopyForbidden()
+        values["compaction"] = CopyForbidden()
+        return saved
+
+    with patch.object(saver, "read_confirmed", side_effect=observed_snapshot):
+        assert await context.read_turn_slice(saver, sid, ref) == expected
+    assert await manager.get_record(sid, ref["run_id"]) == original
+
+    for reader in (context.read_turn_slice, context.read_record):
+        for corruption in ("run", "boundary"):
+            async def invalid_snapshot(thread_id, checkpoint_id):
+                saved = await read_confirmed(thread_id, checkpoint_id)
+                values = saved.checkpoint["channel_values"]
+                if corruption == "run":
+                    values["run_id"] = "different-run"
+                else:
+                    values["history_end"] = len(values["input"]) + 1
+                return saved
+
+            with patch.object(saver, "read_confirmed", side_effect=invalid_snapshot):
+                try:
+                    await reader(saver, sid, ref)
+                except CheckpointError as exc:
+                    assert exc.code == "checkpoint_read_error"
+                else:
+                    raise AssertionError("a corrupt final-turn reference passed validation")
+    print(json.dumps({
+        "scenario": "turn_slice_matches_full_record", "session_id": sid,
+        "run_id": ref["run_id"], "checkpoint_id": turn.checkpoint_id,
+        "log_path": turn.state["log_path"], "full_record_reads": full_reads,
+        "selection_reads": 1, "record_model_results": len(original["model_results"]),
+        "record_summary_results": len(original["summary_results"]),
+    }, ensure_ascii=False))
+
+
+async def check_selection_read_path():
+    manager, sid, old = await seed(prefix="selection_read_path")
+    saver = manager._checkpointer
+    select = context.ContextRecords.select
+    observations = []
+
+    async def compared_select(records, state, *args, **kwargs):
+        with patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+            selected = await select(records, state, *args, **kwargs)
+        fast_ids = [call.args[1] for call in reads.await_args_list]
+        # The former selection path used the full public record for each turn.
+        with patch.object(context, "read_turn_slice", context.read_record), \
+                patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+            full_selected = await select(records, state, *args, **kwargs)
+        assert selected == full_selected
+        full_count = reads.await_count
+        selection, reason = selected
+        assert selection is not None and reason is None
+        refs = selection["sources"]
+        expected_ids = ([refs["previous_summary"]["checkpoint_id"]] if refs["previous_summary"] else [])
+        expected_ids += [ref["checkpoint_id"] for ref in refs["added_turns"]]
+        assert fast_ids == expected_ids and len(fast_ids) < full_count
+        observations.append(deepcopy(selection))
+        print(json.dumps({
+            "scenario": "selection_requests_unchanged", "session_id": sid,
+            "run_id": state["run_id"], "summary_id": state["compaction"]["summary_id"],
+            "budget_step_id": state["context_budget"]["step_id"], "log_path": state["log_path"],
+            "source_checkpoints": fast_ids, "full_record_reads": full_count,
+            "selection_reads": len(fast_ids),
+        }, ensure_ascii=False))
+        return selected
+
+    with patch.object(context.ContextRecords, "select", compared_select):
+        turn, actual = await run(manager, sid, TRIGGER, [response(message("selection unchanged"))],
+                                 scenario="lightweight_selection_business_result")
+    assert len(observations) == 1
+    assert material_for(actual.requests[0]) == observations[0]["material"]
+    assert actual.requests[-1]["input"] == [turn.state["compaction"]["message"]] + (
+        old[-1].state["input"][observations[0]["removed_items"]:] + [{"role": "user", "content": TRIGGER}]
+    )
+    await check_turn_slice(manager, turn)
+
+    # A source read error still stops before either summary or business calls.
+    manager, sid, old = await seed(prefix="selection_read_failure")
+    saver = manager._checkpointer
+    get_tuple = saver.get_tuple
+    failed_reads = []
+
+    def fail_source(config):
+        if config["configurable"].get("checkpoint_id") == old[0].checkpoint_id:
+            failed_reads.append({"source": "fault_injection", "operation": "read_source",
+                                 "checkpoint_id": old[0].checkpoint_id})
+            raise OSError(PRIVATE)
+        return get_tuple(config)
+
+    with patch.object(saver, "get_tuple", side_effect=fail_source):
+        failed, actual = await run(manager, sid, TRIGGER, scenario="selection_source_read_failure",
+                                   observations=failed_reads)
+    assert len(failed_reads) == 1 and not actual.requests
+    assert failed.state["summary_calls"] == failed.state["model_calls"] == 0
+    assert failed.checkpoint_error == "checkpoint_read_error" and not failed.checkpoint_complete
+    assert failed.state["active_context"] == {**old[-1].state["active_context"],
+        "turn_start": len(old[-1].state["input"]),
+        "turns": [*old[-1].state["active_context"]["turns"], {
+            "run_id": old[-1].state["run_id"], "checkpoint_id": old[-1].checkpoint_id,
+            "item_count": len(old[-1].state["input"]) - old[-1].state["active_context"]["turn_start"],
+        }]}
+    try:
+        await manager.run_turn(sid, "must remain blocked")
+    except SessionError as exc:
+        assert exc.code == "session_blocked"
+    else:
+        raise AssertionError("source read failure unblocked the session")
+
+
+async def check_compaction_status_consumers():
+    manager = SessionManager()
+    sid = manager.create_session(SETTINGS)
+    turn, _ = await run(manager, sid, "status rendering baseline", [response(message())],
+                        scenario="status_contract_baseline")
+    statuses = get_args(CompactionStatus)
+    for status in statuses:
+        state = deepcopy(turn.state)
+        metadata = {"request_no": 1, "status": status, "reason": None,
+                    "document": {"private": PRIVATE}, "message": {"content": PRIVATE}}
+        state["compaction"] = metadata
+        projected = TraceSanitizer.compaction(metadata)
+        assert projected == {"request_no": 1, "status": status}
+        shown = cli.format_run_summary(state)
+        assert "上下文压缩：未确认" not in shown and PRIVATE not in shown
+        assert metadata["document"]["private"] == PRIVATE
+    print(json.dumps({"scenario": "compaction_status_consumers", "statuses": statuses,
+                      "session_id": sid, "run_id": turn.state["run_id"],
+                      "checkpoint_id": turn.checkpoint_id, "log_path": turn.state["log_path"]}, ensure_ascii=False))
 
 
 async def check_activation_and_stable_reuse():
@@ -510,6 +689,7 @@ async def check_repeated_compaction():
     record = await manager.get_record(sid, turn.state["run_id"])
     assert len(record["model_results"]) == len(record["summary_results"]) == 2
     assert record["input"][0]["content"].startswith("CURRENT_MULTI_")
+    await check_turn_slice(manager, turn)
 
 
 async def check_unattempted_recovery_record():
@@ -605,8 +785,10 @@ async def check_history_admission_and_cli():
     original = await manager.get_record(sid, failed.state["run_id"])
     assert original["input"][-1]["call_id"] == "unexecuted_private"
     assert original["admitted_input"] == original["input"][:1]
+    await check_turn_slice(manager, failed)
     invalid = await manager.get_record(sid, rejected.state["run_id"])
     assert invalid["input"] == [{"role": "user", "content": 123}] and invalid["admitted_input"] == []
+    await check_turn_slice(manager, rejected)
     stdout, stderr = StringIO(), StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
         assert cli.display_run(turn.state, settings) == 0
@@ -778,6 +960,7 @@ async def check_log_boundaries():
 async def main():
     checks = (
         check_configuration, check_stable_history_and_records,
+        check_selection_read_path, check_compaction_status_consumers,
         check_activation_and_stable_reuse, check_refusal_boundaries,
         check_summary_failure_cases, check_usage_missing,
         check_summary_and_candidate_budget_boundaries,

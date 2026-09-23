@@ -9,8 +9,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Overwrite
 
-from lineage_agent.agent.state import AgentState, UsageTotals
-from lineage_agent.agent.compaction import build_compaction_nodes
+from lineage_agent.agent.state import AgentState, CompactionState, UsageTotals
+from lineage_agent.agent.compaction import SummaryCall, build_compaction_nodes
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
 from lineage_agent.config.settings import ModelSettings
@@ -56,9 +56,9 @@ def build_graph(
     tracer: "RunTrace | None" = None,
     checkpointer: BaseCheckpointSaver | None = None,
     observe_state: Callable[[AgentState, str, str | None], None] | None = None,
-    call_summary: Callable | None = None,
+    call_summary: SummaryCall | None = None,
     context_records: ContextRecords | None = None,
-    validate_input: Callable | None = None,
+    validate_input: Callable[[list[dict[str, Any]]], tuple[str, int] | None] | None = None,
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
@@ -84,7 +84,7 @@ def build_graph(
         step_id = recorder.next_step() if recorder is not None else None
         if tracer is not None:
             tracer.bind_active_context(state["active_context"])
-        compaction = deepcopy(state["compaction"])
+        compaction: CompactionState | None = deepcopy(state["compaction"])
         if compaction is not None and compaction["status"] == "pending_save":
             assert context_records is not None
             checkpoint_id = context_records.confirmed()
@@ -149,14 +149,15 @@ def build_graph(
             if checked and exceeded and context_records is not None and (
                 compaction is None or compaction["request_no"] != state["model_calls"] + 1
             ):
+                compaction = {
+                    "request_no": state["model_calls"] + 1, "summary_id": str(uuid4()),
+                    "status": "preparing", "reason": None,
+                    "request_options": {"instructions": instructions, "tool_choice": "none" if remaining == 1 else None},
+                    "old_version_id": state["active_context"]["version_id"],
+                }
                 return finish(state, {
                     "context_budget": context_budget,
-                    "compaction": {
-                        "request_no": state["model_calls"] + 1, "summary_id": str(uuid4()),
-                        "status": "preparing", "reason": None,
-                        "request_options": {"instructions": instructions, "tool_choice": "none" if remaining == 1 else None},
-                        "old_version_id": state["active_context"]["version_id"],
-                    },
+                    "compaction": compaction,
                 }, "model", step_id)
             if checked and exceeded:
                 if compaction is None:
