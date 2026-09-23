@@ -3,6 +3,7 @@
 from operator import add
 from typing import Annotated, Any, Literal, TypedDict
 
+from lineage_agent.models.budget import ContextBudget, ContextRisk
 from lineage_agent.models.types import ModelResult
 from lineage_agent.tools.types import ToolOutcomes
 
@@ -21,6 +22,8 @@ class AgentState(TypedDict):
 
     input: Annotated[list[dict[str, Any]], add]
     history_end: int
+    context_risks: list[ContextRisk | None]
+    context_budget: ContextBudget | None
     run_id: str
     log_path: str
     log_complete: bool
@@ -30,7 +33,7 @@ class AgentState(TypedDict):
     tool_calls: int
     tool_outcomes: ToolOutcomes
     usage_totals: UsageTotals
-    stop_reason: Literal["completed", "max_model_calls", "error"] | None
+    stop_reason: Literal["completed", "max_model_calls", "context_budget_exceeded", "error"] | None
     error: str | None
     error_code: str | None
     cleanup_error: dict[str, str | None] | None

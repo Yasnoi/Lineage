@@ -8,6 +8,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from lineage_agent.agent.state import AgentState, UsageTotals
+from lineage_agent.config.settings import ModelSettings
+from lineage_agent.models.budget import (
+    annotate_context_risks, budget_measurement_error, check_context_budget,
+)
 from lineage_agent.models.responses import ModelError, safe_model_error
 from lineage_agent.models.types import ModelCall, TokenUsage, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
@@ -38,6 +42,8 @@ def _accumulate_usage(totals: UsageTotals, usage: TokenUsage | None) -> UsageTot
 def build_graph(
     call_model: ModelCall,
     *,
+    prepare_model_request: Callable[..., dict[str, Any]],
+    settings: ModelSettings,
     tools: list[ToolDefinition] | None = None,
     execute_tool: ToolExecutor | None = None,
     max_model_calls: int = 5,
@@ -81,32 +87,65 @@ def build_graph(
             "remaining_model_calls": remaining, "final_answer_call": remaining == 1,
             "read_budget": budget, "read_budget_error": budget_error,
         }
-        if not emit(
-            "model.started", step_id, "model",
-            model_call=state["model_calls"] + 1,
-            **allowances,
-            input_item_count=len(state["input"]),
-            input_tool_result_call_ids=[
-                item["call_id"] for item in state["input"]
-                if item.get("type") == "function_call_output"
-            ],
-        ):
-            return finish(state, {"stop_reason": "error", "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error"}, "model", step_id)
-
-        failure: tuple[str, str] | None = None
-        if tracer is not None:
-            tracer.observe_read_budget("model", budget_error)
-            tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
         instructions = f"本次用户请求剩余模型调用次数（包含当前调用）：{remaining}。"
         if budget is not None:
             instructions += f"本次运行剩余成功读取额度：{budget['remaining_bytes']} 字节。"
         if remaining == 1:
             instructions += "这是最后一次调用，不得请求工具；请依据已有资料回答，资料不足时明确说明。"
         try:
-            result = await call_model(
+            request = prepare_model_request(
                 state["input"], instructions=instructions,
                 tool_choice="none" if remaining == 1 else None,
             )
+            context_budget = check_context_budget(
+                request, state["context_risks"], settings, step_id=step_id,
+            )
+        except Exception:
+            context_budget = budget_measurement_error(settings, step_id=step_id)
+        if tracer is not None:
+            tracer.observe_read_budget("model", budget_error)
+            tracer.observe_context_budget(context_budget)
+        candidate_result_ids = [
+            item["call_id"] for item in state["input"]
+            if item.get("type") == "function_call_output"
+        ]
+        checked = emit(
+            "context_budget.checked", step_id, "model",
+            **{key: value for key, value in context_budget.items() if key != "step_id"},
+            model_call_candidate=state["model_calls"] + 1,
+            input_tool_result_call_ids=candidate_result_ids,
+        )
+        if not checked or context_budget["decision"] != "allow":
+            exceeded = context_budget["decision"] == "exceeded"
+            return finish(state, {
+                "context_budget": context_budget,
+                "stop_reason": "context_budget_exceeded" if checked and exceeded else "error",
+                "error_code": context_budget["error_code"] if checked else "logging_error",
+                "error": (
+                    LOG_FAILURE_MESSAGE if not checked else
+                    "上下文预算已达到触发阈值，本次模型请求未发送；未压缩或删除历史。" if exceeded else
+                    "无法完成请求预算计量，本次模型请求未发送。"
+                ),
+            }, "model", step_id)
+        if not emit(
+            "model.started", step_id, "model",
+            model_call=state["model_calls"] + 1,
+            **allowances,
+            input_item_count=len(state["input"]),
+            input_tool_result_call_ids=candidate_result_ids,
+        ):
+            return finish(state, {
+                "context_budget": context_budget, "stop_reason": "error",
+                "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error",
+            }, "model", step_id)
+
+        failure: tuple[str, str] | None = None
+        context_budget["request_sent"] = True
+        if tracer is not None:
+            tracer.observe_context_budget(context_budget)
+            tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
+        try:
+            result = await call_model(request)
         except ModelError as exc:
             result = exc.result
             failure = (exc.code, exc.stage)
@@ -123,6 +162,15 @@ def build_graph(
         ] if isinstance(raw_items, list) else []
         update: dict[str, Any] = {
             "input": output_items,
+            "context_budget": context_budget,
+            "context_risks": state["context_risks"] + annotate_context_risks(
+                output_items, fallback_tokens=settings.opaque_fallback_tokens,
+                run_id=state["run_id"], model_call=model_calls,
+                usage=result["usage"] if result is not None else None,
+            ),
+            # New user input becomes inheritable only once actually dispatched.
+            # Later tool batches advance the boundary as complete protocol groups.
+            "history_end": len(state["input"]),
             "result": result,
             "model_calls": model_calls,
             "tool_requests": state["tool_requests"] + len(requests),
@@ -217,6 +265,10 @@ def build_graph(
         )
         update: dict[str, Any] = {
             "input": batch["output_items"],
+            "context_risks": state["context_risks"] + annotate_context_risks(
+                batch["output_items"], fallback_tokens=settings.opaque_fallback_tokens,
+                run_id=state["run_id"],
+            ),
             "tool_calls": state["tool_calls"] + batch["tool_calls"],
             "tool_outcomes": {
                 name: state["tool_outcomes"][name] + count

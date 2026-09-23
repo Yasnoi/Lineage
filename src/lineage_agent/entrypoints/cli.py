@@ -9,6 +9,7 @@ from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, PreExecutionConfig
 from lineage_agent.agent.sessions import SessionError, SessionManager, SessionTurn
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
+from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.filesystem import directory
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
@@ -18,12 +19,29 @@ def format_run_summary(state: AgentState) -> str:
     """Show program-recorded facts independently of the model's answer."""
     outcomes = state["tool_outcomes"]
     completeness = "完整" if state["log_complete"] else "不完整"
-    return (
+    summary = (
         f"运行标识：{state['run_id']}\n"
         f"工具处理：成功 {outcomes['succeeded']}，拒绝 {outcomes['rejected']}，"
         f"失败 {outcomes['failed']}，未执行 {outcomes['skipped']}\n"
         f"运行日志（{completeness}）：{state['log_path']}"
     )
+    budget = TraceSanitizer.context_budget(state.get("context_budget"))
+    if budget:
+        decision = {"allow": "放行", "exceeded": "超限", "error": "计量失败"}.get(budget.get("decision"), "未知")
+        sent = "已发起" if budget.get("request_sent") is True else "未发起"
+        summary += (
+            f"\n上下文预算（估算；非端点精确 Token）：{decision}，请求{sent}"
+            f"，步骤 {budget.get('step_id', '未知')}\n"
+            f"透明内容 {budget.get('transparent_tokens', '未知')} + "
+            f"opaque 风险预留 {budget.get('opaque_risk_tokens', '未知')}"
+            f"（{budget.get('opaque_items', '未知')} 项） + "
+            f"输出预留 {budget.get('output_reserve_tokens', '未知')} + "
+            f"安全余量 {budget.get('safety_margin_tokens', '未知')} = "
+            f"所需 {budget.get('required_tokens', '未知')}；"
+            f"触发阈值 {budget.get('trigger_tokens', '未知')}"
+            f"（总预算 {budget.get('limit_tokens', '未知')} 的 {budget.get('trigger_percent', '未知')}%）。"
+        )
+    return summary
 
 
 def display_run(state: AgentState, settings: ModelSettings) -> int:
@@ -38,6 +56,9 @@ def display_run(state: AgentState, settings: ModelSettings) -> int:
             file=sys.stderr,
         )
         return 3
+    if state["stop_reason"] == "context_budget_exceeded":
+        print("任务未完成：上下文预算已达到触发阈值，本次模型请求未发起；未自动删除或压缩历史。", file=sys.stderr)
+        return 4
 
     if (state.get("cleanup_error") or {}).get("previous_stop_reason") == "completed" and state["result"] is not None:
         print(state["result"]["text"])

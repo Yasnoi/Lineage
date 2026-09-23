@@ -247,6 +247,15 @@ class RunTrace:
         if diagnostic not in diagnostics:
             diagnostics.append(diagnostic)
 
+    @_safe
+    def observe_context_budget(self, diagnostic) -> None:
+        """Keep the latest safe check without inventing a model-call span."""
+        if not self.enabled or self._finished or self._closed:
+            return
+        projected = self._sanitizer.context_budget(diagnostic)
+        if projected:
+            self._root.payload["extra"]["metadata"]["context_budget"] = projected
+
     @staticmethod
     def _stamp_end(span: _Span) -> None:
         if "end_time" not in span.payload:
@@ -321,6 +330,9 @@ class RunTrace:
              "ls_provider": "openai", "ls_model_type": "chat",
              "ls_model_name": self._sanitizer.text(model_name),
              **getattr(self, "_allowances", {}),
+             "context_budget": self._sanitizer.context_budget(
+                 self._root.payload["extra"]["metadata"].get("context_budget")
+             ),
              "ls_invocation_params": {"use_responses_api": True}},
         )
 
@@ -428,6 +440,8 @@ class RunTrace:
         if not self.enabled or self._finished or self._closed:
             return
         self.observe_read_budget("run_end", read_budget_error)
+        if isinstance(state, dict):
+            self.observe_context_budget(state.get("context_budget"))
         if self._pending_model is not None:
             self.model_complete(error_code="model_interrupted", stage="model_request")
         self._finished = True
@@ -439,14 +453,15 @@ class RunTrace:
         )
         checkpoint_error = self._root.payload["extra"]["metadata"].get("checkpoint_error")
         failed = bool(error_code or checkpoint_error) or (isinstance(state, dict) and state.get("stop_reason") == "error")
-        stopped = isinstance(state, dict) and state.get("stop_reason") == "max_model_calls"
+        stopped = isinstance(state, dict) and state.get("stop_reason") in {"max_model_calls", "context_budget_exceeded"}
         if failed:
             code = error_code or (state.get("error_code") if isinstance(state, dict) else None) or checkpoint_error
             self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {
                 "run_interrupted", "client_close_error", "invalid_input", "pre_execution_configuration_error",
+                "context_budget_exceeded", "context_measurement_error",
             } else "agent_error"
         elif stopped:
-            self._root.payload["error"] = "max_model_calls"
+            self._root.payload["error"] = state["stop_reason"]
         self._root.payload["extra"]["metadata"]["outcome"] = (
             "failed" if failed else "stopped" if stopped else "succeeded"
         )

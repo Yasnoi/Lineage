@@ -34,6 +34,7 @@ _ERROR_CODES = {
 }
 _ENTRY_TYPES = {"file", "directory", "symlink", "junction", "reparse_point", "other"}
 _FILESYSTEM_TOOLS = ("list_directory", "read_text_file")
+_STOP_REASONS = ("completed", "max_model_calls", "context_budget_exceeded", "error")
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -547,6 +548,37 @@ class TraceSanitizer:
             output["usage_metadata"] = usage
         return output
 
+    @staticmethod
+    def context_budget(diagnostic: Any) -> dict[str, Any]:
+        """Project only bounded budget facts, never context or risk provenance."""
+        if not isinstance(diagnostic, dict):
+            return {}
+        result: dict[str, Any] = {}
+        if diagnostic.get("method") == "utf8_json_opaque_v1":
+            result["method"] = "utf8_json_opaque_v1"
+        step = diagnostic.get("step_id")
+        if type(step) is str and re.fullmatch(r"step-[0-9]{4,16}", step):
+            result["step_id"] = step
+        for key in (
+            "transparent_tokens", "opaque_items", "opaque_risk_tokens",
+            "required_tokens", "limit_tokens", "output_reserve_tokens",
+            "safety_margin_tokens", "trigger_percent", "trigger_tokens",
+        ):
+            value = diagnostic.get(key)
+            if type(value) is int and 0 <= value <= 2**63 - 1:
+                result[key] = value
+        decision = diagnostic.get("decision")
+        if type(decision) is str and decision in {"allow", "exceeded", "error"}:
+            result["decision"] = decision
+        if type(diagnostic.get("request_sent")) is bool:
+            result["request_sent"] = diagnostic["request_sent"]
+        code = diagnostic.get("error_code")
+        if code is None or type(code) is str and code in {
+            "context_budget_exceeded", "context_measurement_error",
+        }:
+            result["error_code"] = code
+        return result
+
     def root_outputs(self, state: dict[str, Any] | None) -> dict[str, Any]:
         """Summarize final behavior without copying State or local log paths."""
         if state is None:
@@ -563,13 +595,16 @@ class TraceSanitizer:
             previous = cleanup.get("previous_stop_reason")
             result["cleanup_error"] = {
                 "code": "client_close_error",
-                "previous_stop_reason": previous if previous in ("completed", "max_model_calls", "error") else None,
+                "previous_stop_reason": previous if previous in _STOP_REASONS else None,
             }
         for key in ("model_calls", "tool_requests", "tool_calls"):
             if type(state.get(key)) is int and state[key] >= 0:
                 result[key] = state[key]
-        if state.get("stop_reason") in ("completed", "max_model_calls", "error"):
+        if state.get("stop_reason") in _STOP_REASONS:
             result["stop_reason"] = state["stop_reason"]
+        budget = self.context_budget(state.get("context_budget"))
+        if budget:
+            result["context_budget"] = budget
         outcomes = state.get("tool_outcomes")
         if isinstance(outcomes, dict):
             result["tool_outcomes"] = {key: outcomes[key] for key in ("succeeded", "rejected", "failed", "skipped") if type(outcomes.get(key)) is int and outcomes[key] >= 0}
@@ -630,7 +665,7 @@ class TraceSanitizer:
         if isinstance(value, list):
             return [self._shrink(item, limit) for item in value]
         if isinstance(value, dict):
-            return {key: deepcopy(item) if key in ("usage_metadata", "usage_totals", "trace_omissions")
+            return {key: deepcopy(item) if key in ("usage_metadata", "usage_totals", "trace_omissions", "context_budget")
                     else self._shrink(item, limit, key) for key, item in value.items()}
         return value
 

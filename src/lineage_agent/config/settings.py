@@ -26,6 +26,11 @@ class ModelSettings:
     directory_max_entries: int = 100
     text_max_bytes: int = 65536
     text_total_max_bytes: int = 262144
+    context_budget_tokens: int = 32768
+    max_output_tokens: int = 4096
+    context_safety_margin_tokens: int = 1024
+    opaque_fallback_tokens: int = 4096
+    context_trigger_percent: int = 90
 
     def __post_init__(self) -> None:
         try:
@@ -68,6 +73,19 @@ class ModelSettings:
             raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。")
         if type(self.text_total_max_bytes) is not int or self.text_total_max_bytes <= 0:
             raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
+        for name in ("context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ConfigurationError(f"{name.upper()} 必须是正整数。")
+        if (type(self.context_safety_margin_tokens) is not int
+                or self.context_safety_margin_tokens < 0):
+            raise ConfigurationError("CONTEXT_SAFETY_MARGIN_TOKENS 必须是非负整数。")
+        if (type(self.context_trigger_percent) is not int
+                or not 1 <= self.context_trigger_percent <= 100):
+            raise ConfigurationError("CONTEXT_TRIGGER_PERCENT 必须是 1 到 100 的整数。")
+        threshold = self.context_budget_tokens * self.context_trigger_percent // 100
+        if threshold <= self.max_output_tokens + self.context_safety_margin_tokens:
+            raise ConfigurationError("上下文触发阈值必须大于输出预留与安全余量之和。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -132,6 +150,19 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     if project_root is not None and not project_root.is_absolute():
         project_root = dotenv_path.parent / project_root
 
+    budget_values: dict[str, int] = {}
+    for name, default in (
+        ("CONTEXT_BUDGET_TOKENS", 32768),
+        ("MAX_OUTPUT_TOKENS", 4096),
+        ("CONTEXT_SAFETY_MARGIN_TOKENS", 1024),
+        ("OPAQUE_FALLBACK_TOKENS", 4096),
+        ("CONTEXT_TRIGGER_PERCENT", 90),
+    ):
+        try:
+            budget_values[name.lower()] = int(os.environ.get(name, str(default)))
+        except ValueError as exc:
+            raise ConfigurationError(f"{name} 必须是有效整数。") from exc
+
     return ModelSettings(
         base_url=base_url,
         model_name=model_name,
@@ -142,4 +173,5 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         directory_max_entries=directory_max_entries,
         text_max_bytes=text_max_bytes,
         text_total_max_bytes=text_total_max_bytes,
+        **budget_values,
     )

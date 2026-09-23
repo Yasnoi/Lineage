@@ -419,10 +419,12 @@ async def check_serialized_capacity():
         history.extend(directory_pair(f"wire-{index}", entries=30, width=60))
     answer = "SHORT_SYNTHETIC_ANSWER " * 40
     replies = [response(message(answer))]
+    # Exercise tracing's wire-size cap while explicitly admitting the large fixture.
+    settings = replace(SETTINGS, context_budget_tokens=2_000_000)
     with capture(LANGSMITH_TRACING="false"):
-        baseline, baseline_client = await run(replies, prompt=history)
+        baseline, baseline_client = await run(replies, prompt=history, settings=settings)
     with capture() as (transport, stderr):
-        state, client = await run(replies, prompt=history)
+        state, client = await run(replies, prompt=history, settings=settings)
     assert not stderr.getvalue(), stderr.getvalue()
     assert stable(state) == stable(baseline) and client.requests == baseline_client.requests
     assert len(transport.sent) == 2 and state["model_calls"] == 1 and state["tool_requests"] == 0

@@ -8,6 +8,7 @@ from openai import AsyncOpenAI, APIConnectionError, APIError, APIStatusError, AP
 from openai.types.responses import Response
 
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
+from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.types import ModelInput, ModelResult, TokenUsage, ToolDefinition
 
 if TYPE_CHECKING:
@@ -77,17 +78,32 @@ async def generate_response(
     tracer: "RunTrace | None" = None,
     instructions: str | None = None,
     tool_choice: str | None = None,
+    max_output_tokens: int = 4096,
 ) -> ModelResult:
-    """Observe the actual SDK request without changing its input or result."""
+    """Compatibility entry point for a standalone Responses call."""
+    request = prepare_request(
+        model_name, input, tools=tools, instructions=instructions,
+        tool_choice=tool_choice, max_output_tokens=max_output_tokens,
+    )
+    return await send_prepared_response(client, request, tracer=tracer)
+
+
+async def send_prepared_response(
+    client: AsyncOpenAI,
+    request: dict[str, Any],
+    *,
+    tracer: "RunTrace | None" = None,
+) -> ModelResult:
+    """Send the same prepared kwargs that the graph has already measured."""
     span = (
-        tracer.model_start(model_name, input, tools, instructions=instructions, tool_choice=tool_choice)
+        tracer.model_start(
+            request["model"], request["input"], request.get("tools"),
+            instructions=request.get("instructions"), tool_choice=request.get("tool_choice"),
+        )
         if tracer is not None else None
     )
     try:
-        result = await _request_response(
-            client, model_name, input, tools=tools,
-            instructions=instructions, tool_choice=tool_choice,
-        )
+        result = await _request_response(client, request)
     except ModelError as exc:
         if tracer is not None:
             tracer.model_end(span, result=exc.result, error_code=exc.code, stage=exc.stage)
@@ -106,30 +122,11 @@ async def generate_response(
 
 async def _request_response(
     client: AsyncOpenAI,
-    model_name: str,
-    input: ModelInput,
-    *,
-    tools: list[ToolDefinition] | None = None,
-    instructions: str | None = None,
-    tool_choice: str | None = None,
+    request: dict[str, Any],
 ) -> ModelResult:
     """Make one non-streaming request and preserve its full response body."""
-    optional: dict[str, Any] = {}
-    if tools:
-        optional["tools"] = tools
-    if instructions is not None:
-        optional["instructions"] = instructions
-    if tool_choice is not None:
-        optional["tool_choice"] = tool_choice
-
     try:
-        response = await client.responses.create(
-            model=model_name,
-            input=input,
-            stream=False,
-            store=False,
-            **optional,
-        )
+        response = await client.responses.create(**request)
         return parse_response(response)
     except APITimeoutError as exc:
         raise ModelError(code="model_timeout") from exc

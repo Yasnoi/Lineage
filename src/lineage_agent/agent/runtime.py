@@ -10,7 +10,9 @@ from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpoint
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
-from lineage_agent.models.responses import create_client, generate_response
+from lineage_agent.models.budget import annotate_context_risks
+from lineage_agent.models.requests import prepare_request
+from lineage_agent.models.responses import create_client, send_prepared_response
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import tool_identity
@@ -175,6 +177,11 @@ async def _run_agent(
         state: AgentState = {
             "input": input_items,
             "history_end": 0,
+            "context_risks": annotate_context_risks(
+                input_items, fallback_tokens=settings.opaque_fallback_tokens,
+                run_id=recorder.run_id,
+            ),
+            "context_budget": None,
             "run_id": recorder.run_id,
             "log_path": str(recorder.path),
             "log_complete": False,
@@ -213,11 +220,14 @@ async def _run_agent(
         last_step_id: str | None = None
         primary_error: BaseException | None = None
 
-        async def call_model(model_input, **options):
-            return await generate_response(
-                client, settings.model_name, model_input,
-                tools=available_tools or None, tracer=tracer, **options,
+        def prepare_model_request(model_input, **options):
+            return prepare_request(
+                settings.model_name, model_input, tools=available_tools or None,
+                max_output_tokens=settings.max_output_tokens, **options,
             )
+
+        async def call_model(request):
+            return await send_prepared_response(client, request, tracer=tracer)
 
         def observe_state(observed: AgentState, node: str, step_id: str | None) -> None:
             nonlocal state, last_node, last_step_id
@@ -227,6 +237,7 @@ async def _run_agent(
         try:
             graph = build_graph(
                 call_model, tools=available_tools, execute_tool=execute_tool,
+                prepare_model_request=prepare_model_request, settings=settings,
                 max_model_calls=settings.max_model_calls, recorder=recorder, tracer=tracer,
                 checkpointer=checkpointer, observe_state=observe_state,
             )
@@ -253,15 +264,18 @@ async def _run_agent(
                         raise CheckpointError("checkpoint_read_error")
                     if saved.values:
                         history = saved.values.get("input")
+                        risks = saved.values.get("context_risks")
                         boundary = saved.values.get("history_end")
                         if (
                             not isinstance(history, list) or type(boundary) is not int
                             or not 0 <= boundary <= len(history)
                             or not all(isinstance(item, dict) for item in history[:boundary])
+                            or not isinstance(risks, list) or len(risks) != len(history)
                             or _input_association_error(history[:boundary]) is not None
                         ):
                             raise CheckpointError("checkpoint_read_error")
                         state["input"] = deepcopy(history[:boundary]) + input_items
+                        state["context_risks"] = deepcopy(risks[:boundary]) + state["context_risks"]
                         state["history_end"] = boundary
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
@@ -273,7 +287,6 @@ async def _run_agent(
                         error=INVALID_INPUT_MESSAGE if code == "invalid_input" else "初始上下文中的工具请求与结果无法唯一关联。",
                     )
                 else:
-                    state["history_end"] = len(state["input"])
                     try:
                         client_manager = create_client(settings)
                     except ConfigurationError:
@@ -357,6 +370,7 @@ async def _run_agent(
             last_usage=state["result"]["usage"] if state["result"] is not None else None,
             usage_totals=state["usage_totals"],
             error_code=state["error_code"], cleanup_error=state["cleanup_error"],
+            context_budget=state["context_budget"],
             has_refusal=state["result"].get("has_refusal", False) if state["result"] is not None else False,
             read_budget=end_budget, read_budget_error=end_budget_error,
             **({

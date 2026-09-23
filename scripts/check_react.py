@@ -184,12 +184,12 @@ def audit_recording(state, client, *, scenario=None, failed_writes=None):
 
 async def run(
     replies, *, input="question", tools=None, execute_tool=None, limit=5,
-    scenario=None, trace=None, failed_writes=None,
+    scenario=None, trace=None, failed_writes=None, context_budget_tokens=32768,
 ):
     client = LocalClient(replies, trace=trace)
     with patch.object(runtime, "create_client", return_value=client) as factory:
         state = await runtime.run_agent(
-            input, replace(SETTINGS, max_model_calls=limit),
+            input, replace(SETTINGS, max_model_calls=limit, context_budget_tokens=context_budget_tokens),
             tools=tools, execute_tool=execute_tool,
         )
     assert not factory.called or client.closed, "every created client must close"
@@ -690,6 +690,8 @@ async def check_safe_summaries():
     state, client = await run(
         [response(call("safe_summary", arguments=json.dumps(arguments))), response(message(long_text))],
         tools=[schema], execute_tool=echo_tool,
+        # This fixture exercises redaction of very large arguments, not refusal.
+        context_budget_tokens=8_000_000,
     )
     assert seen == [arguments]
     output = outputs(state)[0]
