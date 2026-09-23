@@ -31,6 +31,10 @@ class ModelSettings:
     context_safety_margin_tokens: int = 1024
     opaque_fallback_tokens: int = 4096
     context_trigger_percent: int = 90
+    context_keep_recent_turns: int = 2
+    context_target_percent: int = 70
+    summary_max_output_tokens: int = 2048
+    summary_max_bytes: int = 8192
 
     def __post_init__(self) -> None:
         try:
@@ -73,7 +77,10 @@ class ModelSettings:
             raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。")
         if type(self.text_total_max_bytes) is not int or self.text_total_max_bytes <= 0:
             raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
-        for name in ("context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens"):
+        for name in (
+            "context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens",
+            "context_keep_recent_turns", "summary_max_output_tokens", "summary_max_bytes",
+        ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ConfigurationError(f"{name.upper()} 必须是正整数。")
@@ -86,6 +93,14 @@ class ModelSettings:
         threshold = self.context_budget_tokens * self.context_trigger_percent // 100
         if threshold <= self.max_output_tokens + self.context_safety_margin_tokens:
             raise ConfigurationError("上下文触发阈值必须大于输出预留与安全余量之和。")
+        if (type(self.context_target_percent) is not int
+                or not 1 <= self.context_target_percent < self.context_trigger_percent):
+            raise ConfigurationError("CONTEXT_TARGET_PERCENT 必须是正整数且小于触发比例。")
+        target = self.context_budget_tokens * self.context_target_percent // 100
+        if target <= self.max_output_tokens + self.context_safety_margin_tokens:
+            raise ConfigurationError("上下文压缩目标必须大于业务输出预留与安全余量之和。")
+        if threshold <= self.summary_max_output_tokens + self.context_safety_margin_tokens:
+            raise ConfigurationError("上下文触发阈值必须大于摘要输出预留与安全余量之和。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -157,6 +172,10 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         ("CONTEXT_SAFETY_MARGIN_TOKENS", 1024),
         ("OPAQUE_FALLBACK_TOKENS", 4096),
         ("CONTEXT_TRIGGER_PERCENT", 90),
+        ("CONTEXT_KEEP_RECENT_TURNS", 2),
+        ("CONTEXT_TARGET_PERCENT", 70),
+        ("SUMMARY_MAX_OUTPUT_TOKENS", 2048),
+        ("SUMMARY_MAX_BYTES", 8192),
     ):
         try:
             budget_values[name.lower()] = int(os.environ.get(name, str(default)))

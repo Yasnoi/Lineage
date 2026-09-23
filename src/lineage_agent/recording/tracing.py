@@ -162,6 +162,7 @@ class RunTrace:
         self._step_id: str | None = None
         self._model_call: int | None = None
         self._pending_model: _Span | None = None
+        self._active_context: dict[str, Any] = {}
         self._finished = False
         self._closed = False
 
@@ -256,6 +257,53 @@ class RunTrace:
         if projected:
             self._root.payload["extra"]["metadata"]["context_budget"] = projected
 
+    @_safe
+    def bind_active_context(self, active_context) -> None:
+        """Bind app-owned summary provenance without retaining its body."""
+        if not self.enabled or self._finished or self._closed:
+            return
+        self._active_context = self._sanitizer.active_context(active_context)
+        self._root.payload["extra"]["metadata"]["active_context"] = self._active_context
+
+    @_safe
+    def observe_compaction(self, metadata) -> None:
+        if not self.enabled or self._finished or self._closed:
+            return
+        projected = self._sanitizer.compaction(metadata)
+        if projected:
+            self._root.payload["extra"]["metadata"]["compaction"] = projected
+
+    @_safe
+    def summary_start(self, model_name, metadata=None) -> _Span | None:
+        """Summary sources are intentionally absent from this interface."""
+        if not self.enabled or self._closed or self._finished:
+            return None
+        projected = self._sanitizer.compaction(metadata)
+        return self._new_span(
+            "Context summary", "llm",
+            {"model": self._sanitizer.text(model_name), "content_omitted": True},
+            {"purpose": "summary", **projected,
+             "ls_provider": "openai", "ls_model_type": "chat",
+             "ls_model_name": self._sanitizer.text(model_name),
+             "ls_invocation_params": {"use_responses_api": True}},
+        )
+
+    @_safe
+    def summary_end(self, token, result=None, error_code=None, stage=None) -> None:
+        if not self.enabled or not isinstance(token, _Span):
+            return
+        token.payload["outputs"] = self._sanitizer.summary_outputs(result)
+        metadata = token.payload["extra"]["metadata"]
+        # A model return is not evidence that the candidate was valid or saved.
+        metadata["outcome"] = "failed" if error_code else "returned"
+        if stage in _STAGES:
+            metadata["stage"] = stage
+        if error_code:
+            code = error_code if error_code in _MODEL_ERRORS else "model_error"
+            metadata["error_code"] = code
+            token.payload["error"] = code
+        self._submit(token)
+
     @staticmethod
     def _stamp_end(span: _Span) -> None:
         if "end_time" not in span.payload:
@@ -325,7 +373,10 @@ class RunTrace:
             return None
         return self._new_span(
             "OpenAI Responses", "llm",
-            self._sanitizer.model_inputs(model_name, input, tools, instructions=instructions, tool_choice=tool_choice),
+            self._sanitizer.model_inputs(
+                model_name, input, tools, instructions=instructions,
+                tool_choice=tool_choice, active_context=self._active_context,
+            ),
             {"step_id": self._step_id, "model_call": self._model_call,
              "ls_provider": "openai", "ls_model_type": "chat",
              "ls_model_name": self._sanitizer.text(model_name),
@@ -442,6 +493,8 @@ class RunTrace:
         self.observe_read_budget("run_end", read_budget_error)
         if isinstance(state, dict):
             self.observe_context_budget(state.get("context_budget"))
+            self.observe_compaction(state.get("compaction"))
+            self.bind_active_context(state.get("active_context"))
         if self._pending_model is not None:
             self.model_complete(error_code="model_interrupted", stage="model_request")
         self._finished = True
@@ -459,6 +512,7 @@ class RunTrace:
             self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {
                 "run_interrupted", "client_close_error", "invalid_input", "pre_execution_configuration_error",
                 "context_budget_exceeded", "context_measurement_error",
+                "summary_model_error", "invalid_summary", "summary_refusal", "summary_tool_request",
             } else "agent_error"
         elif stopped:
             self._root.payload["error"] = state["stop_reason"]

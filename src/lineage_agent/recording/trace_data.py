@@ -13,6 +13,7 @@ from lineage_agent.tools.types import safe_tool_argument_reason, safe_tool_execu
 
 _MAX_TEXT = 4000
 _MAX_ITEMS = 128
+_MAX_LINEAGE_ITEMS = 32
 _MAX_PAYLOAD = 65536
 _MAX_JSON = 262144
 _CREDENTIAL_KEY = re.compile(
@@ -507,9 +508,20 @@ class TraceSanitizer:
         self._omissions(result, tool, {"type", "name", "parameters", "strict"})
         return result
 
-    def model_inputs(self, model_name: str, input: Any, tools: Any, *, instructions=None, tool_choice=None) -> dict[str, Any]:
+    def model_inputs(self, model_name: str, input: Any, tools: Any, *, instructions=None, tool_choice=None, active_context=None) -> dict[str, Any]:
         """Project Responses messages and nested tool envelopes before upload."""
+        summary = active_context.get("summary") if isinstance(active_context, dict) else None
+        if isinstance(summary, dict) and isinstance(input, list) and input:
+            # Explicit application provenance, not a text-prefix heuristic.
+            # Exclude the derived body before even gathering readable leaves.
+            input = [
+                {"role": "assistant", "content": "[summary content omitted]"},
+                *input[1:],
+            ]
         result: dict[str, Any] = {"model": self.text(model_name), **self._items(input, key="input")}
+        if isinstance(summary, dict):
+            result["active_context"] = self.active_context(active_context)
+            result["summary_content_omitted"] = True
         if isinstance(instructions, str):
             result["instructions"] = self.text(instructions)
         if tool_choice in ("none", "auto", "required"):
@@ -519,6 +531,117 @@ class TraceSanitizer:
             result["tools"] = [self._tool_definition(tool) for tool in tools[:_MAX_ITEMS]]
             self._omitted(result, "tools", len(tools), list(range(1, len(result["tools"]) + 1)))
         return result
+
+    @staticmethod
+    def _identifier(value: Any) -> str | None:
+        """Application UUIDs and source references cannot carry body previews."""
+        if type(value) is str and re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}(?::(?:[0-9]{1,16}|outcome))?",
+            value,
+        ):
+            return value
+        return None
+
+    @classmethod
+    def _reference(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, Any] = {}
+        for key in ("run_id", "checkpoint_id", "summary_id", "source_id"):
+            identifier = cls._identifier(value.get(key))
+            if identifier is not None:
+                result[key] = identifier
+        for key in ("item_count", "start", "end"):
+            number = value.get(key)
+            if type(number) is int and 0 <= number <= 2**63 - 1:
+                result[key] = number
+        return result
+
+    @classmethod
+    def active_context(cls, value: Any) -> dict[str, Any]:
+        """Project lineage identifiers without copying an active message."""
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, Any] = {}
+        for key in ("version_id", "parent_version_id"):
+            identifier = cls._identifier(value.get(key))
+            if identifier is not None:
+                result[key] = identifier
+        if isinstance(value.get("summary"), dict):
+            result["summary"] = cls._reference(value["summary"])
+        turns = value.get("turns")
+        if isinstance(turns, list):
+            result["turns"] = [cls._reference(turn) for turn in turns[:_MAX_LINEAGE_ITEMS]]
+            result["turn_count"] = len(turns)
+            if len(turns) > _MAX_LINEAGE_ITEMS:
+                result["turns_omitted"] = len(turns) - _MAX_LINEAGE_ITEMS
+        return result
+
+    @classmethod
+    def compaction(cls, value: Any) -> dict[str, Any]:
+        """Only lineage, numeric diagnostics and fixed outcomes; never material."""
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, Any] = {}
+        for key in ("summary_id", "candidate_version_id", "confirmed_checkpoint_id", "summary_checkpoint_id"):
+            identifier = cls._identifier(value.get(key))
+            if identifier is not None:
+                result[key] = identifier
+        for key in ("request_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call"):
+            number = value.get(key)
+            if type(number) is int and 0 <= number <= 2**63 - 1:
+                result[key] = number
+        step = value.get("step_id")
+        if type(step) is str and re.fullmatch(r"step-[0-9]{4,16}", step):
+            result["step_id"] = step
+        if value.get("status") in (
+            "preparing", "summary_budget_rejected", "candidate", "pending_save",
+            "confirmed", "used", "stopped", "failed",
+        ):
+            result["status"] = value["status"]
+        reason = value.get("reason")
+        if type(reason) is str and reason in {
+            "no_eligible_history", "protected_history", "protected_context_too_large",
+            "summary_budget_exceeded", "summary_too_large", "summary_not_effective",
+            "recovery_exhausted", "summary_refusal", "summary_tool_request", "invalid_summary",
+            "context_measurement_error", "summary_model_error", "logging_error", "checkpoint_error",
+        }:
+            result["reason"] = reason
+        sources = value.get("sources")
+        if isinstance(sources, dict):
+            source_view: dict[str, Any] = {}
+            previous = sources.get("previous_summary")
+            if isinstance(previous, dict):
+                source_view["previous_summary"] = cls._reference(previous)
+            turns = sources.get("added_turns")
+            if isinstance(turns, list):
+                source_view["added_turns"] = [cls._reference(turn) for turn in turns[:_MAX_LINEAGE_ITEMS]]
+                source_view["turn_count"] = len(turns)
+                if len(turns) > _MAX_LINEAGE_ITEMS:
+                    source_view["turns_omitted"] = len(turns) - _MAX_LINEAGE_ITEMS
+            result["sources"] = source_view
+        for key in ("summary_budget", "candidate_budget"):
+            budget = cls.context_budget(value.get(key))
+            if budget:
+                result[key] = budget
+        return result
+
+    def summary_outputs(self, result: ModelResult | None) -> dict[str, Any]:
+        """No summary text, source material, tool requests or reasoning previews."""
+        output: dict[str, Any] = {"content_omitted": True}
+        if not isinstance(result, dict):
+            return output
+        text = result.get("text")
+        if isinstance(text, str):
+            output["text_length"] = len(text)
+        output["has_refusal"] = result.get("has_refusal") is True
+        calls = result.get("tool_calls")
+        if isinstance(calls, list):
+            output["tool_request_count"] = len(calls)
+        usage = self._usage(result.get("usage"))
+        if usage:
+            output["usage_metadata"] = usage
+        return output
 
     @staticmethod
     def _usage(value: Any) -> dict[str, int]:
@@ -597,7 +720,7 @@ class TraceSanitizer:
                 "code": "client_close_error",
                 "previous_stop_reason": previous if previous in _STOP_REASONS else None,
             }
-        for key in ("model_calls", "tool_requests", "tool_calls"):
+        for key in ("model_calls", "summary_calls", "tool_requests", "tool_calls"):
             if type(state.get(key)) is int and state[key] >= 0:
                 result[key] = state[key]
         if state.get("stop_reason") in _STOP_REASONS:
@@ -605,15 +728,22 @@ class TraceSanitizer:
         budget = self.context_budget(state.get("context_budget"))
         if budget:
             result["context_budget"] = budget
+        active = self.active_context(state.get("active_context"))
+        if active:
+            result["active_context"] = active
+        compaction = self.compaction(state.get("compaction"))
+        if compaction:
+            result["compaction"] = compaction
         outcomes = state.get("tool_outcomes")
         if isinstance(outcomes, dict):
             result["tool_outcomes"] = {key: outcomes[key] for key in ("succeeded", "rejected", "failed", "skipped") if type(outcomes.get(key)) is int and outcomes[key] >= 0}
-        totals = state.get("usage_totals")
-        if isinstance(totals, dict):
-            result["usage_totals"] = self._usage(totals)
-            count = totals.get("missing_usage_calls")
-            if type(count) is int and count >= 0:
-                result["usage_totals"]["missing_usage_calls"] = count
+        for key in ("usage_totals", "summary_usage_totals"):
+            totals = state.get(key)
+            if isinstance(totals, dict):
+                result[key] = self._usage(totals)
+                count = totals.get("missing_usage_calls")
+                if type(count) is int and count >= 0:
+                    result[key]["missing_usage_calls"] = count
         return result
 
     def _copy(self, value: Any, depth: int = 0, key: str = "") -> Any:

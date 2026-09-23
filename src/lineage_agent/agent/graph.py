@@ -2,12 +2,17 @@
 
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Callable
+from uuid import uuid4
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Overwrite
 
 from lineage_agent.agent.state import AgentState, UsageTotals
+from lineage_agent.agent.compaction import build_compaction_nodes
+from lineage_agent.agent.checkpointing import CheckpointError
+from lineage_agent.agent.context import ContextRecords
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import (
     annotate_context_risks, budget_measurement_error, check_context_budget,
@@ -51,6 +56,9 @@ def build_graph(
     tracer: "RunTrace | None" = None,
     checkpointer: BaseCheckpointSaver | None = None,
     observe_state: Callable[[AgentState, str, str | None], None] | None = None,
+    call_summary: Callable | None = None,
+    context_records: ContextRecords | None = None,
+    validate_input: Callable | None = None,
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
@@ -62,7 +70,8 @@ def build_graph(
         # Keep only this run's actual facts, never a second history store.
         if observe_state is not None:
             observed = {**state, **update}
-            observed["input"] = state["input"] + update.get("input", [])
+            new_input = update.get("input", [])
+            observed["input"] = new_input.value if isinstance(new_input, Overwrite) else state["input"] + new_input
             observe_state(deepcopy(observed), node, step_id)
         return update
 
@@ -73,6 +82,26 @@ def build_graph(
 
     async def model_node(state: AgentState) -> dict[str, Any]:
         step_id = recorder.next_step() if recorder is not None else None
+        if tracer is not None:
+            tracer.bind_active_context(state["active_context"])
+        compaction = deepcopy(state["compaction"])
+        if compaction is not None and compaction["status"] == "pending_save":
+            assert context_records is not None
+            checkpoint_id = context_records.confirmed()
+            saved = await context_records.saver.read_confirmed(context_records.session_id, checkpoint_id)
+            saved_active = saved.checkpoint["channel_values"].get("active_context", {})
+            if saved_active.get("version_id") != compaction["candidate_version_id"]:
+                raise CheckpointError("checkpoint_read_error")
+            compaction.update(status="confirmed", confirmed_checkpoint_id=checkpoint_id)
+            # The fact observer also retains this confirmed acknowledgement if
+            # the next log write fails before a business request is attempted.
+            state = {**state, "compaction": compaction}
+            if tracer is not None:
+                tracer.observe_compaction(compaction)
+            if not emit("compaction.activated", step_id, "model", summary_id=compaction["summary_id"],
+                        version_id=state["active_context"]["version_id"], checkpoint_id=checkpoint_id):
+                return finish(state, {"compaction": compaction, "stop_reason": "error",
+                                     "error_code": "logging_error", "error": LOG_FAILURE_MESSAGE}, "model", step_id)
         if state["model_calls"] >= max_model_calls:
             return finish(state, {"stop_reason": "max_model_calls", "error": None, "error_code": None}, "model", step_id)
         remaining = max_model_calls - state["model_calls"]
@@ -117,30 +146,52 @@ def build_graph(
         )
         if not checked or context_budget["decision"] != "allow":
             exceeded = context_budget["decision"] == "exceeded"
+            if checked and exceeded and context_records is not None and (
+                compaction is None or compaction["request_no"] != state["model_calls"] + 1
+            ):
+                return finish(state, {
+                    "context_budget": context_budget,
+                    "compaction": {
+                        "request_no": state["model_calls"] + 1, "summary_id": str(uuid4()),
+                        "status": "preparing", "reason": None,
+                        "request_options": {"instructions": instructions, "tool_choice": "none" if remaining == 1 else None},
+                        "old_version_id": state["active_context"]["version_id"],
+                    },
+                }, "model", step_id)
+            if checked and exceeded:
+                if compaction is None:
+                    compaction = {"request_no": state["model_calls"] + 1, "status": "stopped", "reason": "no_eligible_history"}
+                else:
+                    compaction.update(reason="recovery_exhausted")
             return finish(state, {
                 "context_budget": context_budget,
+                "compaction": compaction,
                 "stop_reason": "context_budget_exceeded" if checked and exceeded else "error",
                 "error_code": context_budget["error_code"] if checked else "logging_error",
                 "error": (
                     LOG_FAILURE_MESSAGE if not checked else
-                    "上下文预算已达到触发阈值，本次模型请求未发送；未压缩或删除历史。" if exceeded else
+                    "上下文预算未恢复至可发送范围，本次模型请求未发送。" if exceeded else
                     "无法完成请求预算计量，本次模型请求未发送。"
                 ),
             }, "model", step_id)
         if not emit(
             "model.started", step_id, "model",
             model_call=state["model_calls"] + 1,
+            active_version_id=state["active_context"]["version_id"],
             **allowances,
             input_item_count=len(state["input"]),
             input_tool_result_call_ids=candidate_result_ids,
         ):
             return finish(state, {
                 "context_budget": context_budget, "stop_reason": "error",
+                "compaction": compaction,
                 "error": LOG_FAILURE_MESSAGE, "error_code": "logging_error",
             }, "model", step_id)
 
         failure: tuple[str, str] | None = None
         context_budget["request_sent"] = True
+        if compaction is not None and compaction.get("request_no") == state["model_calls"] + 1 and compaction["status"] == "confirmed":
+            compaction["status"] = "used"
         if tracer is not None:
             tracer.observe_context_budget(context_budget)
             tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
@@ -163,6 +214,7 @@ def build_graph(
         update: dict[str, Any] = {
             "input": output_items,
             "context_budget": context_budget,
+            "compaction": compaction,
             "context_risks": state["context_risks"] + annotate_context_risks(
                 output_items, fallback_tokens=settings.opaque_fallback_tokens,
                 run_id=state["run_id"], model_call=model_calls,
@@ -252,6 +304,14 @@ def build_graph(
                 error_code=trace_failure[0] if trace_failure else None,
                 stage=trace_failure[1] if trace_failure else None,
             )
+        if compaction is not None and compaction.get("request_no") == model_calls and compaction["status"] == "used":
+            emit("compaction.used", step_id, "model", summary_id=compaction["summary_id"],
+                 version_id=state["active_context"]["version_id"],
+                 checkpoint_id=compaction["confirmed_checkpoint_id"], model_call=model_calls)
+            if tracer is not None:
+                tracer.observe_compaction(compaction)
+            if recorder is not None and recorder.failed:
+                update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
         return finish(state, update, "model", step_id)
 
     async def tools_node(state: AgentState) -> dict[str, Any]:
@@ -286,7 +346,11 @@ def build_graph(
         return finish(state, update, "tools", step_id)
 
     def after_model(state: AgentState) -> str:
-        return END if state["stop_reason"] is not None else "tools"
+        if state["stop_reason"] is not None:
+            return END
+        if (state["compaction"] or {}).get("status") == "preparing":
+            return "summary"
+        return "tools"
 
     def after_tools(state: AgentState) -> str:
         return END if state["stop_reason"] is not None else "model"
@@ -294,7 +358,17 @@ def build_graph(
     builder = StateGraph(AgentState)
     builder.add_node("model", model_node)
     builder.add_node("tools", tools_node)
+    summarize, activate = build_compaction_nodes(
+        settings=settings, records=context_records, call_summary=call_summary,
+        prepare_model_request=prepare_model_request, recorder=recorder, tracer=tracer,
+        finish=finish, accumulate_usage=_accumulate_usage,
+        validate_input=validate_input or (lambda items: None),
+    )
+    builder.add_node("summary", summarize)
+    builder.add_node("activate_context", activate)
     builder.add_edge(START, "model")
-    builder.add_conditional_edges("model", after_model, {"tools": "tools", END: END})
+    builder.add_conditional_edges("model", after_model, {"tools": "tools", "summary": "summary", END: END})
     builder.add_conditional_edges("tools", after_tools, {"model": "model", END: END})
+    builder.add_conditional_edges("summary", lambda state: END if state["stop_reason"] else "activate_context")
+    builder.add_conditional_edges("activate_context", lambda state: END if state["stop_reason"] else "model")
     return builder.compile(checkpointer=checkpointer)

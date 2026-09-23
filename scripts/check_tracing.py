@@ -93,7 +93,18 @@ async def run(replies, *, settings=SETTINGS, prompt="List the synthetic director
 
 
 def stable(state):
-    return {key: value for key, value in state.items() if key not in {"run_id", "log_path"}}
+    value = deepcopy({key: value for key, value in state.items() if key not in {"run_id", "session_id", "log_path"}})
+    # Independent runs allocate independent version and checkpoint identities.
+    # Keep the descriptor shape, turn order and all behavioral data comparable.
+    active = value.get("active_context")
+    if active:
+        active["version_id"] = "<active-version>"
+        if active["parent_version_id"] is not None:
+            active["parent_version_id"] = "<parent-version>"
+        for index, turn in enumerate(active["turns"]):
+            turn["run_id"] = f"<turn-{index}>"
+            turn["checkpoint_id"] = f"<checkpoint-{index}>"
+    return value
 
 
 async def check_disabled_and_equivalence(root):

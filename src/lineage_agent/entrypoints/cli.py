@@ -25,6 +25,27 @@ def format_run_summary(state: AgentState) -> str:
         f"失败 {outcomes['failed']}，未执行 {outcomes['skipped']}\n"
         f"运行日志（{completeness}）：{state['log_path']}"
     )
+    summary += (
+        f"\n模型调用：业务 {state.get('model_calls', 0)}，摘要 {state.get('summary_calls', 0)}"
+    )
+    active = TraceSanitizer.active_context(state.get("active_context"))
+    if active.get("version_id"):
+        summary += f"\n活动上下文版本：{active['version_id']}"
+    compaction = TraceSanitizer.compaction(state.get("compaction"))
+    if compaction:
+        stage = {
+            "preparing": "准备摘要", "summary_budget_rejected": "摘要预算拒绝",
+            "candidate": "候选已生成", "pending_save": "版本等待保存确认",
+            "confirmed": "版本保存已确认", "used": "新版本已用于业务请求",
+            "stopped": "未切换并停止", "failed": "压缩失败",
+        }.get(compaction.get("status"), "未确认")
+        summary += f"\n上下文压缩：{stage}"
+        if compaction.get("reason"):
+            summary += f"（{compaction['reason']}）"
+        if compaction.get("summary_id"):
+            summary += f"，摘要 {compaction['summary_id']}"
+        if compaction.get("confirmed_checkpoint_id"):
+            summary += f"\n版本确认检查点：{compaction['confirmed_checkpoint_id']}"
     budget = TraceSanitizer.context_budget(state.get("context_budget"))
     if budget:
         decision = {"allow": "放行", "exceeded": "超限", "error": "计量失败"}.get(budget.get("decision"), "未知")
@@ -57,7 +78,7 @@ def display_run(state: AgentState, settings: ModelSettings) -> int:
         )
         return 3
     if state["stop_reason"] == "context_budget_exceeded":
-        print("任务未完成：上下文预算已达到触发阈值，本次模型请求未发起；未自动删除或压缩历史。", file=sys.stderr)
+        print("任务未完成：上下文预算未通过，未发起对应业务模型请求；请查看压缩状态与运行记录。", file=sys.stderr)
         return 4
 
     if (state.get("cleanup_error") or {}).get("previous_stop_reason") == "completed" and state["result"] is not None:

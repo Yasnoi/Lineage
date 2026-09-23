@@ -7,6 +7,7 @@ from langsmith import tracing_context
 from langgraph.types import Overwrite
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.context import ContextRecords, new_context
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
@@ -182,6 +183,14 @@ async def _run_agent(
                 run_id=recorder.run_id,
             ),
             "context_budget": None,
+            "active_context": new_context(),
+            "compaction": None,
+            "summary_calls": 0,
+            "summary_result": None,
+            "summary_usage_totals": {
+                "input_tokens": None, "output_tokens": None, "total_tokens": None,
+                "missing_usage_calls": 0,
+            },
             "run_id": recorder.run_id,
             "log_path": str(recorder.path),
             "log_complete": False,
@@ -206,7 +215,7 @@ async def _run_agent(
             assert checkpointer is not None
             checkpointer.bind_run(session_id, recorder)
             tracer.bind_session(session_id)
-        config: dict[str, Any] = {"recursion_limit": 2 * settings.max_model_calls + 1}
+        config: dict[str, Any] = {"recursion_limit": 5 * settings.max_model_calls + 1}
         if session_id is not None:
             config["configurable"] = {"thread_id": session_id}
             if checkpoint_id is not None:
@@ -229,6 +238,11 @@ async def _run_agent(
         async def call_model(request):
             return await send_prepared_response(client, request, tracer=tracer)
 
+        async def call_summary(request, metadata):
+            return await send_prepared_response(
+                client, request, tracer=tracer, purpose="summary", summary_metadata=metadata,
+            )
+
         def observe_state(observed: AgentState, node: str, step_id: str | None) -> None:
             nonlocal state, last_node, last_step_id
             state = observed
@@ -240,6 +254,9 @@ async def _run_agent(
                 prepare_model_request=prepare_model_request, settings=settings,
                 max_model_calls=settings.max_model_calls, recorder=recorder, tracer=tracer,
                 checkpointer=checkpointer, observe_state=observe_state,
+                call_summary=call_summary,
+                context_records=ContextRecords(checkpointer, session_id) if checkpointer is not None and session_id is not None else None,
+                validate_input=lambda items: _input_shape_error(items) or _input_association_error(items),
             )
             start_budget_error = None
 
@@ -277,6 +294,23 @@ async def _run_agent(
                         state["input"] = deepcopy(history[:boundary]) + input_items
                         state["context_risks"] = deepcopy(risks[:boundary]) + state["context_risks"]
                         state["history_end"] = boundary
+                        previous_active = saved.values.get("active_context")
+                        if not isinstance(previous_active, dict):
+                            raise CheckpointError("checkpoint_read_error")
+                        active = deepcopy(previous_active)
+                        start = active.get("turn_start")
+                        if type(start) is not int or not 0 <= start <= boundary:
+                            raise CheckpointError("checkpoint_read_error")
+                        if boundary > start:
+                            active["turns"].append({
+                                "run_id": saved.values["run_id"],
+                                "checkpoint_id": saved.config["configurable"]["checkpoint_id"],
+                                "item_count": boundary - start,
+                            })
+                        active["turn_start"] = boundary
+                        if (1 if active["summary"] else 0) + sum(ref["item_count"] for ref in active["turns"]) != boundary:
+                            raise CheckpointError("checkpoint_read_error")
+                        state["active_context"] = active
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
                 elif invalid := _input_shape_error(state["input"]) or _input_association_error(state["input"]):
@@ -301,9 +335,17 @@ async def _run_agent(
             checkpoint_error = exc.code
             recorder.emit("run.checkpoint_failed", error_code=exc.code)
             if last_node == "model" and state["stop_reason"] is None and state["result"] is not None:
-                # The requests were received, but their tools node never ran. Keep
-                # this known outcome even if its record also fails; create no output.
-                calls = state["result"]["tool_calls"]
+                # A model node can also prepare compaction without a new call.
+                # Its latest result may belong to tools that already completed.
+                # Only unmatched requests are known to have remained unexecuted.
+                result_ids = {
+                    item.get("call_id") for item in state["input"]
+                    if item.get("type") == "function_call_output"
+                }
+                calls = [
+                    call for call in state["result"]["tool_calls"]
+                    if call["call_id"] not in result_ids
+                ]
                 state["tool_outcomes"]["skipped"] += len(calls)
                 for index, call in enumerate(calls, 1):
                     recorder.emit(
@@ -371,6 +413,10 @@ async def _run_agent(
             usage_totals=state["usage_totals"],
             error_code=state["error_code"], cleanup_error=state["cleanup_error"],
             context_budget=state["context_budget"],
+            summary_calls=state["summary_calls"], summary_usage_totals=state["summary_usage_totals"],
+            active_version_id=state["active_context"]["version_id"],
+            compaction_status=(state["compaction"] or {}).get("status"),
+            summary_id=(state["compaction"] or {}).get("summary_id"),
             has_refusal=state["result"].get("has_refusal", False) if state["result"] is not None else False,
             read_budget=end_budget, read_budget_error=end_budget_error,
             **({

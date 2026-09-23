@@ -197,7 +197,12 @@ async def check_transparent_request_and_boundary():
     assert required == compact_bytes(request) + SETTINGS.max_output_tokens + SETTINGS.context_safety_margin_tokens
     assert prompt == original
     for delta, expected in ((1, "completed"), (0, "context_budget_exceeded"), (-1, "context_budget_exceeded")):
-        configured = replace(SETTINGS, context_budget_tokens=required + delta, context_trigger_percent=100)
+        # This fixture isolates the exact business-request boundary. Compression
+        # is unavailable, but its target still needs room for the business reserve.
+        configured = replace(
+            SETTINGS, context_budget_tokens=required + delta,
+            context_trigger_percent=100, context_target_percent=99,
+        )
         state, actual, _ = await run([response(message())], prompt=prompt, settings=configured, scenario=f"boundary_{delta:+d}")
         assert state["stop_reason"] == expected
         assert state["model_calls"] == (1 if delta == 1 else 0)
@@ -508,7 +513,12 @@ async def check_budget_checkpoint_failures():
         def predicate(checkpoint, metadata, *_):
             if stage == "final":
                 return metadata["source"] == "update"
-            return metadata["source"] == "loop" and (checkpoint["channel_values"].get("context_budget") or {}).get("decision") == "exceeded"
+            # Recovery now has its own preparation checkpoint. Fail the settled
+            # budget-stop node, preserving this check's original terminal boundary.
+            values = checkpoint["channel_values"]
+            return (metadata["source"] == "loop"
+                    and values.get("stop_reason") == "context_budget_exceeded"
+                    and (values.get("context_budget") or {}).get("decision") == "exceeded")
         with checkpoint_fault(manager, "put", predicate) as faults:
             turn, client, _ = await run([], manager=manager, sid=sid, prompt="x" * 40000, scenario=f"budget_{stage}_checkpoint_failure", faults=faults)
         assert faults and not client.requests and not turn.checkpoint_complete

@@ -18,7 +18,7 @@ from check_react import (
     outputs, read_events, recording_failure, response,
 )
 from check_text import snapshot
-from check_tracing import capture
+from check_tracing import capture, stable
 from lineage_agent.agent import runtime, sessions
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.sessions import SessionManager
@@ -448,12 +448,10 @@ async def check_tracing_sessions():
                 assert body in json.dumps(model_outputs), "model quotes keep their existing text policy"
             else:
                 assert stderr.getvalue() and PRIVATE not in stderr.getvalue()
-        def comparable(state):
-            return {key: value for key, value in state.items() if key not in {"run_id", "log_path"}}
         base_first, base_second, base_requests = results[0]
         for first, second, requests in results[1:]:
-            assert comparable(first) == comparable(base_first)
-            assert comparable(second) == comparable(base_second) and requests == base_requests
+            assert stable(first) == stable(base_first)
+            assert stable(second) == stable(base_second) and requests == base_requests
 
 
 def check_cli():

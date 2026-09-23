@@ -14,7 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langsmith import tracing_context
 
 from check_react import LocalClient, call, message, response
-from check_tracing import capture
+from check_tracing import capture, stable
 from lineage_agent.agent.checkpointing import CHECKPOINT_ERRORS, CheckpointError, SessionCheckpointer
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
@@ -233,7 +233,7 @@ async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_fail
             f"checkpoint_error={turn.checkpoint_error} steps={[event['step_id'] for event in starts]} "
             f"call_ids=directory,text log={state['log_path']}"
         )
-    stable_states = [{key: value for key, value in turn.state.items() if key not in {"run_id", "session_id", "log_path"}} for turn in turns]
+    stable_states = [stable(turn.state) for turn in turns]
     return stable_states, [client.requests for client in clients]
 
 

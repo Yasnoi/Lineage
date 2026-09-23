@@ -4,6 +4,7 @@ from operator import add
 from typing import Annotated, Any, Literal, TypedDict
 
 from lineage_agent.models.budget import ContextBudget, ContextRisk
+from lineage_agent.agent.context import ActiveContext
 from lineage_agent.models.types import ModelResult
 from lineage_agent.tools.types import ToolOutcomes
 
@@ -24,6 +25,11 @@ class AgentState(TypedDict):
     history_end: int
     context_risks: list[ContextRisk | None]
     context_budget: ContextBudget | None
+    active_context: ActiveContext
+    compaction: dict[str, Any] | None
+    summary_calls: int
+    summary_result: ModelResult | None
+    summary_usage_totals: UsageTotals
     run_id: str
     log_path: str
     log_complete: bool

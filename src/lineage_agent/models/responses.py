@@ -93,30 +93,40 @@ async def send_prepared_response(
     request: dict[str, Any],
     *,
     tracer: "RunTrace | None" = None,
+    purpose: str = "business",
+    summary_metadata: dict[str, Any] | None = None,
 ) -> ModelResult:
     """Send the same prepared kwargs that the graph has already measured."""
-    span = (
-        tracer.model_start(
+    is_summary = purpose == "summary"
+    # Summary material can contain tool bodies in ordinary message fields.
+    # Never route it through the business model's readable-text projection.
+    span, end = None, None
+    if tracer is not None and is_summary:
+        start = getattr(tracer, "summary_start", None)
+        end = getattr(tracer, "summary_end", None)
+        if start is not None:
+            span = start(request["model"], summary_metadata)
+    elif tracer is not None:
+        span = tracer.model_start(
             request["model"], request["input"], request.get("tools"),
             instructions=request.get("instructions"), tool_choice=request.get("tool_choice"),
         )
-        if tracer is not None else None
-    )
+        end = tracer.model_end
     try:
         result = await _request_response(client, request)
     except ModelError as exc:
-        if tracer is not None:
-            tracer.model_end(span, result=exc.result, error_code=exc.code, stage=exc.stage)
+        if end is not None:
+            end(span, result=exc.result, error_code=exc.code, stage=exc.stage)
         raise
     except BaseException as exc:
-        if tracer is not None:
-            tracer.model_end(
+        if end is not None:
+            end(
                 span, error_code="model_error" if isinstance(exc, Exception) else "model_interrupted",
                 stage="model_request",
             )
         raise
-    if tracer is not None:
-        tracer.model_end(span, result=result)
+    if end is not None:
+        end(span, result=result)
     return result
 
 

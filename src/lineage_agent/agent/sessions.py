@@ -6,6 +6,7 @@ from threading import Lock
 from uuid import uuid4
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.context import read_record
 from lineage_agent.agent.runtime import (
     PreExecutionConfigurationError, _run_agent, normalize_input, validate_tools,
 )
@@ -19,6 +20,7 @@ _SESSION_ERRORS = {
     "unknown_session": "会话不存在，请使用当前管理器创建的会话标识。",
     "session_busy": "该会话正在处理请求，本次提交未执行。",
     "session_blocked": "该会话的保存或执行完整性未确认，请新建会话；不会自动恢复或重试。",
+    "unknown_record": "此会话中没有该运行的已确认记录。",
 }
 
 
@@ -49,6 +51,7 @@ class _Session:
     last_checkpoint_id: str | None = None
     blocked: bool = False
     lock: Lock = field(default_factory=Lock)
+    records: dict[str, str] = field(default_factory=dict)
 
 
 class SessionManager:
@@ -111,9 +114,23 @@ class SessionManager:
                 session.blocked = True
             else:
                 session.last_checkpoint_id = checkpoint_id
+                if checkpoint_id is not None:
+                    session.records[state["run_id"]] = checkpoint_id
             return SessionTurn(
                 session_id, deepcopy(state), checkpoint_id,
                 checkpoint_id is not None and error is None, error,
             )
         finally:
             session.lock.release()
+
+    async def get_record(self, session_id: str, run_id: str) -> dict:
+        """Retrieve a confirmed run's original facts without executing the graph."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise SessionError("unknown_session")
+        checkpoint_id = session.records.get(run_id)
+        if checkpoint_id is None:
+            raise SessionError("unknown_record")
+        return await read_record(self._checkpointer, session_id, {
+            "run_id": run_id, "checkpoint_id": checkpoint_id,
+        })

@@ -52,6 +52,22 @@ class SessionCheckpointer(InMemorySaver):
     def last_confirmed(self, thread_id: str) -> str | None:
         return self._confirmed.get(thread_id)
 
+    async def read_confirmed(self, thread_id: str, checkpoint_id: str):
+        """Read an explicit immutable record, even when execution is blocked.
+
+        This never clears the fault flag or selects a newer/unconfirmed state.
+        References are issued only after successful native checkpoint writes.
+        """
+        try:
+            saved = self.get_tuple({"configurable": {
+                "thread_id": thread_id, "checkpoint_id": checkpoint_id,
+            }})
+            if saved is None:
+                raise ValueError("missing record")
+            return saved
+        except Exception:
+            raise CheckpointError("checkpoint_read_error") from None
+
     def failure(self, thread_id: str) -> CheckpointError | None:
         code = self._failures.get(thread_id)
         return CheckpointError(code) if code is not None else None
