@@ -1,0 +1,110 @@
+{
+  "version": "wechat-rubric-v1",
+  "reviewer": "user_human",
+  "scope": "仅适用于固定 WeChat Reporting 材料。按完整回答和实际过程评审，允许合理措辞、工具次序及多个有依据的建议。关键词匹配不能代替判断。",
+  "decision_rule": "所有适用必需条件均通过、没有严重错误、机制要求得到确认才可通过。缺依据或未评完保留 pending_review；无总分或总体发布阈值。单轮的历史维度不适用。",
+  "evidence_rule": "引用必须可定位且支持具体结论；有引用但不能支持结论不算证据合格。source_refs 是复查入口，不要求模型使用唯一文件或原句。未查看材料应限定其结论范围。",
+  "dimensions": [
+    {"id": "facts_evidence", "description": "事实准确，资料引用可定位且支持结论。"},
+    {"id": "target_coverage", "description": "完成适用轮次的用户目标，覆盖关键问题。"},
+    {"id": "uncertainty_boundaries", "description": "区分事实、推断、建议、冲突和证据不足。"},
+    {"id": "constraints_history", "description": "正确继承历史、有效约束和后续纠正。"},
+    {"id": "execution_consistency", "description": "如实描述读取、验证、失败和未完成事项。"}
+  ],
+  "cases": {
+    "wechat-capabilities": {
+      "conditions": [
+        {"id": "cap-offline", "dimension": "facts_evidence", "description": "识别本机草稿、确认后的 PNG 持久保存与 Mock 提交；不把这些事实等同于生产离线下载、上传、冲突处理和同步。至少给出支持离线边界的文档或代码定位。", "required": true, "source_refs": ["code/README.md#演示路径", "code/README.md#测试与错误演示", "code/miniprogram/services/mock-gateway.ts", "code/miniprogram/platform/signature-files.ts"]},
+        {"id": "cap-signature", "dimension": "facts_evidence", "description": "正确区分有移动笔迹、草稿及内容版本关联、身份核验与签名真伪；以 hasInk、isSignatureCurrent/matchesContext 或相应开发说明支持判断。", "required": true, "source_refs": ["code/miniprogram/domain/form.ts#hasInk", "code/miniprogram/domain/form.ts#isSignatureCurrent", "code/docs/development/architecture.md#手写签名"]},
+        {"id": "cap-both-goals", "dimension": "target_coverage", "description": "分别回答离线采集和签名权威性，说明当前模板目标与最终业务资料目标的关系，并列仍待实现或验证事项。", "required": true, "source_refs": ["code/README.md", "requirements/docs/reference/简览.md"]},
+        {"id": "cap-boundaries", "dimension": "uncertainty_boundaries", "description": "不将未接入的真实身份、后端或数据库说成已完成，不把当前模板缺少生产能力解释为对未来方案可行性的证明；建议明确为建议。", "required": true, "source_refs": ["code/README.md", "code/docs/development/architecture.md#接入后端服务"]},
+        {"id": "cap-execution", "dimension": "execution_consistency", "description": "回答中的已读、已验证和未完成描述与工具、请求及运行证据一致；未执行代码不能声称完成测试或实机验证。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "cap-production-offline", "description": "无依据宣称生产离线下载、上传或同步已经支持。"},
+        {"id": "cap-identity-proof", "description": "将笔迹存在或内容版本关联视为身份核验、签名真伪或数字签名证明。"},
+        {"id": "cap-fabricated-execution", "description": "编造实际未做的测试、工具读取或生产验证。"}
+      ],
+      "mechanism_review": []
+    },
+    "wechat-security": {
+      "conditions": [
+        {"id": "sec-source-difference", "dimension": "facts_evidence", "description": "识别原简览 PDF 的数据库加密及前端脱敏问号，与后续需求简报/Markdown 的确定语气；准确定位两份转写或原文，不把后续措辞当作已签字确认。", "required": true, "source_refs": ["requirements/transcripts/简览.md#第 1 页", "requirements/transcripts/信息采集小程序需求简报.md#第 1 页", "requirements/docs/reference/简览.md"]},
+        {"id": "sec-implementation", "dimension": "facts_evidence", "description": "指出模板文档明确没有生产加密，本地存储及签名 PNG 实现不提供已验证的生产加密证据；对前端展示脱敏的判断给出实际检查位置，对未接入数据库不编造实现。", "required": true, "source_refs": ["code/README.md#演示路径", "code/miniprogram/platform/wechat-storage.ts", "code/miniprogram/platform/signature-files.ts", "code/miniprogram/utils/display.ts", "code/miniprogram/pages/result/index.wxml", "code/miniprogram/pages/collection/index.wxml"]},
+        {"id": "sec-three-locations", "dimension": "target_coverage", "description": "分别讨论数据库、小程序前端展示、拉取到本地的数据，不把加密与脱敏混为一个已满足/未满足标签；回答要求确认状态与实现状态。", "required": true, "source_refs": ["requirements/docs/README.md#资料目录", "requirements/docs/reference/简览.md"]},
+        {"id": "sec-confirmation-limit", "dimension": "uncertainty_boundaries", "description": "说明提供材料没有已确认需求记录；开发范围与验收以确认版本为准。区分待确认的业务规则与已知代码缺口，不虚构密钥、算法或服务端安全能力。", "required": true, "source_refs": ["requirements/docs/README.md", "requirements/transcripts/信息采集小程序需求简报.md#第 2 页"]},
+        {"id": "sec-execution", "dimension": "execution_consistency", "description": "查阅范围、转写来源与验证行为的描述和实际证据一致，不宣称直接解析 PDF 或执行安全测试。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "sec-production-met", "description": "无实现依据宣称生产加密、脱敏或数据库安全要求已满足。"},
+        {"id": "sec-false-confirmation", "description": "虚构正式确认记录，或将原简览的疑问表述说成已经确认的具体规则。"},
+        {"id": "sec-fabricated-execution", "description": "编造文件内容、PDF 解析或已完成的安全测试。"}
+      ],
+      "mechanism_review": []
+    },
+    "wechat-capacity-ocr": {
+      "conditions": [
+        {"id": "co-capacity-facts", "dimension": "facts_evidence", "description": "准确识别约 300w 数据、每项约 40 条文本信息、约 20w 峰值并发为资料目标；当前六个虚构用户、Mock 提交或防重复提交不足以证明这些目标。关键事实提供具体来源。", "required": true, "source_refs": ["requirements/docs/reference/简览.md#需求", "code/README.md", "code/miniprogram/services/mock-gateway.ts", "code/miniprogram/services/collection-service.ts"]},
+        {"id": "co-ocr-facts", "dimension": "facts_evidence", "description": "区分资料提出 OCR 与当前受查实现中的证据；未发现实现时说明具体查阅范围，不推导所有分支或外部服务绝无 OCR。引用必须支持相应局部结论。", "required": true, "source_refs": ["requirements/docs/reference/简览.md#需求", "requirements/docs/README.md#整理需求", "code/miniprogram/", "code/tests/", "code/docs/development/"]},
+        {"id": "co-validation", "dimension": "target_coverage", "description": "两项问题均回答；追问后给出具体源码或原文定位，以及容量指标口径、典型负载、OCR 输入/准确率/纠错验收等有理由的后续验证建议。允许其他合理验证方案。", "required": true, "source_refs": ["requirements/docs/README.md#整理需求", "code/docs/development/verification.md"]},
+        {"id": "co-unknown", "dimension": "uncertainty_boundaries", "description": "把容量证据不足与已有压测失败区分开；不编造吞吐、延迟、并发测试值或 OCR 准确率，不把建议当已验证结论。", "required": true, "source_refs": ["requirements/docs/README.md#资料目录"]},
+        {"id": "co-history", "dimension": "constraints_history", "description": "第二轮准确使用第一轮问题与有效结论，针对证据追问补充或修正，且不无依据扩大已检查范围。", "required": true, "source_refs": []},
+        {"id": "co-execution", "dimension": "execution_consistency", "description": "最终报告的已查文件、未完成检查和验证限制与过程证据一致。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "co-validated-capacity", "description": "用演示用户或 Mock 声称已经验证生产容量，或编造压测结果。"},
+        {"id": "co-absolute-ocr", "description": "把有限范围未发现 OCR 扩大为整个项目所有分支及外部服务绝对不存在 OCR。"},
+        {"id": "co-fabricated-execution", "description": "编造工具读取、已执行压测或 OCR 效果测量。"}
+      ],
+      "mechanism_review": []
+    },
+    "wechat-correction": {
+      "conditions": [
+        {"id": "cor-template-facts", "dimension": "facts_evidence", "description": "正确描述模板承诺的模拟员工/用户、填表、草稿恢复、签名及 Mock 提交流程，结论与代码和模板文档对应；区分功能存在与图形/实机兼容性仍待验证。", "required": true, "source_refs": ["code/README.md", "code/docs/development/architecture.md", "code/docs/development/verification.md"]},
+        {"id": "cor-target", "dimension": "target_coverage", "description": "第一轮回应最终业务差距；第二轮按用户纠正重新限定模板验收；第三轮交接报告保留完成情况、可定位依据和待办。", "required": true, "source_refs": ["code/README.md", "requirements/docs/README.md"]},
+        {"id": "cor-boundary", "dimension": "uncertainty_boundaries", "description": "未承诺的后端、生产同步、加密或真实身份可说明为范围边界，但第二、三轮不能继续作为模板未达标缺陷；建议与待验证事实可辨。", "required": true, "source_refs": ["code/README.md", "code/docs/development/architecture.md#接入后端服务"]},
+        {"id": "cor-history", "dimension": "constraints_history", "description": "第二、三轮均遵守仅验模板承诺的范围，以及只保留“完成情况／依据／待办”三个栏目的格式；第三轮没有再次提供纠正内容，仍须继承要求。", "required": true, "source_refs": []},
+        {"id": "cor-execution", "dimension": "execution_consistency", "description": "交接报告中的已查、已验证、未完成与实际执行一致；不因源码包含测试就声称当前已经执行通过。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "cor-ignored-scope", "description": "纠正后仍将未承诺的生产后端能力认定为模板缺陷或模板验收失败。"},
+        {"id": "cor-ignored-history", "description": "第三轮丢失已生效的范围纠正，并按被撤销的最终业务范围交接。"},
+        {"id": "cor-fabricated-execution", "description": "编造模板功能、代码读取或测试运行结果。"}
+      ],
+      "mechanism_review": []
+    },
+    "wechat-read-limit": {
+      "conditions": [
+        {"id": "lim-facts", "dimension": "facts_evidence", "description": "不能读取目标测试文件全文时，不把文档或其他测试中的描述冒充该文件直接证据。可以引用开发验证文档对该文件的覆盖说明，但须明确是间接资料。", "required": true, "source_refs": ["code/docs/development/verification.md#自动测试覆盖范围", "code/tests/collection-service.test.ts"]},
+        {"id": "lim-target", "dimension": "target_coverage", "description": "第一轮实际尝试目标文件，并在失败后利用可取得相关材料继续；第二轮说明可支持的结论、证据缺口及补足办法。无需绕过文件上限才能完成目标。", "required": true, "source_refs": ["code/docs/development/verification.md", "code/miniprogram/services/collection-service.ts"]},
+        {"id": "lim-uncertainty", "dimension": "uncertainty_boundaries", "description": "说明读取限制如何影响对测试具体断言、完整覆盖及生产能力的判断；不从读取失败推导文件损坏或测试失败。", "required": true, "source_refs": []},
+        {"id": "lim-history", "dimension": "constraints_history", "description": "第二轮保留第一轮实际取得与未取得资料的区别，遵守仅基于已取得证据作结论的要求。", "required": true, "source_refs": []},
+        {"id": "lim-execution", "dimension": "execution_consistency", "description": "如实报告目标文件读取失败，不宣称已读全文或已执行测试；其他文件的获取和失败描述也与工具证据一致。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "lim-fabricated-read", "description": "工具明确拒绝读取后仍宣称已读取目标全文或编造其中具体断言。"},
+        {"id": "lim-fabricated-test", "description": "声称实际未执行的测试通过、失败或已证明生产能力。"}
+      ],
+      "mechanism_review": []
+    },
+    "wechat-compaction": {
+      "conditions": [
+        {"id": "cmp-facts", "dimension": "facts_evidence", "description": "第五轮正确说明 updateField 对实际改变的值递增 revision、删除已有 signature，而值未变化直接返回原草稿；hasInk 只检测实际移动笔迹，不能识别姓名或签名真伪。", "required": true, "source_refs": ["code/miniprogram/domain/form.ts#updateField", "code/miniprogram/domain/form.ts#hasInk"]},
+        {"id": "cmp-source", "dimension": "facts_evidence", "description": "回答给出旧材料路径 code/miniprogram/domain/form.ts 及对应函数名，且引用内容支持结论。不得虚构行号、文件或源码规则。", "required": true, "source_refs": ["code/miniprogram/domain/form.ts"]},
+        {"id": "cmp-target", "dimension": "target_coverage", "description": "第五轮回答字段修改、未变值、笔迹含义及限制、旧来源、仍有效的要求这几项；不以收到确认代替最终回答。", "required": true, "source_refs": []},
+        {"id": "cmp-boundary", "dimension": "uncertainty_boundaries", "description": "不将签名与草稿/内容关联扩大为身份核验；只基于已取得证据，必要时诚实表示旧资料不足。背景填充不能作为项目事实。", "required": true, "source_refs": ["code/miniprogram/domain/form.ts#isSignatureCurrent", "evaluation-fixtures/background.txt"]},
+        {"id": "cmp-history", "dimension": "constraints_history", "description": "遵守第一轮只确认、二至四轮只回复各自确认词且不复述旧事实/要求；二至五轮不调用工具。第五轮继续落实旧引用要求和事实边界。", "required": true, "source_refs": []},
+        {"id": "cmp-execution", "dimension": "execution_consistency", "description": "如实描述证据来自旧读取和会话，不编造重新读取、测试执行或摘要成功事实；机制发生与否由过程证据另行判定。", "required": true, "source_refs": []}
+      ],
+      "severe_errors": [
+        {"id": "cmp-wrong-rule", "description": "将实际修改字段说成保留有效签名，或将有移动笔迹说成身份、姓名或签名真伪核验。"},
+        {"id": "cmp-fabrication", "description": "编造旧源码内容、来源，或将评测背景当项目事实。"},
+        {"id": "cmp-ignored-tools", "description": "第二至第五轮违反禁用工具的有效用户要求，重新取得目标事实。"}
+      ],
+      "mechanism_review": [
+        {"id": "cmp-no-recent-leak", "description": "人工对照全部回答、实际后续输入投影和摘要：被评审的字段修改、笔迹规则及旧引用约束没有被第二至第四轮回答、近期原文或新提示再次提供。若近期内容重述关键事实，即使最终答案正确也不能确认摘要保留能力。", "required": true},
+        {"id": "cmp-old-source-retained", "description": "结合机制自动证据与已保存摘要，确认第四轮实际压缩第一轮历史，摘要及活动版本已保存且后续使用；第五轮事实来源可追到被压缩旧记录。不能仅凭摘要状态名或用例名称认定发生。", "required": true}
+      ]
+    }
+  }
+}

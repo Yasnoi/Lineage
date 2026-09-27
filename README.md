@@ -535,7 +535,7 @@ uv run --locked python -m unittest discover -s benchmarks/tests -v
 
 每个单元在独立子进程中执行原脚本完整的 `__main__` 入口，包括同步、异步及入口后的检查：`check_sessions.py` 和 `check_session_review_fixes.py` 的异步 `main()` 后 CLI 检查仍执行；`check_tracing.py` 验证卡住上传的 CLI 子进程仍由原检查启动。`check_trace_data.py` 的 2 组及 `check_trace_usage.py` 的 4 组已由 Tracing 主入口完整调用，全量回归不再次安排独立单元。原脚本命令继续可用，例如 `uv run --locked python scripts/check_react.py`；完整列表见下方“独立验证”。
 
-Benchmark 不读取 `.env`，子进程只继承筛选后的运行环境，不传递模型或追踪凭据，并确保 Python 断言启用。父环境的追踪开关关闭；离线 Tracing 检查仍在受控范围内使用合成配置开启追踪，保留真实 SDK 序列化、替身 HTTP、上传失败及有限收尾断言，不访问外部模型或追踪服务。每单元默认超时为 120 秒，超时请求终止进程树。
+控制 Benchmark 不读取 `.env`，子进程只继承筛选后的运行环境，不传递模型或追踪凭据，并确保 Python 断言启用。父环境的追踪开关关闭；离线 Tracing 检查仍在受控范围内使用合成配置开启追踪，保留真实 SDK 序列化、替身 HTTP、上传失败及有限收尾断言，不访问外部模型或追踪服务。每单元默认超时为 120 秒，超时请求终止进程树。
 
 每次运行使用独立的 `logs/benchmarks/<UTC时间>-<UUID>/`。执行前保存 `plan.json`，随后输出 `result.json`、`report.md`；单元目录保存 `stdout.txt`、`stderr.txt`、`receipt.json` 和逐条落盘的 `groups.jsonl`。回执绑定运行与单元标识、源码版本、组计划及事件摘要，并与进程退出行为核对。报告只依据有效组事件和回执判断，不解析成功文字补判通过。原始 Agent JSONL 及安全检查产物仍保留原位置，按显式观测的标识或路径关联，不因导入辅助模块产生目录而认定该组已执行。
 
@@ -549,7 +549,7 @@ Benchmark 不读取 `.env`，子进程只继承筛选后的运行环境，不传
 | 检查入口等前置条件缺失 | `blocked` | `pending_review` |
 | 已选择但未执行 | `not_run` | `pending_review` |
 | 其余断言已完成，但适用环境样例无法构造 | `completed` | `pending_review`，另记覆盖缺口 |
-| 研究执行完成但尚未评分（仅契约支持） | `completed` | `pending_review` |
+| 研究执行完成但尚未评分 | `completed` | `pending_review` |
 
 Benchmark 中一个组断言失败后，保留已完成组，将当前脚本剩余组标为 `not_run`，不在状态不确定的同进程中强行继续；其他隔离单元可以继续。原 Review 脚本独立运行时仍保留其收集多个失败的行为，Benchmark 观察器激活后采用组级遇错停止。组执行异常或入口提前退出不伪造剩余组完成；中断、组记录故障或进程树收尾无法确认时停止后续调度。事件损坏时只保留有效前缀，缺失结束事件的组不判通过。环境能力不足的适用样例记录原因和覆盖缺口，不计为已验证；明确不适用的样例另行标记。
 
@@ -559,7 +559,23 @@ Benchmark 中一个组断言失败后，保留已完成组，将当前脚本剩�
 
 定位失败时结合组事件、适用的运行/会话/步骤/调用/检查点标识、原日志及单元完整输出；组输出区间之外的 worker 异常堆栈仍可在完整 `stderr.txt` 中查看。`issues` 与覆盖标签说明发生环节和涉及能力，不自动证明根本原因。JSONL、经过过滤的 Tracing 与检查点用途不同，都不能默认作为完整模型请求或完整资料副本。
 
-实现位于 [benchmarks](benchmarks/)，通过明确映射接入，无自动发现或任意命令执行接口。契约保留 `turns` 的多轮会话、检查点、回答、过程与摘要版本引用，以及 `dimensions` 的质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力。真实研究执行器、评分器及效果基线尚未实现；后续参考答案与评分资料须与 Agent 可访问材料隔离。
+实现位于 [benchmarks](benchmarks/)，通过明确映射接入，无自动发现或任意命令执行接口。契约的 `turns` 保存多轮会话、检查点、回答、过程与摘要版本引用，`dimensions` 保存质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力。真实研究通过独立的显式入口执行，参考事实与评分资料放在 Agent 可访问材料之外。
+
+### WeChat Reporting 研究评测
+
+```powershell
+# 会调用批准的真实模型：6 个试运行 + 每题 3 次正式重复，共 24 个样本
+uv run --locked python -m benchmarks --suite research-wechat --research-profile wechat-v1
+
+# 用户填写评审包后导入；本命令不调用模型、不覆盖原执行结果
+uv run --locked python -m benchmarks --review-result 'logs/benchmarks/<批次ID>/result.json' --review-file '<已填写评审JSON路径>'
+```
+
+该研究集使用固定 Git 提交的 WeChat Reporting 材料，默认来源为与本项目同级的 `WeChat Reporting` 仓库。仅读取必要的 `BASE_URL`、`MODEL_NAME`、`API_KEY`，要求与 `wechat-v1` 的 `deepseek-flash` / `https://api.deepseek.com` 一致；缺少配置或固定提交时阻塞，不替换模型。默认入口、`control-react`、`control-all` 仍完全离线，研究与控制不能在同次命令混选。
+
+每个样本独立材料副本与进程，多轮在同一样本内继承会话。整批最多 400 次请求开始记账、120 分钟累计执行时间；每个样本最多 300 秒，不自动重试。发送前持久化记账，无法确认是否发出的请求也占用预算，不回收为可再用额度。业务与摘要 usage 分字段报告缺失，费用无账单时为未知。
+
+原始执行结果保持待人工评审，不能据 Agent 正常回答或关键词命中宣布质量通过。批次目录提供 `review.md`、`review-template.json`，用户逐条件填写依据并声明评审者；导入生成独立评分修订与报告。机制覆盖缺口另行报告，不与质量或成本合成总分。固定材料、六题内容、评分及复跑说明见 [研究评测说明](benchmarks/research/README.md)。
 
 ## 独立验证
 

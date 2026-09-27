@@ -386,7 +386,12 @@ def persist_result(result: dict, directory: Path) -> tuple[int, list[Path]]:
             if name == "result.json":
                 atomic_write_json(path, result)
             else:
-                atomic_write_text(path, render_report(result))
+                if any(unit.get("execution_mode") == "real_model" for unit in result["units"]):
+                    from benchmarks.research.contracts import render_research_report
+                    report = render_research_report(result)
+                else:
+                    report = render_report(result)
+                atomic_write_text(path, report)
             saved.append(path)
         except (OSError, ValueError, TypeError) as exc:
             result["framework_errors"].append(issue("saving", "artifact_write_failed", f"无法保存 {name}。", exc))

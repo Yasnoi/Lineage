@@ -97,6 +97,10 @@ def exit_code(result: dict) -> int:
         unit["execution_status"] != "completed" for unit in units
     ):
         return 2
+    if any(unit.get("execution_mode") == "real_model" and any(
+        item.get("status") == "gap" for item in unit.get("coverage", [])
+    ) for unit in units):
+        return 2
     groups = [group for unit in units for group in unit.get("groups", [])]
     if any(group["execution_status"] in {"failed", "blocked"} or any(gap["applicable"] for gap in group["coverage_gaps"])
            for group in groups):
@@ -157,6 +161,9 @@ def validate_result(result: dict) -> None:
                 raise ValueError("false unit pass")
     if result["summary"] != summarize(result["units"]):
         raise ValueError("summary differs from unit facts")
+    if any(unit.get("execution_mode") == "real_model" for unit in result["units"]):
+        from benchmarks.research.contracts import validate_research_result
+        validate_research_result(result)
     # Reject non-finite numbers and non-JSON values rather than silently altering facts.
     json.dumps(result, allow_nan=False)
 
