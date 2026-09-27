@@ -499,6 +499,43 @@ state = asyncio.run(run_agent(
 
 工具拒绝和已分类执行失败另含 `reason_code` 和固定 `reason_message`，例如 `target_not_directory`、`link_or_reparse_forbidden`、`decode_error`。这些应用诊断同时进入工具错误结果，关闭追踪也保留；错误大类和计数不变，未知原因码使用安全默认值，不记录异常原文。旧日志未保存的信息不能据此恢复。
 
+## Benchmark
+
+Benchmark 是独立评测入口，由评测端选择检查并形成判定。当前只接入 `control-react` 评测集中的 `react-script` 单元，按**一个脚本级单元**执行现有 `check_react.py` 全部检查。这是确定性模型替身的控制逻辑回归，不是实际 Research 效果评测，也不代表其他检查脚本已经执行。
+
+使用前述 uv 环境，从项目根目录执行：
+
+```powershell
+uv run --locked python -m benchmarks --list
+uv run --locked python -m benchmarks --suite control-react
+# 省略 --suite 时，同样只执行 control-react
+uv run --locked python -m benchmarks
+
+# 框架自身的故障注入与契约检查，不调用真实端点
+uv run --locked python -m unittest discover -s benchmarks/tests -v
+```
+
+未知评测集在执行前拒绝，不回退运行其他检查。Benchmark 不读取 `.env`，子进程使用筛选后的运行环境，关闭外部追踪并确保 Python 断言启用；该单元超时为 120 秒。原独立命令 `uv run --locked python scripts/check_react.py` 保持可用，其环境行为未因 Benchmark 接入而改变。
+
+每次运行使用独立的 `logs/benchmarks/<UTC时间>-<UUID>/`，输出 `result.json`、`report.md` 及单元目录中的 `stdout.txt`、`stderr.txt`、`receipt.json`。原始 Agent JSONL 仍保存在本次脚本的 `logs/checks/<CHECK_ID>/`，报告保留来源引用，不复制整份日志。回执绑定运行和单元标识、适配版本及脚本内容摘要；只有原 `main()` 完整返回、回执有效且进程退出一致时才判通过，不解析成功文字推导场景数量。
+
+结果契约 `schema_version="1"` 中，`units` 分别保存身份与定义版本、运行条件、执行状态、评测判定、Agent 终态、分项、问题、证据及效率。`baseline` 记录 Agent 提交、工作区修改状态、Python/实际依赖版本及锁文件摘要；配置、固定材料和断言规则由对应源码摘要标识。修改中的工作区不能仅凭提交号复现，本框架不保存源码快照。缺失值使用 `availability=unknown` 与原因，不适用使用 `not_applicable`；两者的 `value` 均为 `null`。耗时实测，替身 usage 不作为真实模型消耗。
+
+| 情况 | 执行状态 | 评测判定 |
+| --- | --- | --- |
+| 原检查完整通过 | `completed` | `passed` |
+| 原检查断言失败 | `completed` | `failed` |
+| 启动、执行、超时或回执错误 | `failed` | `pending_review` |
+| 检查入口等前置条件缺失 | `blocked` | `pending_review` |
+| 已选择但未执行 | `not_run` | `pending_review` |
+| 研究执行完成但尚未评分（仅契约支持） | `completed` | `pending_review` |
+
+`pending_review` 的依据区分等待评分与执行故障导致无法判定。Agent `completed` 不自动等于评测通过；当前脚本包含多个运行，单元级 `agent_outcome` 不适用，逐次真实终态见原检查输出。预期故障中的 Agent `error` 不直接使整个检查失败。汇总按类别分别保留所有状态数量，不计算能够相互抵消的总分。`issues` 定位失败环节，不自动归因根本原因。
+
+退出码为：`0` 全部通过且报告保存成功；`1` 存在有效的未通过判定；`2` 选择、执行、适配、框架或保存故障，以及阻塞/未执行；`3` 执行完成但待评审。混合结果优先级为 `2 > 1 > 3 > 0`。保存失败不改写已取得的单元结论，尽力保留产物、报告到 stderr 并非零退出；仅确认保存的文件才显示 `Saved`。
+
+实现位于 [benchmarks](benchmarks/)，未来控制逻辑单元继续通过明确映射接入，无自动发现或插件注册。契约支持 `turns` 保存多轮的会话、检查点、回答、过程与摘要版本引用，`dimensions` 保存多个质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力，不是可运行研究评测集。真实研究执行器、评分器及效果基线尚未实现；后续参考答案与评分资料须与 Agent 可访问材料隔离。JSONL、经过过滤的 Tracing 与检查点用途不同，报告不将它们当作完整请求的等价副本。
+
 ## 独立验证
 
 从项目根目录执行：

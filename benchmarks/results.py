@@ -1,0 +1,171 @@
+"""Version 1 evaluation results: execution, assessment and Agent facts are separate.
+
+Optional multi-turn records hold turn, run_id, session_id, checkpoint_id,
+agent_outcome, answer_evidence and process_evidence; context can reference active_version, summary and
+mechanism evidence. These fields describe facts supplied by an adapter, never
+infer them from a successful answer. No research executor or scorer lives here.
+"""
+
+from collections import Counter
+import json
+from pathlib import Path
+from typing import Any, Literal, NotRequired, TypedDict
+
+
+EXECUTION_STATUSES = ("completed", "failed", "blocked", "not_run")
+VERDICTS = ("passed", "failed", "pending_review")
+
+
+class AvailableValue(TypedDict):
+    availability: Literal["known", "unknown", "not_applicable"]
+    value: Any
+    reason: NotRequired[str]
+
+
+class Evidence(TypedDict):
+    kind: str
+    path: str
+    source: str
+    availability: Literal["available", "missing", "unknown"]
+
+
+class UnitResult(TypedDict):
+    suite_id: str
+    unit_id: str
+    category: str
+    definition_version: str
+    granularity: str
+    execution_mode: str
+    conditions: dict[str, AvailableValue]
+    execution_status: Literal["completed", "failed", "blocked", "not_run"]
+    verdict: Literal["passed", "failed", "pending_review"]
+    agent_outcome: AvailableValue
+    assessment_basis: str
+    dimensions: list[dict]
+    issues: list[dict]
+    evidence: list[Evidence]
+    metrics: dict[str, AvailableValue]
+    turns: NotRequired[list[dict]]
+
+
+def known(value: Any) -> AvailableValue:
+    return {"availability": "known", "value": value}
+
+
+def unknown(reason: str) -> AvailableValue:
+    return {"availability": "unknown", "value": None, "reason": reason}
+
+
+def not_applicable(reason: str) -> AvailableValue:
+    return {"availability": "not_applicable", "value": None, "reason": reason}
+
+
+def summarize(units: list[dict]) -> dict:
+    summary = {}
+    for category in sorted({unit["category"] for unit in units}):
+        selected = [unit for unit in units if unit["category"] == category]
+        execution = Counter(unit["execution_status"] for unit in selected)
+        verdict = Counter(unit["verdict"] for unit in selected)
+        summary[category] = {
+            "total": len(selected),
+            "execution_status": {key: execution[key] for key in EXECUTION_STATUSES},
+            "verdict": {key: verdict[key] for key in VERDICTS},
+        }
+    return summary
+
+
+def exit_code(result: dict) -> int:
+    units = result["units"]
+    if result["framework_errors"] or not units or any(
+        unit["execution_status"] != "completed" for unit in units
+    ):
+        return 2
+    if any(unit["verdict"] == "failed" for unit in units):
+        return 1
+    if any(unit["verdict"] == "pending_review" for unit in units):
+        return 3
+    return 0 if all(unit["verdict"] == "passed" for unit in units) else 2
+
+
+def validate_result(result: dict) -> None:
+    """Validate the small common contract before persisting or reporting it."""
+    required = {"schema_version", "run_id", "started_at", "ended_at", "selected_suites",
+                "baseline", "units", "summary", "framework_errors"}
+    if not required <= result.keys() or result["schema_version"] != "1":
+        raise ValueError("invalid result envelope")
+    identities = set()
+    for unit in result["units"]:
+        if not UnitResult.__required_keys__ <= unit.keys():
+            raise ValueError("incomplete evaluation unit")
+        identity = (unit["suite_id"], unit["unit_id"])
+        if identity in identities:
+            raise ValueError("duplicate evaluation unit")
+        identities.add(identity)
+        if unit["execution_status"] not in EXECUTION_STATUSES or unit["verdict"] not in VERDICTS:
+            raise ValueError("invalid evaluation status")
+        if unit["execution_status"] != "completed" and unit["verdict"] != "pending_review":
+            raise ValueError("an assessment requires completed execution")
+        for value in [unit["agent_outcome"], *unit["conditions"].values(), *unit["metrics"].values()]:
+            if "value" not in value or value.get("availability") not in {"known", "unknown", "not_applicable"}:
+                raise ValueError("invalid availability")
+            if value["availability"] != "known" and (value.get("value") is not None or not value.get("reason")):
+                raise ValueError("missing data must have a reason, not a fabricated value")
+        for dimension in unit["dimensions"]:
+            if dimension["verdict"] not in VERDICTS:
+                raise ValueError("invalid dimension verdict")
+        for evidence in unit["evidence"]:
+            if evidence.get("availability") not in {"available", "missing", "unknown"}:
+                raise ValueError("invalid evidence availability")
+    if result["summary"] != summarize(result["units"]):
+        raise ValueError("summary differs from unit facts")
+    # Reject non-finite numbers and non-JSON values rather than silently altering facts.
+    json.dumps(result, allow_nan=False)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def render_report(result: dict) -> str:
+    validate_result(result)
+    lines = [
+        "# Benchmark 运行报告", "", f"运行 ID：`{result['run_id']}`", "",
+        f"时间：{result['started_at']} → {result['ended_at']}", "",
+        f"退出码：`{exit_code(result)}`（执行状态、评测判定与 Agent 终态分别记录）", "",
+        "## 基线", "", "```json", _json(result["baseline"]), "```", "",
+        "工作区有修改时，提交号不能完整复现本次源码；本框架不保存源码快照。", "",
+        "## 状态汇总", "",
+        "| 类别 | 单元数 | completed | failed（执行） | blocked | not_run | passed | failed（判定） | pending_review |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for category, counts in result["summary"].items():
+        numbers = [counts["total"],
+                   *(counts["execution_status"][key] for key in EXECUTION_STATUSES),
+                   *(counts["verdict"][key] for key in VERDICTS)]
+        lines.append(f"| {category} | " + " | ".join(str(number) for number in numbers) + " |")
+    lines.extend(["", "各类别分别报告，不计算能够相互抵消的总分。", ""])
+    for unit in result["units"]:
+        lines.extend([
+            f"## {unit['suite_id']} / {unit['unit_id']}", "",
+            f"定义版本：`{unit['definition_version']}`；粒度：`{unit['granularity']}`；执行方式：`{unit['execution_mode']}`。", "",
+            f"执行：**{unit['execution_status']}**；判定：**{unit['verdict']}**。", "",
+            unit["assessment_basis"], "",
+        ])
+        if unit["execution_mode"] == "contract_example":
+            lines.extend(["契约样例：仅验证结果表达，不是实际 Research 评测。", ""])
+        if unit["execution_mode"] == "deterministic_stub":
+            lines.extend(["确定性替身检查；不是实际 Research 效果评测，替身 usage 不是实际模型消耗。", ""])
+        for title, key in (("运行条件", "conditions"), ("Agent 终态", "agent_outcome"),
+                           ("效率", "metrics"), ("分项判定", "dimensions"), ("失败及限制", "issues")):
+            lines.extend([f"### {title}", "", "```json", _json(unit[key]), "```", ""])
+        lines.extend(["### 证据", ""])
+        for evidence in unit["evidence"]:
+            location = f"`{evidence['path']}`"
+            if evidence["availability"] == "available":
+                location = f"[{evidence['kind']}](<{Path(evidence['path']).absolute().as_posix()}>)"
+            lines.append(f"- {evidence['kind']}：{location}；{evidence['availability']}；来源：{evidence['source']}")
+        lines.append("")
+        if "turns" in unit:
+            lines.extend(["### 轮次与过程引用", "", "```json", _json(unit["turns"]), "```", ""])
+    lines.extend(["## 框架错误", "", "```json", _json(result["framework_errors"]), "```", ""])
+    return "\n".join(lines)
