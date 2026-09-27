@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
 
+from check_support import check_group, observe_state, observe_turn
 from check_react import (
     LocalClient, SETTINGS, TOOL, audit_recording, call, fixed_tool, message,
     outputs, read_events, recording_failure, response,
@@ -50,6 +51,7 @@ async def saved_state(manager, turn):
 
 
 def audit_turn(turn, client, scenario, observations=None):
+    observe_turn(turn)
     state = turn.state
     assert state["model_calls"] == len(client.requests)
     assert 0 <= state["history_end"] <= len(state["input"])
@@ -87,6 +89,7 @@ async def turn(manager, session_id, replies, *, prompt="question", scenario, cli
     client = client or LocalClient(replies)
     with patch.object(runtime, "create_client", return_value=client) as factory:
         result = await manager.run_turn(session_id, prompt)
+        observe_turn(result)
     assert not factory.called or client.closed, "every opened client must close"
     audit_turn(result, client, scenario, observations)
     if result.checkpoint_complete:
@@ -265,8 +268,10 @@ async def check_concurrency():
             else:
                 raise AssertionError("overlapping turn was accepted")
             b = await manager.run_turn(ids[1], "Inspect B")
+            observe_turn(b)
             first.release.set()
             a = await pending
+            observe_turn(a)
         assert factory.call_count == 2 and first.closed and second.closed
         for result, client, index in ((a, first, 0), (b, second, 1)):
             audit_turn(result, client, f"interleaved_{index}")
@@ -344,6 +349,7 @@ async def check_checkpoint_and_skipped_log_failure():
         with recording_failure("tool.skipped") as log_observations:
             with patch.object(runtime, "create_client", return_value=client):
                 result = await manager.run_turn(sid, "checkpoint failure and log failure")
+                observe_turn(result)
     assert len(checkpoint_observations) == len(log_observations) == 1
     audit_turn(result, client, "checkpoint_and_skip_log_failure", checkpoint_observations + log_observations)
     assert client.closed and len(client.requests) == 1
@@ -478,6 +484,7 @@ def check_cli():
     real_display = cli.display_turn
 
     def capture_turn(result, settings):
+        observe_turn(result)
         turns.append(result)
         return real_display(result, settings)
     out, err = StringIO(), StringIO()
@@ -501,9 +508,15 @@ def check_cli():
         ), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             assert cli.main() == expected
     client = LocalClient([response(message("single answer"))])
+    real_display_run = cli.display_run
+
+    def capture_single_state(state, settings):
+        observe_state(state)
+        return real_display_run(state, settings)
+
     with patch("sys.argv", ["lineage-agent", "single question"]), patch.object(cli, "load_settings", return_value=SETTINGS), patch.object(
         runtime, "create_client", return_value=client,
-    ), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+    ), patch.object(cli, "display_run", side_effect=capture_single_state), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
         assert cli.main() == 0
     assert client.closed and len(client.requests) == 1
 
@@ -532,13 +545,15 @@ async def main():
         check_creation_and_start_log_failure, check_finalization_combinations, check_tracing_sessions,
     )
     for check in checks:
-        await check()
+        with check_group(f"check_sessions/{check.__name__}"):
+            await check()
         print(f"PASS {check.__name__}")
     return len(checks)
 
 
 if __name__ == "__main__":
     groups = asyncio.run(main())
-    check_cli()
+    with check_group("check_sessions/check_cli"):
+        check_cli()
     print("PASS check_cli")
     print(json.dumps({"groups": groups + 1, "session_runs": len(RUNS), "single_run_checks": 1, "check_log_dir": str(CHECK_DIR)}, ensure_ascii=False))

@@ -1,0 +1,449 @@
+{
+  "units": [
+    {
+      "unit_id": "tracing-script",
+      "script": "scripts/check_tracing.py",
+      "primary_suite": "control-recording",
+      "groups": [
+        {
+          "group_id": "check_tracing/check_projection",
+          "description": "字段投影、密钥及路径过滤、原对象不变与载荷上限。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_projection"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_trace_data/check_redaction_boundaries",
+          "description": "引号、转义、跨文本及截断边界的凭据过滤与幂等性。",
+          "source": {
+            "path": "scripts/check_trace_data.py",
+            "symbol": "check_redaction_boundaries"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_trace_data/check_capacity_and_rounds",
+          "description": "容量与遗漏元数据、完整工具批次保留、回答和用量投影。",
+          "source": {
+            "path": "scripts/check_trace_data.py",
+            "symbol": "check_capacity_and_rounds"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_trace_usage/check_usage_categories",
+          "description": "缺失、无效、零值和部分用量的覆盖分类。",
+          "source": {
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_usage_categories"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_trace_usage/check_mixed_run_and_empty_run",
+          "description": "多次调用混合用量覆盖及空运行。",
+          "source": {
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_mixed_run_and_empty_run"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_trace_usage/check_remote_mismatches",
+          "description": "拒绝本地与远端最终用量投影不一致。",
+          "source": {
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_remote_mismatches"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_trace_usage/check_final_projection_only",
+          "description": "最终投影缺失用量时不使用原始用量补判覆盖。",
+          "source": {
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_final_projection_only"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_serialized_redaction",
+          "description": "真实 SDK 序列化后重组过滤凭据，业务对象与请求不变。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_serialized_redaction"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_serialized_capacity",
+          "description": "超大输入的上传限额不丢失小回答及实际投影用量。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_serialized_capacity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_disabled_and_equivalence",
+          "description": "追踪开关的业务等价、混合工具结果、调用关联与统计。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_disabled_and_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_failures_and_shutdown",
+          "description": "上传、配置、初始化及过滤失败的隔离、不重试和有限收尾。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_failures_and_shutdown"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_concurrency_and_skips",
+          "description": "并发运行隔离、模型额度导致的工具跳过及关联。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_concurrency_and_skips"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_local_recording_failure",
+          "description": "本地记录失败后工具跳过事实与追踪保持一致。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_local_recording_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_late_protocol_failure",
+          "description": "后续重复调用标识的协议错误只标记对应模型调用。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_late_protocol_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_missing_usage_and_model_error",
+          "description": "缺失用量和模型异常的安全追踪投影。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_missing_usage_and_model_error"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_cancellation_and_queue_overflow",
+          "description": "模型与工具取消、资源关闭及有界上传队列。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_cancellation_and_queue_overflow"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_tracing/check_cli_exit_deadline",
+          "description": "真实 CLI 子进程在上传卡住时仍有限退出。",
+          "source": {
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_cli_exit_deadline"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "text-tracing-script",
+      "script": "scripts/check_text_tracing.py",
+      "primary_suite": "control-recording",
+      "groups": [
+        {
+          "group_id": "check_text_tracing/check_real_read_and_equivalence",
+          "description": "真实文件读取在追踪开关及五类上传失败下保持业务等价。",
+          "source": {
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_real_read_and_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_text_tracing/check_listing_and_model_quotation",
+          "description": "目录和 BOM 读取元数据隐藏正文，同时保留模型对资料的引用。",
+          "source": {
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_listing_and_model_quotation"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_text_tracing/check_failure_reasons",
+          "description": "同批读取拒绝、限制、权限、中途 I/O 与成功结果在模型、JSONL 和追踪中一致。",
+          "source": {
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_failure_reasons"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_text_tracing/check_projection_boundaries",
+          "description": "文本结果容量、原对象隔离和不可信原因及元数据过滤。",
+          "source": {
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_projection_boundaries"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_text_tracing/fixture_integrity",
+          "description": "全部检查结束后文件内容、目录成员及当前目录保持不变。",
+          "source": {
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "main:fixture_integrity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "session-tracing-script",
+      "script": "scripts/check_session_tracing.py",
+      "primary_suite": "control-recording",
+      "groups": [
+        {
+          "group_id": "check_session_tracing/checkpoint_trace_equivalence",
+          "description": "检查点追踪 harness 在关闭、开启及上传失败下请求和结果等价。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:checkpoint_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_session_tracing/checkpoint_error_metadata",
+          "description": "三类检查点错误的追踪元数据及安全投影，与正常 harness 业务结果等价。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:checkpoint_error_metadata"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_session_tracing/session_history_trace_equivalence",
+          "description": "真实多轮会话、文件历史与检查点在追踪开关及上传失败下保持等价。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:session_history_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_session_tracing/session_final_save_failure",
+          "description": "第二轮最终保存失败的追踪归属与已取得业务结果保留。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:session_final_save_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_session_tracing/check_skipped_after_save_failure",
+          "description": "模型结果保存失败后停止工具执行，保留用量、跳过及关联事实。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "check_skipped_after_save_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "execution",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_session_tracing/fixture_integrity",
+          "description": "全部会话检查结束后实际来源文件保持不变。",
+          "source": {
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:fixture_integrity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "filesystem"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "compaction-tracing-script",
+      "script": "scripts/check_compaction_tracing.py",
+      "primary_suite": "control-recording",
+      "groups": [
+        {
+          "group_id": "check_compaction_tracing/summary_trace_equivalence",
+          "description": "摘要追踪 harness 的正常、关闭及上传失败保持请求结果等价，摘要正文与派生输入被省略。",
+          "source": {
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_compaction_tracing/summary_tool_request",
+          "description": "摘要意外工具调用的失败投影保持正文省略。",
+          "source": {
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_tool_request"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_compaction_tracing/summary_incomplete",
+          "description": "未完成摘要的追踪仍不暴露摘要正文。",
+          "source": {
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_incomplete"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_compaction_tracing/bounded_lineage_provenance",
+          "description": "摘要来源引用有界且只依据明确来源隐藏派生内容，不按文本前缀猜测。",
+          "source": {
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:bounded_lineage_provenance"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ]
+        }
+      ]
+    }
+  ]
+}

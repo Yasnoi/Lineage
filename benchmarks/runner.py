@@ -6,24 +6,21 @@ import json
 import os
 from pathlib import Path
 import platform
+import signal
 import subprocess
 import sys
 import time
 from uuid import UUID, uuid4
 
 from benchmarks.common import ROOT, atomic_write_json, atomic_write_text, sha256_file, utc_now
+from benchmarks.catalog import load_catalog, resolve_selection
+from benchmarks.groups import planned_groups, plan_digest, read_group_events
 from benchmarks.results import (
     exit_code, known, not_applicable, render_report, summarize, unknown, validate_result,
 )
 
 
-SUITES = {
-    "control-react": {
-        "suite_id": "control-react", "unit_id": "react-script", "category": "control_logic",
-        "definition_version": "1", "granularity": "script", "execution_mode": "deterministic_stub",
-        "script": "scripts/check_react.py", "timeout_seconds": 120,
-    },
-}
+UNITS, SUITES = load_catalog()
 DEPENDENCIES = ("langgraph", "langsmith", "openai", "python-dotenv", "urllib3")
 
 
@@ -80,22 +77,26 @@ def collect_baseline(root: Path) -> dict:
         "framework_sources": {name: _digest(path) for name, path in (
             ("runner", Path(__file__)), ("results", ROOT / "benchmarks/results.py"),
             ("worker", ROOT / "benchmarks/react_worker.py"),
+            ("control_worker", ROOT / "benchmarks/control_worker.py"),
+            ("group_events", ROOT / "benchmarks/groups.py"),
+            ("check_support", ROOT / "scripts/check_support.py"),
         )},
     }
 
 
 def make_unit(definition: dict, root: Path) -> dict:
     script_version = _digest(root / definition["script"])
-    return {
+    unit = {
         **{key: definition[key] for key in (
             "suite_id", "unit_id", "category", "definition_version", "granularity", "execution_mode",
         )},
         "conditions": {
-            "model": known({"kind": "deterministic_stub", "name": "local-check", "version": script_version}),
+            "model": known({"kind": "deterministic_stub", "profile": definition["unit_id"], "version": script_version}),
             "configuration": known({
-                "profile": "check_react", "script_sha256": script_version,
+                "profile": Path(definition["script"]).stem, "script_sha256": script_version,
                 "settings_sha256": _digest(root / "src/lineage_agent/config/settings.py"),
-                "timeout_seconds": definition["timeout_seconds"], "tracing": "disabled",
+                "timeout_seconds": definition["timeout_seconds"], "parent_tracing": "disabled",
+                "check_tracing": "explicit synthetic environment and fake HTTP when enabled",
                 "assertions": "enabled", "scope": "脚本内按检查覆写配置；版本摘要覆盖定义，不代表所有运行使用相同配置。",
             }),
             "materials": known({"kind": "inline_fixtures", "script_sha256": script_version}),
@@ -108,6 +109,21 @@ def make_unit(definition: dict, root: Path) -> dict:
         "metrics": {"duration_seconds": unknown("检查尚未启动。"),
                     "usage": not_applicable("替身 usage 用于断言，不是实际模型消耗。")},
     }
+    if "groups" in definition:
+        unit.update(groups=planned_groups(definition), selected_by=definition.get("selected_by", []),
+                    primary_suite=definition["primary_suite"])
+        unit["conditions"]["definition"] = known({"version": "2", "plan_digest": plan_digest(definition["groups"])})
+        # Shared helpers contain fixtures/assertions too; version them without loading them.
+        unit["conditions"]["check_sources"] = known({
+            str(path.relative_to(root)): _digest(path)
+            for path in [root / "scripts" / (name + ".py") for name in (
+                "check_react", "check_filesystem", "check_text", "check_review_fixes", "check_sessions",
+                "check_session_review_fixes", "check_context_budget", "check_compaction", "check_tracing",
+                "check_trace_data", "check_trace_usage", "check_text_tracing", "check_session_tracing",
+                "check_compaction_tracing", "check_support",
+            )]
+        })
+    return unit
 
 
 def _evidence(kind: str, path: Path, source: str) -> dict:
@@ -164,19 +180,44 @@ def read_receipt(path: Path, *, run_id: str, definition: dict, root: Path,
     return data
 
 
+class ProcessCleanupError(RuntimeError):
+    """The direct child was handled, but its process tree could not be confirmed."""
+
+
 def _stop(process: subprocess.Popen) -> None:
     if process.poll() is None:
+        tree_error = None
+        if os.name == "nt" and type(process.pid) is int:
+            # The owned process is still alive; kill its descendants before its PID disappears.
+            try:
+                stopped = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                         capture_output=True, timeout=5)
+                if stopped.returncode == 0:
+                    process.wait(timeout=5)
+                    return
+                tree_error = ProcessCleanupError("process tree termination was not confirmed")
+            except (OSError, subprocess.SubprocessError) as exc:
+                tree_error = exc
+        elif os.name != "nt" and type(process.pid) is int:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+                return
+            except (OSError, subprocess.SubprocessError) as exc:
+                tree_error = exc
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        if tree_error is not None:
+            raise ProcessCleanupError("process tree cleanup remains unconfirmed") from tree_error
 
 
 def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
                  *, root: Path = ROOT) -> bool:
-    """Mutate only this unit's observations; return whether the user interrupted."""
+    """Return whether interruption, recording, or uncertain cleanup stops scheduling."""
     script = root / definition["script"]
     if not script.is_file():
         unit.update(execution_status="blocked", assessment_basis="检查入口缺失，检查未启动。")
@@ -186,7 +227,8 @@ def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
     unit_dir.mkdir()
     stdout_path, stderr_path = unit_dir / "stdout.txt", unit_dir / "stderr.txt"
     receipt_path = unit_dir / "receipt.json"
-    command = [sys.executable, "-m", "benchmarks.react_worker", "--run-id", run_id,
+    worker = "benchmarks.control_worker" if "groups" in definition else "benchmarks.react_worker"
+    command = [sys.executable, "-m", worker, "--run-id", run_id,
                "--unit-id", definition["unit_id"], "--receipt", str(receipt_path)]
     process = None
     interruption = False
@@ -195,21 +237,30 @@ def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
     try:
         with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
             process = subprocess.Popen(command, cwd=root, env=safe_environment(dict(os.environ)),
-                                       stdout=stdout, stderr=stderr)
+                                       stdout=stdout, stderr=stderr, **({"start_new_session": True} if os.name != "nt" else {}))
             try:
                 process.wait(timeout=definition["timeout_seconds"])
             except subprocess.TimeoutExpired as exc:
-                failure = issue("execution", "timeout", "检查超时，已终止子进程；已有输出保留。", exc)
+                failure = issue("execution", "timeout", "检查超时，已请求终止进程树；已有输出保留。", exc)
             except KeyboardInterrupt:
                 interruption = True
                 failure = issue("execution", "interrupted", "运行被中断，已取得证据保留。")
             finally:
-                _stop(process)
+                try:
+                    _stop(process)
+                except Exception as exc:
+                    interruption = True
+                    unit["issues"].append(issue("cleanup", "process_tree_unconfirmed", "进程树收尾未确认，停止后续调度。", exc))
+                    if failure is None:
+                        failure = issue("cleanup", "process_tree_unconfirmed", "进程树收尾未确认。", exc)
     except KeyboardInterrupt:
         interruption = True
         failure = issue("execution", "interrupted", "运行被中断，已取得证据保留。")
         if process is not None:
-            _stop(process)
+            try:
+                _stop(process)
+            except Exception as exc:
+                unit["issues"].append(issue("cleanup", "process_tree_unconfirmed", "进程树收尾未确认，停止后续调度。", exc))
     except OSError as exc:
         failure = issue("launch" if process is None else "execution", "process_error",
                         "无法启动检查或保存进程输出；没有有效判定。", exc)
@@ -222,8 +273,10 @@ def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
         unit["evidence"].extend([
             _evidence("stdout", stdout_path, "worker process"),
             _evidence("stderr", stderr_path, "worker process"),
-            _evidence("receipt", receipt_path, "ReAct adapter v1"),
+            _evidence("receipt", receipt_path, "control adapter v2" if "groups" in definition else "ReAct adapter v1"),
         ])
+    if "groups" in definition:
+        return finish_control_unit(unit, definition, run_id, root, unit_dir, process, failure, interruption)
     # A started receipt can still locate partial logs after timeout/interruption.
     # Validate those references independently; an unfinished receipt is never a verdict.
     try:
@@ -261,6 +314,67 @@ def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
     return interruption
 
 
+def finish_control_unit(unit, definition, run_id, root, directory, process, failure, interruption):
+    events = directory / "groups.jsonl"
+    receipt_path = directory / "receipt.json"
+    groups, event_errors, count = read_group_events(events, run_id, definition)
+    unit["groups"] = groups
+    unit["evidence"].append(_evidence("group_events", events, "control adapter v2"))
+    fatal_recording = bool(event_errors) and process is not None and events.exists()
+    unit["issues"].extend(event_errors)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        expected = {"schema_version": "2", "adapter_version": "2", "run_id": run_id,
+                    "unit_id": definition["unit_id"], "plan_digest": plan_digest(definition["groups"])}
+        if any(receipt.get(key) != value for key, value in expected.items()):
+            raise ValueError("receipt identity mismatch")
+        if (Path(receipt["script_path"]).resolve() != (root / definition["script"]).resolve()
+                or receipt["script_sha256"] != unit["conditions"]["materials"]["value"]["script_sha256"]["value"]):
+            raise ValueError("receipt source mismatch")
+        if receipt["phase"] != "finished" or not receipt["ended_at"] or not receipt["started_at"]:
+            raise ValueError("unfinished receipt")
+        outcome = receipt["outcome"]
+        codes = {"passed": 0, "assertion_failed": 1, "error": 2, "coverage_gap": 2, "recording_failed": 2, "interrupted": 2}
+        if outcome not in codes or process is None or process.returncode != codes[outcome]:
+            raise ValueError("receipt disagrees with process")
+        if outcome in {"recording_failed", "interrupted"}:
+            fatal_recording = True
+        if outcome not in {"recording_failed", "error", "interrupted"}:
+            if event_errors or receipt["events_count"] != count or receipt["events_sha256"] != sha256_file(events):
+                raise ValueError("receipt disagrees with durable events")
+        failed_groups = [g for g in groups if g["verdict"] == "failed"]
+        gaps = [gap for group in groups for gap in group["coverage_gaps"] if gap["applicable"]]
+        if failure is None:
+            if outcome in {"passed", "coverage_gap"}:
+                if (any(g["execution_status"] != "completed" for g in groups) or failed_groups
+                        or (outcome == "passed" and gaps) or (outcome == "coverage_gap" and not gaps)
+                        or receipt["error"] is not None):
+                    raise ValueError("false script completion")
+                unit.update(execution_status="completed", verdict="pending_review" if gaps else "passed",
+                            assessment_basis="完整原入口与全部计划组已结束。" + ("存在环境覆盖缺口。" if gaps else "断言通过。"))
+            elif outcome == "assertion_failed":
+                if len(failed_groups) != 1 or not isinstance(receipt["error"], dict) or receipt["error"].get("exception_type") != "AssertionError":
+                    raise ValueError("unconfirmed assertion failure")
+                failure_index = groups.index(failed_groups[0])
+                if (any(g["verdict"] not in {"passed", "pending_review"} or g["execution_status"] != "completed" for g in groups[:failure_index])
+                        or any(g["started_at"] is not None for g in groups[failure_index + 1:])):
+                    raise ValueError("check continued after a group failure")
+                unit.update(execution_status="completed", verdict="failed",
+                            assessment_basis="真实检查组断言失败；余组按约定未执行，其他独立单元可以继续。")
+                unit["issues"].append({**receipt["error"], "group_id": failed_groups[0]["group_id"], "evidence": [str(directory / "stderr.txt")]})
+            else:
+                failure = {**(receipt.get("error") or {}), "message": "完整入口未正常结束，没有有效脚本级判定。"}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        if failure is None:
+            failure = issue("adaptation", "invalid_receipt", "最终回执缺失或与实际组事件不一致。", exc)
+    if event_errors and failure is None:
+        failure = issue("group_recording", "invalid_event_stream", "组记录不能确认为完整有效。")
+    if failure is not None:
+        unit.update(execution_status="failed", verdict="pending_review", assessment_basis="执行、组记录或适配故障；此前已确认组保留。")
+        unit["issues"].append(failure)
+    return interruption or fatal_recording
+
+
 def persist_result(result: dict, directory: Path) -> tuple[int, list[Path]]:
     """Best-effort preservation; a save failure never rewrites a unit's verdict."""
     saved = []
@@ -293,11 +407,13 @@ def run_benchmark(selected: list[str], *, root: Path = ROOT,
     if not selected or any(name not in SUITES for name in selected):
         raise ValueError("unknown or empty suite selection")
     selected = list(dict.fromkeys(selected))
+    definitions = resolve_selection(selected, UNITS, SUITES)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(uuid4())
     result = {
-        "schema_version": "1", "run_id": run_id, "started_at": utc_now(), "ended_at": None,
+        "schema_version": "2", "run_id": run_id, "started_at": utc_now(), "ended_at": None,
         "selected_suites": selected, "baseline": collect_baseline(root),
-        "units": [make_unit(SUITES[name], root) for name in selected],
+        "units": [make_unit(definition, root) for definition in definitions],
+        "unselected_units": [key for key in UNITS if key not in {d["unit_id"] for d in definitions}],
         "summary": {}, "framework_errors": [],
     }
     directory = (output_root or root / "logs/benchmarks") / run_id
@@ -310,9 +426,10 @@ def run_benchmark(selected: list[str], *, root: Path = ROOT,
         print("Benchmark 无法创建产物目录；检查未执行，没有已保存的报告。", file=sys.stderr)
         return result, []
     try:
-        for name, unit in zip(selected, result["units"]):
-            if execute_unit(unit, SUITES[name], run_id, directory, root=root):
-                result["framework_errors"].append(issue("execution", "interrupted", "运行被中断，后续单元未执行。"))
+        atomic_write_json(directory / "plan.json", result)
+        for definition, unit in zip(definitions, result["units"]):
+            if execute_unit(unit, definition, run_id, directory, root=root):
+                result["framework_errors"].append(issue("execution", "scheduling_stopped", "中断、记录故障或进程树收尾未确认，后续单元未执行。"))
                 break
     except (Exception, KeyboardInterrupt) as exc:
         result["framework_errors"].append(issue("framework", "runner_error", "框架未完成执行，保留已取得的事实。", exc))

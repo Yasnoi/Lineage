@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, observe_state, observe_turn
 from check_react import (
     FaultyFile, LocalClient, SETTINGS as BASE_SETTINGS, TOOL, audit_recording, call,
     fixed_tool, message, outputs, read_events, recording_failure, response,
@@ -76,6 +77,10 @@ def capture_measurements():
 
 
 def audit(state, client, measured, *, scenario, turn=None, faults=None):
+    if turn is not None:
+        observe_turn(turn)
+    else:
+        observe_state(state)
     events = audit_recording(state, client, scenario=scenario, failed_writes=faults)
     assert state["model_calls"] == len(client.requests)
     assert len(state["context_risks"]) == len(state["input"])
@@ -130,9 +135,11 @@ async def run(replies, *, prompt="question", settings=SETTINGS, tools=None, exec
     with resources() as observed, capture_measurements() as measured, patch.object(runtime, "create_client", return_value=client) as factory:
         if manager is None:
             state = await runtime.run_agent(prompt, settings, tools=tools, execute_tool=executor)
+            observe_state(state)
             result = None
         else:
             result = await manager.run_turn(sid, prompt)
+            observe_turn(result)
             state = result.state
     assert not factory.called or client.closed
     if manager is not None:
@@ -589,6 +596,7 @@ async def check_cli():
     displayed = []
     original_display = cli.display_turn
     def display(turn, configured):
+        observe_turn(turn)
         displayed.append(turn)
         return original_display(turn, configured)
     with patch("builtins.input", side_effect=["x" * 10000, "small", "/exit"]), patch.object(runtime, "create_client", side_effect=clients), patch.object(cli, "display_turn", side_effect=display), capture_measurements() as measured, redirect_stderr(StringIO()) as error, redirect_stdout(StringIO()) as output:
@@ -616,7 +624,8 @@ async def main():
     )
     with patch.dict(os.environ, {"LANGSMITH_TRACING": "false"}):
         for check in checks:
-            await check()
+            with check_group(f"check_context_budget/{check.__name__}"):
+                await check()
             print(f"PASS {check.__name__}")
     print(f"Passed {len(checks)} context budget groups; {len(RUNS)} captured runs. Logs: {CHECK_DIR}")
 

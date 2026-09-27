@@ -22,6 +22,7 @@ from langgraph.errors import NodeCancelledError
 from check_react import LocalClient, call, message, recording_failure, response
 from check_trace_data import check_capacity_and_rounds, check_redaction_boundaries, directory_pair, readable, text_item
 from check_trace_usage import main as check_usage_coverage
+from check_support import check_group, evidence, observe_harness, observe_state
 from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.recording import tracing
@@ -88,6 +89,7 @@ async def run(replies, *, settings=SETTINGS, prompt="List the synthetic director
         state = await runtime.run_agent(
             prompt, settings, tools=[DIRECTORY_TOOL] if executor else None, execute_tool=executor,
         )
+    observe_state(state)
     assert client.closed and state["log_complete"]
     return state, client
 
@@ -209,6 +211,8 @@ async def check_concurrency_and_skips(root):
             runtime.run_agent("List the directory.", settings, tools=[DIRECTORY_TOOL], execute_tool=create_directory_executor(root))
             for _ in range(2)
         ])
+    for state in states:
+        observe_state(state)
     assert len(transport.sent) == 6
     for index, state in enumerate(states):
         spans = [span for span in transport.sent if span["trace_id"] == state["run_id"]]
@@ -231,6 +235,9 @@ async def check_cancellation_and_queue_overflow():
             pass
         else:
             raise AssertionError("cancellation was swallowed")
+    for span in transport.sent:
+        if span["run_type"] == "chain":
+            evidence(CHECK_DIR / f"{span['id']}.jsonl", kind="interrupted_agent_log", run_id=span["id"])
     assert client.closed and len(transport.sent) == 2
     assert all(span.get("error") for span in transport.sent)
 
@@ -245,6 +252,9 @@ async def check_cancellation_and_queue_overflow():
             pass
         else:
             raise AssertionError("tool cancellation was swallowed")
+    for span in transport.sent:
+        if span["run_type"] == "chain":
+            evidence(CHECK_DIR / f"{span['id']}.jsonl", kind="interrupted_agent_log", run_id=span["id"])
     tool = next(span for span in transport.sent if span["run_type"] == "tool")
     assert tool["error"] == "tool_interrupted" and client.closed
 
@@ -259,7 +269,9 @@ async def check_cancellation_and_queue_overflow():
             pass
 
     with capture() as (_, stderr), patch.object(tracing, "QUEUE_SIZE", 1), patch.object(tracing, "_create_client", return_value=BlockedClient()):
-        trace = tracing.start_trace(str(uuid4()), SETTINGS)
+        trace_run_id = str(uuid4())
+        trace = tracing.start_trace(trace_run_id, SETTINGS)
+        observe_harness("trace_queue_harness", run_id=trace_run_id)
         span = trace.model_start("check", "first", None)
         trace.model_end(span)
         for _ in range(100):
@@ -282,6 +294,7 @@ async def check_local_recording_failure(root):
             "List the directory.", replace(SETTINGS, project_root=root),
             tools=[DIRECTORY_TOOL], execute_tool=create_directory_executor(root),
         )
+    observe_state(state)
     assert state["stop_reason"] == "error" and state["log_complete"] is False
     assert state["tool_calls"] == 0 and state["tool_outcomes"]["skipped"] == 2
     spans = [span for span in transport.sent if span["run_type"] == "tool"]
@@ -308,6 +321,7 @@ async def check_late_protocol_failure(root):
 
 
 def check_projection(root):
+    observe_harness("trace_projection")
     sanitizer = TraceSanitizer((MODEL_SECRET, TRACE_SECRET), root)
     response_body = response(message("visible " + MODEL_SECRET)).model_dump(mode="json")
     response_body["private_extension"] = "PRIVATE_RESPONSE_EXTENSION"
@@ -382,6 +396,7 @@ def check_cli_exit_deadline():
         [sys.executable, str(Path(__file__).resolve()), "--hanging-upload-child"],
         env=env, capture_output=True, text=True, encoding="utf-8", timeout=12,
     )
+    observe_harness("child_process", returncode=result.returncode)
     assert result.returncode == 0, result.stderr
     assert 4.5 <= time.monotonic() - started < 12
     assert "PRIVATE_" not in result.stderr and "incomplete" in result.stdout
@@ -466,25 +481,32 @@ async def main():
     with TemporaryDirectory(prefix="lineage-tracing-check-") as temporary:
         root = Path(temporary)
         (root / "example.txt").touch()
-        check_projection(root)
+        with check_group("check_tracing/check_projection"):
+            check_projection(root)
         print("PASS projection and redaction")
         check_redaction_boundaries()
         print("PASS credential boundaries and source immutability")
         check_capacity_and_rounds()
         print("PASS trace capacity, omissions and complete rounds")
         check_usage_coverage()
-        await check_serialized_redaction()
+        with check_group("check_tracing/check_serialized_redaction"):
+            await check_serialized_redaction()
         print("PASS SDK serialized and reassembled credential redaction")
-        await check_serialized_capacity()
+        with check_group("check_tracing/check_serialized_capacity"):
+            await check_serialized_capacity()
         print("PASS SDK oversized input preserves answer and usage")
         for check in (check_disabled_and_equivalence, check_failures_and_shutdown, check_concurrency_and_skips, check_local_recording_failure, check_late_protocol_failure):
-            await check(root)
+            with check_group(f"check_tracing/{check.__name__}"):
+                await check(root)
             print(f"PASS {check.__name__}")
-        await check_missing_usage_and_model_error()
+        with check_group("check_tracing/check_missing_usage_and_model_error"):
+            await check_missing_usage_and_model_error()
         print("PASS missing usage and model failure")
-        await check_cancellation_and_queue_overflow()
+        with check_group("check_tracing/check_cancellation_and_queue_overflow"):
+            await check_cancellation_and_queue_overflow()
         print("PASS cancellation and bounded queue")
-    check_cli_exit_deadline()
+    with check_group("check_tracing/check_cli_exit_deadline"):
+        check_cli_exit_deadline()
     print("PASS CLI bounded exit with stuck upload")
     print("PASS 17 offline tracing check groups; no real endpoint calls")
     print(f"Check logs: {CHECK_DIR}")

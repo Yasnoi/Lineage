@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, evidence, observe_harness, observe_state
+
 from openai.types.responses import Response, ResponseUsage
 
 from lineage_agent.agent import runtime
@@ -121,7 +123,13 @@ def read_events(state):
 
 def audit_recording(state, client, *, scenario=None, failed_writes=None):
     """Compare records with independently captured actual SDK requests."""
+    observe_state(state)
     events = read_events(state)
+    evidence(
+        state["log_path"], kind="agent_log", run_id=state["run_id"],
+        steps=list(dict.fromkeys(event["step_id"] for event in events if "step_id" in event)),
+        call_ids=list(dict.fromkeys(event["call_id"] for event in events if "call_id" in event)),
+    )
     assert Path(state["log_path"]).is_absolute()
     assert all(event["run_id"] == state["run_id"] for event in events)
     assert [event["event_seq"] for event in events] == list(range(1, len(events) + 1))
@@ -192,6 +200,7 @@ async def run(
             input, replace(SETTINGS, max_model_calls=limit, context_budget_tokens=context_budget_tokens),
             tools=tools, execute_tool=execute_tool,
         )
+        observe_state(state)
     assert not factory.called or client.closed, "every created client must close"
     assert state["model_calls"] == len(client.requests)
     audit_recording(state, client, scenario=scenario, failed_writes=failed_writes)
@@ -222,6 +231,7 @@ async def check_direct_answer():
 
 
 async def check_unified_model_input():
+    observe_harness("model_sdk")
     items = [{"role": "user", "content": "structured"}]
     client = LocalClient([response(message()), response(call())])
     await generate_response(client, "local-check", "string input")
@@ -656,6 +666,8 @@ async def check_nested_and_concurrent_isolation():
             runtime.run_agent(initial, SETTINGS, tools=[TOOL], execute_tool=fixed_tool)
             for _ in clients
         ])
+        for state in states:
+            observe_state(state)
     assert arriving == 2 and states[0]["run_id"] != states[1]["run_id"]
     for state, client, expected_id in zip(states, clients, ("concurrent_a", "concurrent_b")):
         counts(state, 2, 1, 1)
@@ -802,6 +814,7 @@ async def check_safe_execution_reasons():
 
 
 async def check_tool_trace_hooks():
+    observe_harness("tool_executor")
     class Tracer:
         def __init__(self):
             self.events = []
@@ -846,6 +859,7 @@ async def check_tool_trace_hooks():
     tracer = Tracer()
     with recording_failure("tool.started"):
         recorder = RunRecorder(CHECK_DIR)
+        evidence(recorder.path, kind="tool_log", run_id=recorder.run_id)
         try:
             actual = await execute_calls(
                 [call("unstarted"), call("remaining")], [TOOL], fixed_tool,
@@ -871,6 +885,7 @@ async def check_tool_trace_hooks():
         tracer = Tracer()
         with recording_failure(event_name):
             recorder = RunRecorder(CHECK_DIR)
+            evidence(recorder.path, kind="tool_log", run_id=recorder.run_id)
             try:
                 actual = await execute_calls(
                     [first, call("remaining")], [TOOL], executor, recorder=recorder, tracer=tracer,
@@ -1109,6 +1124,7 @@ async def check_failure_event_recording_failures():
 
 
 def check_cli_exit_codes():
+    observe_harness("constructed_cli_state")
     for reason, expected in (("completed", 0), ("error", 1), ("max_model_calls", 3)):
         async def invoke(*args, **kwargs):
             return {
@@ -1157,9 +1173,11 @@ def main():
     )
     for check in checks:
         print(f"CHECK {check.__name__}")
-        asyncio.run(check())
+        with check_group(f"check_react/{check.__name__}"):
+            asyncio.run(check())
         print(f"PASS {check.__name__}")
-    check_cli_exit_codes()
+    with check_group("check_react/check_cli_exit_codes"):
+        check_cli_exit_codes()
     print("PASS check_cli_exit_codes")
     print(f"PASS {len(checks) + 1} deterministic check groups; no real endpoint calls")
     print(f"Check logs: {CHECK_DIR}")

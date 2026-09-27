@@ -1,0 +1,80 @@
+{
+  "units": [
+    {
+      "unit_id": "react-script",
+      "script": "scripts/check_react.py",
+      "primary_suite": "control-execution",
+      "groups": [
+        {"group_id": "check_react/check_direct_answer", "description": "直接回答、工具缺省与用量统计", "source": {"path": "scripts/check_react.py", "symbol": "check_direct_answer"}, "primary_area": "execution", "tags": ["execution"]},
+        {"group_id": "check_react/check_unified_model_input", "description": "字符串与结构化输入实际 SDK 参数", "source": {"path": "scripts/check_react.py", "symbol": "check_unified_model_input"}, "primary_area": "execution", "tags": ["execution"]},
+        {"group_id": "check_react/check_tool_loop", "description": "工具调用结果关联、回传及累计用量", "source": {"path": "scripts/check_react.py", "symbol": "check_tool_loop"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_multiple_requests_and_context", "description": "同批串行执行及历史协议项完整保留", "source": {"path": "scripts/check_react.py", "symbol": "check_multiple_requests_and_context"}, "primary_area": "execution", "tags": ["execution", "context"]},
+        {"group_id": "check_react/check_limits", "description": "模型调用额度与末轮工具跳过", "source": {"path": "scripts/check_react.py", "symbol": "check_limits"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_tool_errors", "description": "工具名称、参数及执行错误正确回传", "source": {"path": "scripts/check_react.py", "symbol": "check_tool_errors"}, "primary_area": "execution", "tags": ["execution"]},
+        {"group_id": "check_react/check_model_failures", "description": "模型请求失败、不完整响应与无效协议", "source": {"path": "scripts/check_react.py", "symbol": "check_model_failures"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_usage_gaps_and_run_isolation", "description": "用量缺失、真实零值与运行统计隔离", "source": {"path": "scripts/check_react.py", "symbol": "check_usage_gaps_and_run_isolation"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_failure_history_and_final_display", "description": "失败历史后继续及 CLI 回答与工具事实显示", "source": {"path": "scripts/check_react.py", "symbol": "check_failure_history_and_final_display"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_protocol_protection", "description": "拒绝伪造结果、重复调用标识及非法历史", "source": {"path": "scripts/check_react.py", "symbol": "check_protocol_protection"}, "primary_area": "execution", "tags": ["execution", "context"]},
+        {"group_id": "check_react/check_nested_and_concurrent_isolation", "description": "嵌套输入响应副本及并发运行隔离", "source": {"path": "scripts/check_react.py", "symbol": "check_nested_and_concurrent_isolation"}, "primary_area": "execution", "tags": ["execution", "context", "recording"]},
+        {"group_id": "check_react/check_safe_summaries", "description": "大载荷的有界安全日志摘要", "source": {"path": "scripts/check_react.py", "symbol": "check_safe_summaries"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_safe_rejection_reasons", "description": "工具拒绝原因白名单与敏感信息过滤", "source": {"path": "scripts/check_react.py", "symbol": "check_safe_rejection_reasons"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_safe_execution_reasons", "description": "工具执行错误原因白名单与敏感信息过滤", "source": {"path": "scripts/check_react.py", "symbol": "check_safe_execution_reasons"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_tool_trace_hooks", "description": "工具追踪钩子及日志失败后的结果与收尾", "source": {"path": "scripts/check_react.py", "symbol": "check_tool_trace_hooks"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_recording_failures", "description": "记录创建、写入、刷新与关闭故障边界", "source": {"path": "scripts/check_react.py", "symbol": "check_recording_failures"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_mixed_batches_and_return_types", "description": "混合批次部分失败后继续及非字符串结果拒绝", "source": {"path": "scripts/check_react.py", "symbol": "check_mixed_batches_and_return_types"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_duplicate_argument_keys", "description": "嵌套与转义重复参数键拒绝及合法相似键接受", "source": {"path": "scripts/check_react.py", "symbol": "check_duplicate_argument_keys"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_react/check_failure_event_recording_failures", "description": "工具或模型失败后失败事件再次写入故障", "source": {"path": "scripts/check_react.py", "symbol": "check_failure_event_recording_failures"}, "primary_area": "recording", "tags": ["recording", "execution"]},
+        {"group_id": "check_react/check_cli_exit_codes", "description": "构造 Agent 终态与配置错误的 CLI 退出语义", "source": {"path": "scripts/check_react.py", "symbol": "check_cli_exit_codes"}, "primary_area": "execution", "tags": ["execution"]}
+      ]
+    },
+    {
+      "unit_id": "filesystem-script",
+      "script": "scripts/check_filesystem.py",
+      "primary_suite": "control-filesystem",
+      "groups": [
+        {"group_id": "check_filesystem/check_listing", "description": "真实目录列举、排序与正文读取隔离", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_listing"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_filesystem/check_limits", "description": "有界目录输出、实际枚举及资源关闭", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_limits"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_filesystem/check_arguments", "description": "目录参数拒绝与同批后续请求继续", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_arguments"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_filesystem/check_paths", "description": "目录路径访问与根边界限制", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_paths"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_filesystem/check_io_failures", "description": "真实枚举与分类故障后的结果回传", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_io_failures"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_filesystem/check_links", "description": "真实符号链接与 junction 的列举和访问拒绝", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_links"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_filesystem/check_isolation", "description": "不同目录根并发运行、上下文与用量隔离", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_isolation"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_filesystem/check_configuration_and_cli", "description": "目录配置、CLI 工具启用及非法根提前拒绝", "source": {"path": "scripts/check_filesystem.py", "symbol": "check_configuration_and_cli"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_filesystem/fixture_integrity", "description": "全部目录检查后输入资料与相邻目录保持不变", "source": {"path": "scripts/check_filesystem.py", "symbol": "main"}, "primary_area": "filesystem", "tags": ["filesystem"]}
+      ]
+    },
+    {
+      "unit_id": "text-script",
+      "script": "scripts/check_text.py",
+      "primary_suite": "control-filesystem",
+      "groups": [
+        {"group_id": "check_text/check_reading", "description": "发现后读取真实 UTF-8、BOM、换行及空文件", "source": {"path": "scripts/check_text.py", "symbol": "check_reading"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_text/check_limits", "description": "有界实际读取、短读、增长与文件描述符大小注入", "source": {"path": "scripts/check_text.py", "symbol": "check_limits"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_text/check_arguments", "description": "文本参数拒绝与后续请求继续", "source": {"path": "scripts/check_text.py", "symbol": "check_arguments"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_text/check_paths_and_formats", "description": "文本路径、文件类型、编码与控制字符限制", "source": {"path": "scripts/check_text.py", "symbol": "check_paths_and_formats"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_text/check_io_and_logging_failures", "description": "读取失败及失败事件写入再次故障的停止边界", "source": {"path": "scripts/check_text.py", "symbol": "check_io_and_logging_failures"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_text/check_links", "description": "真实文件与目录链接及 junction 的直接和祖先访问拒绝", "source": {"path": "scripts/check_text.py", "symbol": "check_links"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_text/check_untrusted_content", "description": "资料中的伪指令不能扩大目录与工具权限", "source": {"path": "scripts/check_text.py", "symbol": "check_untrusted_content"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "context"]},
+        {"group_id": "check_text/check_isolation", "description": "不同资料根并发读取、输入副本及统计隔离", "source": {"path": "scripts/check_text.py", "symbol": "check_isolation"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_text/check_configuration_and_cli", "description": "文本额度配置及 CLI 列举后读取真实内容", "source": {"path": "scripts/check_text.py", "symbol": "check_configuration_and_cli"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]}
+      ]
+    },
+    {
+      "unit_id": "review-fixes-script",
+      "script": "scripts/check_review_fixes.py",
+      "primary_suite": "control-execution",
+      "groups": [
+        {"group_id": "check_review_fixes/check_output_roles", "description": "无效输出角色与输入形状拒绝及合法扩展项保留", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_output_roles"}, "primary_area": "execution", "tags": ["execution", "context"]},
+        {"group_id": "check_review_fixes/check_refusal", "description": "纯拒绝、混合拒绝与工具调用及无效拒绝内容", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_refusal"}, "primary_area": "execution", "tags": ["execution"]},
+        {"group_id": "check_review_fixes/check_direct_config", "description": "直接与 dotenv 配置边界及安全模型错误", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_direct_config"}, "primary_area": "execution", "tags": ["execution", "filesystem", "recording"]},
+        {"group_id": "check_review_fixes/check_close_failure", "description": "客户端关闭故障保留结果、原错误与日志失败事实", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_close_failure"}, "primary_area": "execution", "tags": ["execution", "recording"]},
+        {"group_id": "check_review_fixes/check_file_scope", "description": "代码、配置与无扩展名普通文本读取和扣账", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_file_scope"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_review_fixes/check_pagination", "description": "稳定排序分页、堆空间、真实结果回传及变化语义", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_pagination"}, "primary_area": "filesystem", "tags": ["filesystem", "execution"]},
+        {"group_id": "check_review_fixes/check_read_budgets", "description": "跨轮读取累计额度、增长短读及成功后日志失败", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_read_budgets"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_review_fixes/check_budget_isolation", "description": "复用执行器顺序与并发运行的读取额度隔离", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_budget_isolation"}, "primary_area": "filesystem", "tags": ["filesystem", "execution", "recording"]},
+        {"group_id": "check_review_fixes/check_review_tracing", "description": "额度与游标追踪投影、上传失败等价及拒绝和收尾脱敏", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_review_tracing"}, "primary_area": "recording", "tags": ["recording", "filesystem", "execution"]},
+        {"group_id": "check_review_fixes/check_final_answer_allowance", "description": "末次请求回答指令、工具禁用及用户额度文字原样保留", "source": {"path": "scripts/check_review_fixes.py", "symbol": "check_final_answer_allowance"}, "primary_area": "execution", "tags": ["execution", "context", "recording"]}
+      ]
+    }
+  ]
+}

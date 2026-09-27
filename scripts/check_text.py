@@ -17,6 +17,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, coverage_gap, observe_state
+
 from check_react import (
     LocalClient, audit_recording, call, counts, message, outputs, read_events,
     recording_failure, response,
@@ -189,6 +191,7 @@ async def run_case(
     original_input, cwd = deepcopy(input), Path.cwd()
     with patch.object(runtime, "create_client", return_value=client):
         state = await runtime.run_agent(input, settings or SETTINGS, tools=tools or TOOLS, execute_tool=tracked)
+        observe_state(state)
     assert client.closed and Path.cwd() == cwd and input == original_input
     assert state["model_calls"] == len(client.requests)
     audit_recording(state, client, scenario=scenario, failed_writes=failed_writes)
@@ -466,6 +469,7 @@ async def check_links(root, sibling):
         except (OSError, NotImplementedError) as exc:
             skipped = {"scenario": name, "status": "SKIP", "reason": type(exc).__name__, "actual_link_created": False}
             SKIPPED.append(skipped)
+            coverage_gap(name, skipped["reason"])
             print(json.dumps(skipped))
         else:
             created.append((link, is_dir, kind))
@@ -483,7 +487,10 @@ async def check_links(root, sibling):
         else:
             skipped = {"scenario": "junction", "status": "SKIP", "reason": "creation failed", "actual_link_created": False}
             SKIPPED.append(skipped)
+            coverage_gap("junction", skipped["reason"])
             print(json.dumps(skipped))
+    else:
+        coverage_gap("junction", "Windows-only fixture", applicable=False)
     try:
         for index, (link, is_dir, kind) in enumerate(created):
             await rejected_then_success(f"text_{kind}_{index}_direct", root, path=link.name, reason="link_or_reparse_forbidden")
@@ -541,7 +548,9 @@ async def check_isolation(root, sibling):
             await gate.wait()
             return await executors[index](name, arguments)
 
-        return await runtime.run_agent(shared, replace(SETTINGS, model_name=str(index)), tools=TOOLS, execute_tool=execute)
+        state = await runtime.run_agent(shared, replace(SETTINGS, model_name=str(index)), tools=TOOLS, execute_tool=execute)
+        observe_state(state)
+        return state
 
     with patch.object(runtime, "create_client", side_effect=client_factory):
         states = await asyncio.gather(one(0), one(1))
@@ -592,6 +601,7 @@ async def check_configuration_and_cli(root, base):
 
         async def capture(*args, **kwargs):
             state = await runtime.run_agent(*args, **kwargs)
+            observe_state(state)
             captured.append(state)
             return state
 
@@ -621,19 +631,20 @@ async def main():
         root, sibling = fixture(base)
         original_root, original_sibling = snapshot(root), snapshot(sibling)
         checks = [
-            ("reading_content_encoding_and_empty", lambda: check_reading(root)),
-            ("bounded_actual_reads_and_growth", lambda: check_limits(root)),
-            ("text_argument_validation", lambda: check_arguments(root)),
-            ("text_paths_formats_and_controls", lambda: check_paths_and_formats(root, sibling)),
-            ("text_io_and_recording_failures", lambda: check_io_and_logging_failures(root)),
-            ("text_real_links_and_junctions", lambda: check_links(root, sibling)),
-            ("untrusted_content_cannot_expand_access", lambda: check_untrusted_content(root, sibling)),
-            ("text_concurrent_run_isolation", lambda: check_isolation(root, sibling)),
-            ("text_configuration_and_cli", lambda: check_configuration_and_cli(root, base)),
+            ("reading_content_encoding_and_empty", "check_reading", lambda: check_reading(root)),
+            ("bounded_actual_reads_and_growth", "check_limits", lambda: check_limits(root)),
+            ("text_argument_validation", "check_arguments", lambda: check_arguments(root)),
+            ("text_paths_formats_and_controls", "check_paths_and_formats", lambda: check_paths_and_formats(root, sibling)),
+            ("text_io_and_recording_failures", "check_io_and_logging_failures", lambda: check_io_and_logging_failures(root)),
+            ("text_real_links_and_junctions", "check_links", lambda: check_links(root, sibling)),
+            ("untrusted_content_cannot_expand_access", "check_untrusted_content", lambda: check_untrusted_content(root, sibling)),
+            ("text_concurrent_run_isolation", "check_isolation", lambda: check_isolation(root, sibling)),
+            ("text_configuration_and_cli", "check_configuration_and_cli", lambda: check_configuration_and_cli(root, base)),
         ]
-        for name, check in checks:
-            await check()
-            assert snapshot(root) == original_root and snapshot(sibling) == original_sibling, "tools must not modify the input fixtures"
+        for name, identifier, check in checks:
+            with check_group(f"check_text/{identifier}"):
+                await check()
+                assert snapshot(root) == original_root and snapshot(sibling) == original_sibling, "tools must not modify the input fixtures"
             print(f"PASS {name}")
     print(json.dumps({"groups_passed": len(checks), "graph_runs": len(RUNS), "skipped": SKIPPED, "logs": str(CHECK_DIR)}, ensure_ascii=False))
 

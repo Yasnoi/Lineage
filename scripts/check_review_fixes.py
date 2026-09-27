@@ -13,6 +13,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, observe_state
+
 from langgraph.errors import NodeCancelledError
 
 from check_react import (
@@ -47,6 +49,7 @@ async def run_case(scenario, replies, *, executor=None, tools=None, limit=5, cli
             prompt,
             replace(SETTINGS, max_model_calls=limit), tools=tools, execute_tool=executor,
         )
+        observe_state(state)
     assert client.closed and state["model_calls"] == len(client.requests)
     events = audit_recording(state, client, scenario=scenario, failed_writes=failed_writes)
     generated = outputs(state)
@@ -205,6 +208,7 @@ async def check_close_failure():
     client = CloseFailureClient([response(message("retained answer"))])
     with patch.object(runtime, "create_client", return_value=client):
         state = await runtime.run_agent("question", SETTINGS)
+        observe_state(state)
     assert state["stop_reason"] == "error" and state["error_code"] == "client_close_error"
     assert state["result"]["text"] == "retained answer"
     assert state["model_calls"] == 1 and state["usage_totals"]["total_tokens"] == 12
@@ -414,6 +418,8 @@ async def check_budget_isolation(root):
         concurrent = await asyncio.gather(*[
             runtime.run_agent("read", SETTINGS, tools=[TEXT_TOOL], execute_tool=executor) for _ in range(2)
         ])
+        for state in concurrent:
+            observe_state(state)
     for state, client in zip(concurrent, clients):
         events = audit_recording(state, client, scenario="reused_executor_interleaved")
         assert events[-1]["read_budget"]["used_bytes"] == 4 and client.closed
@@ -498,7 +504,8 @@ async def main():
     failures = []
     for check in (check_output_roles, check_refusal, check_direct_config, check_close_failure):
         try:
-            await check()
+            with check_group(f"check_review_fixes/{check.__name__}"):
+                await check()
         except Exception as exc:
             failures.append(check.__name__)
             print(f"FAIL {check.__name__}: {type(exc).__name__}")
@@ -511,9 +518,11 @@ async def main():
         for name in ("graph.py", "pyproject.toml", ".gitignore", "Dockerfile", "Makefile", ".env", "无扩展名"):
             (root / name).write_text("synthetic text only: " + name, encoding="utf-8")
         for check in (check_file_scope, check_pagination, check_read_budgets, check_budget_isolation, check_review_tracing):
-            await check(root)
+            with check_group(f"check_review_fixes/{check.__name__}"):
+                await check(root)
             print(f"PASS {check.__name__}")
-    await check_final_answer_allowance()
+    with check_group("check_review_fixes/check_final_answer_allowance"):
+        await check_final_answer_allowance()
     print("PASS check_final_answer_allowance")
     print(json.dumps({"groups_passed": 10, "graph_runs": len(RUNS), "logs": str(CHECK_DIR)}, ensure_ascii=False))
 

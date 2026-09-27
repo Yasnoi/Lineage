@@ -1,0 +1,813 @@
+{
+  "units": [
+    {
+      "unit_id": "sessions-script",
+      "script": "scripts/check_sessions.py",
+      "primary_suite": "control-sessions",
+      "groups": [
+        {
+          "group_id": "check_sessions/check_history_and_copy_isolation",
+          "description": "跨轮历史、返回值拷贝和检查点隔离",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_history_and_copy_isolation"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_file_history_and_budget",
+          "description": "真实文件历史继承与每轮读取额度重置",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_file_history_and_budget"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_failure_history_boundaries",
+          "description": "模型、协议、工具失败后的历史准入及次轮重置",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_failure_history_boundaries"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_partial_batch_and_usage",
+          "description": "半批工具日志失败后的历史边界及缺失用量",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_partial_batch_and_usage"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_invalid_new_input",
+          "description": "非法工具关联输入不发送且不继承",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_invalid_new_input"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_concurrency",
+          "description": "同会话重入拒绝与跨会话交错运行隔离",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_concurrency"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_checkpoint_write_failures",
+          "description": "六类真实检查点写入失败与会话阻塞",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_write_failures"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_checkpoint_and_skipped_log_failure",
+          "description": "检查点失败叠加工具跳过日志失败保留事实",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_and_skipped_log_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_checkpoint_read_failure",
+          "description": "检查点读取失败保留原存储并阻塞会话",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_read_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_creation_and_start_log_failure",
+          "description": "检查点创建失败与开始日志失败后的历史恢复",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_creation_and_start_log_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_finalization_combinations",
+          "description": "最终保存、客户端关闭和结束日志组合失败",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_finalization_combinations"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_tracing_sessions",
+          "description": "会话追踪开关、过滤、上传故障及业务等价性",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_tracing_sessions"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording",
+            "filesystem"
+          ]
+        },
+        {
+          "group_id": "check_sessions/check_cli",
+          "description": "完整同步 CLI 交互、会话切换、单次命令及保存失败恢复",
+          "source": {
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_cli"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "session-review-fixes-script",
+      "script": "scripts/check_session_review_fixes.py",
+      "primary_suite": "control-sessions",
+      "groups": [
+        {
+          "group_id": "check_session_review_fixes/check_cache_does_not_keep_frames",
+          "description": "检查点失败缓存不保留异常栈和已关闭资源",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_cache_does_not_keep_frames"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_budget_helper_boundary",
+          "description": "读取额度观察异常与取消传播边界",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_budget_helper_boundary"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_metadata_stages_and_tracing",
+          "description": "三阶段读取额度异常及日志追踪共享观察",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_stages_and_tracing"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_metadata_keeps_real_budget",
+          "description": "元数据不可用时真实文件读取额度仍然生效",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_keeps_real_budget"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_metadata_failure_combinations",
+          "description": "额度元数据与日志、检查点组合失败保留结果",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_failure_combinations"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_invalid_input_history",
+          "description": "非法新输入拒绝且不污染可继承历史",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_invalid_input_history"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_valid_protocol_and_http_history",
+          "description": "合法协议扩展历史与 HTTP 错误准入边界",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_valid_protocol_and_http_history"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_preexecution_config_retry",
+          "description": "执行前配置失败保留历史并允许重试",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_preexecution_config_retry"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_execution_started_still_blocks",
+          "description": "客户端进入失败后会话阻塞及资源关闭",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_execution_started_still_blocks"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_finally_and_primary_error",
+          "description": "收尾取消传播、资源关闭及主错误保留",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_finally_and_primary_error"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_prepare_and_final_save_secondary_errors",
+          "description": "准备和最终保存错误不被次级追踪异常覆盖",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_prepare_and_final_save_secondary_errors"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_session_review_fixes/check_cli_preconfiguration_retry",
+          "description": "同步 CLI 配置失败重试及错误退出语义",
+          "source": {
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_cli_preconfiguration_retry"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "context-budget-script",
+      "script": "scripts/check_context_budget.py",
+      "primary_suite": "control-context",
+      "groups": [
+        {
+          "group_id": "check_context_budget/check_configuration",
+          "description": "上下文预算默认值、配置校验及显式环境加载",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_configuration"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_transparent_request_and_boundary",
+          "description": "实际请求透明计量与精确预算阈值",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_transparent_request_and_boundary"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_stable_history_and_rejected_input",
+          "description": "超预算新输入拒绝后的历史稳定性",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_stable_history_and_rejected_input"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_tool_result_limit_and_real_file",
+          "description": "真实文件结果触发下一请求预算并保留事实",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_tool_result_limit_and_real_file"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_opaque_counting",
+          "description": "不透明内容风险计量、来源用量与后备值",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_opaque_counting"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_opaque_provenance_and_isolation",
+          "description": "不透明风险来源跨轮保留及会话隔离",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_opaque_provenance_and_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_file_sessions_isolation",
+          "description": "文件根、预算、历史及新轮额度共同隔离",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_file_sessions_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_every_call_and_usage",
+          "description": "每次实际请求先计量及部分用量累计",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_every_call_and_usage"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_measurement_failure",
+          "description": "不可计量输入与请求准备失败阻止发送",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_measurement_failure"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_session_invalid_storage_boundaries",
+          "description": "实际检查点序列化与请求计量失败边界",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_session_invalid_storage_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_budget_recording_failures",
+          "description": "预算日志失败及已执行工具事实保留",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_budget_recording_failures"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_budget_checkpoint_failures",
+          "description": "预算停止和工具完成后的检查点保存失败",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_budget_checkpoint_failures"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_tracing_diagnostics",
+          "description": "预算追踪诊断过滤及上传故障等价性",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_tracing_diagnostics"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_context_budget/check_cli",
+          "description": "预算停止展示与交互拒绝后继续",
+          "source": {
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_cli"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ]
+        }
+      ]
+    },
+    {
+      "unit_id": "compaction-script",
+      "script": "scripts/check_compaction.py",
+      "primary_suite": "control-context",
+      "groups": [
+        {
+          "group_id": "check_compaction/check_configuration",
+          "description": "摘要和历史保留配置边界",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_configuration"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_stable_history_and_records",
+          "description": "未压缩活动版本与运行记录拷贝隔离",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_stable_history_and_records"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_selection_read_path",
+          "description": "轻量历史选择与完整记录等价及源读取失败",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_selection_read_path"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_compaction_status_consumers",
+          "description": "压缩状态的 CLI 展示与追踪投影",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_compaction_status_consumers"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_activation_and_stable_reuse",
+          "description": "摘要保存确认、活动版本切换与后续复用",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_activation_and_stable_reuse"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_request_options_through_compaction",
+          "description": "请求选项贯穿选择、候选、真实保存和 SDK",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_request_options_through_compaction"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_refusal_boundaries",
+          "description": "无可压缩历史或当前请求过大时保持旧版本",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_refusal_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_summary_failure_cases",
+          "description": "摘要服务、协议、来源及大小失败停止业务请求",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_summary_failure_cases"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_usage_missing",
+          "description": "摘要与业务用量缺失分计及新轮重置",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_usage_missing"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_summary_and_candidate_budget_boundaries",
+          "description": "摘要请求及候选预算和准备失败边界",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_summary_and_candidate_budget_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_opaque_barriers_and_omissions",
+          "description": "受保护历史阻止压缩及加密内容省略",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_opaque_barriers_and_omissions"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_real_file_and_failure_source",
+          "description": "真实文件及工具失败事实进入摘要来源",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_real_file_and_failure_source"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_repeated_compaction",
+          "description": "同轮两次恢复的来源去重和工具结果保留",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_repeated_compaction"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_unattempted_recovery_record",
+          "description": "未尝试恢复与已调用摘要记录保持区分",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_unattempted_recovery_record"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_session_isolation",
+          "description": "并发摘要、来源、版本及记录查询会话隔离",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_session_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_runtime_tracing",
+          "description": "摘要正文过滤、追踪开关和上传失败业务等价性",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_runtime_tracing"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_history_admission_and_cli",
+          "description": "失败历史摘要准入及 CLI 压缩后连续交互",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_history_admission_and_cli"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_checkpoint_boundaries",
+          "description": "候选、激活、最终保存及工具后恢复保存失败",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_checkpoint_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution",
+            "recording"
+          ]
+        },
+        {
+          "group_id": "check_compaction/check_log_boundaries",
+          "description": "摘要和版本日志失败及模型失败的组合边界",
+          "source": {
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_log_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ]
+        }
+      ]
+    }
+  ]
+}

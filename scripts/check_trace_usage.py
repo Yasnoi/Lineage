@@ -6,6 +6,7 @@ from unittest.mock import patch
 from lineage_agent.models.responses import parse_response
 from lineage_agent.recording.trace_data import TraceSanitizer
 from verify_tracing import summarize_usage_coverage
+from check_support import check_group, observe_harness
 
 
 MISSING = object()
@@ -126,7 +127,9 @@ def main():
     with patch("verify_tracing.load_settings", side_effect=AssertionError("dotenv access forbidden")), \
             patch("requests.Session.request", side_effect=AssertionError("network access forbidden")):
         for check in checks:
-            check()
+            with check_group(f"check_trace_usage/{check.__name__}"):
+                observe_harness("trace_projection")
+                check()
             print(f"PASS {check.__name__}")
     print(f"PASS {len(checks)} offline usage coverage groups; no dotenv or endpoint access")
 

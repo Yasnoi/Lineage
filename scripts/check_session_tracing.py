@@ -15,6 +15,7 @@ from langsmith import tracing_context
 
 from check_react import LocalClient, call, message, response
 from check_tracing import capture, stable
+from check_support import check_group, observe_harness, observe_turn
 from lineage_agent.agent.checkpointing import CHECKPOINT_ERRORS, CheckpointError, SessionCheckpointer
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
@@ -64,6 +65,10 @@ async def run_case(*, enabled=True, mode="ok", checkpoint_error=None):
             await compiled.ainvoke(source_state, config, durability="sync")
             saved = await compiled.aget_state(config)
         checkpoint_id = saver.last_confirmed(session_id)
+        observe_harness(
+            "checkpoint_trace_harness", session_id=session_id, run_id=recorder.run_id,
+            checkpoint_id=checkpoint_id, log_path=str(recorder.path),
+        )
         assert saved.values == source_state and checkpoint_id
         step_id = recorder.next_step()
         token = tracer.tool_start(request, step_id=step_id, request_index=1)
@@ -120,22 +125,28 @@ async def run_case(*, enabled=True, mode="ok", checkpoint_error=None):
 
 
 async def main():
-    baseline = await run_case(enabled=False)
-    assert await run_case() == baseline
-    assert await run_case(mode="connection") == baseline
-    for code in CHECKPOINT_ERRORS:
-        assert await run_case(checkpoint_error=CheckpointError(code)) == baseline
+    with check_group("check_session_tracing/checkpoint_trace_equivalence"):
+        baseline = await run_case(enabled=False)
+        assert await run_case() == baseline
+        assert await run_case(mode="connection") == baseline
+    with check_group("check_session_tracing/checkpoint_error_metadata"):
+        for code in CHECKPOINT_ERRORS:
+            assert await run_case(checkpoint_error=CheckpointError(code)) == baseline
     with TemporaryDirectory(prefix="lineage-session-trace-") as directory:
         root = Path(directory)
         source = BODY + "\nfact=azure-coral-58"
         (root / "source.txt").write_bytes(source.encode("utf-8"))
-        baseline = await run_sessions(root, source, enabled=False)
-        assert await run_sessions(root, source) == baseline
-        assert await run_sessions(root, source, mode="connection") == baseline
-        assert await run_sessions(root, source, final_save_failure=True) == baseline
-        await check_skipped_after_save_failure(root)
-        assert (root / "source.txt").read_text(encoding="utf-8") == source
-    print(f"PASS 5 session tracing groups (15 runs); logs={CHECK_DIR}")
+        with check_group("check_session_tracing/session_history_trace_equivalence"):
+            baseline = await run_sessions(root, source, enabled=False)
+            assert await run_sessions(root, source) == baseline
+            assert await run_sessions(root, source, mode="connection") == baseline
+        with check_group("check_session_tracing/session_final_save_failure"):
+            assert await run_sessions(root, source, final_save_failure=True) == baseline
+        with check_group("check_session_tracing/check_skipped_after_save_failure"):
+            await check_skipped_after_save_failure(root)
+        with check_group("check_session_tracing/fixture_integrity"):
+            assert (root / "source.txt").read_text(encoding="utf-8") == source
+    print(f"PASS 6 session tracing groups (6 checkpoint harness runs, 9 Agent turns); logs={CHECK_DIR}")
 
 
 async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_failure=False):
@@ -169,6 +180,7 @@ async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_fail
     with capture(mode, LANGSMITH_TRACING="true" if enabled else "false") as (transport, stderr):
         with patch.object(runtime, "create_client", side_effect=clients), patch.object(manager._checkpointer, "put", side_effect=put):
             turns = [await manager.run_turn(session_id, "Find the text source and report its fact.")]
+            observe_turn(turns[0])
             with tracing_context(enabled=False, parent=False):
                 saved = await manager._checkpointer.aget_tuple({"configurable": {
                     "thread_id": session_id, "checkpoint_id": turns[0].checkpoint_id,
@@ -176,6 +188,7 @@ async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_fail
             assert PRIVATE_STATE in json.dumps(saved.checkpoint["channel_values"])
             assert BODY in json.dumps(saved.checkpoint["channel_values"])
             turns.append(await manager.run_turn(session_id, "What was that earlier fact, and its source?"))
+            observe_turn(turns[1])
         assert bool(stderr.getvalue()) == (enabled and mode != "ok"), stderr.getvalue()
     assert all(client.closed for client in clients)
     assert len(clients[0].requests) == 3 and len(clients[1].requests) == 1
@@ -261,6 +274,7 @@ async def check_skipped_after_save_failure(root):
         manager._checkpointer, "put", side_effect=put,
     ):
         turn = await manager.run_turn(session_id, "Use the source file.")
+        observe_turn(turn)
         assert not stderr.getvalue(), stderr.getvalue()
     state = turn.state
     assert client.closed and len(client.requests) == 1 and not calls

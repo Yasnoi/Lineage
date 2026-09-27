@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from benchmarks.results import exit_code
-from benchmarks.runner import SUITES, run_benchmark
+from benchmarks.runner import SUITES, UNITS, run_benchmark
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -13,8 +13,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite", action="append", choices=tuple(SUITES), help="选择评测集，可重复指定")
     args = parser.parse_args(argv)
     if args.list:
-        for name, definition in SUITES.items():
-            print(f"{name}: {definition['unit_id']} (script, deterministic_stub, v{definition['definition_version']})")
+        for name, members in SUITES.items():
+            print(f"{name}: {', '.join(members)} ({sum(len(UNITS[key]['groups']) for key in members)} groups, v2)")
         return 0
     try:
         result, saved = run_benchmark(args.suite or ["control-react"])

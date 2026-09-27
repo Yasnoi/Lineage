@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from check_react import LocalClient, call, message, response
 from check_tracing import capture
+from check_support import check_group, evidence, observe_harness
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.responses import ModelError, send_prepared_response
@@ -26,6 +27,10 @@ QUOTE = "Final answer may quote a previously read fact."
 
 async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
     run_id, session_id, summary_id, version_id, checkpoint_id = [str(uuid4()) for _ in range(5)]
+    observe_harness(
+        "summary_trace_harness", run_id=run_id, session_id=session_id,
+        summary_id=summary_id, version_id=version_id,
+    )
     source_run = str(uuid4())
     metadata = {
         "summary_id": summary_id, "candidate_version_id": version_id,
@@ -128,33 +133,42 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
         "step_ids": ["step-0002", "step-0004"], "checkpoint": "not_applicable_trace_harness",
         "sdk_request_count": len(client.requests), "uploads": transport.sent,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    evidence(
+        path, kind="trace_harness_artifact", run_id=run_id, session_id=session_id,
+        summary_id=summary_id, version_id=version_id,
+    )
     print(f"PASS {label}: session={session_id} run={run_id} summary={summary_id} "
           f"version={version_id} steps=step-0002,step-0004 checkpoint=trace-harness artifact={path}")
     return [summary_result, result], client.requests
 
 
 async def main():
-    ordinary = await exercise(label="metadata-only summary and derived input")
-    disabled = await exercise(enabled=False, label="tracing disabled")
-    upload_failed = await exercise(mode="connection", label="upload failure")
-    assert ordinary == disabled == upload_failed
-    await exercise(reply=response(call("summary-call", arguments=json.dumps({"private": BODY}))), label="unexpected summary tool request omitted")
-    await exercise(reply=response(message(DERIVED), status="incomplete"), label="incomplete summary still omits body")
+    with check_group("check_compaction_tracing/summary_trace_equivalence"):
+        ordinary = await exercise(label="metadata-only summary and derived input")
+        disabled = await exercise(enabled=False, label="tracing disabled")
+        upload_failed = await exercise(mode="connection", label="upload failure")
+        assert ordinary == disabled == upload_failed
+    with check_group("check_compaction_tracing/summary_tool_request"):
+        await exercise(reply=response(call("summary-call", arguments=json.dumps({"private": BODY}))), label="unexpected summary tool request omitted")
+    with check_group("check_compaction_tracing/summary_incomplete"):
+        await exercise(reply=response(message(DERIVED), status="incomplete"), label="incomplete summary still omits body")
 
-    sanitizer = TraceSanitizer([], None)
-    refs = [{"run_id": str(uuid4()), "checkpoint_id": str(uuid4()), "item_count": 3} for _ in range(300)]
-    metadata = {"sources": {"added_turns": refs}, "material": BODY, "message": DERIVED}
-    projected = sanitizer.compaction(metadata)
-    assert len(projected["sources"]["added_turns"]) == 32
-    assert projected["sources"]["turns_omitted"] == 268
-    assert BODY not in json.dumps(projected) and DERIVED not in json.dumps(projected)
-    payload = sanitizer.cap_payload({"inputs": {"metadata": projected}, "outputs": {"content_omitted": True}})
-    assert len(json.dumps(payload).encode()) < 65536 and len(refs) == 300
-    # A message that imitates the display marker has no application provenance.
-    plain = sanitizer.model_inputs("m", [{"role": "assistant", "content": DERIVED}], [])
-    assert DERIVED in json.dumps(plain) and "summary_content_omitted" not in plain
+    with check_group("check_compaction_tracing/bounded_lineage_provenance"):
+        observe_harness("trace_projection")
+        sanitizer = TraceSanitizer([], None)
+        refs = [{"run_id": str(uuid4()), "checkpoint_id": str(uuid4()), "item_count": 3} for _ in range(300)]
+        metadata = {"sources": {"added_turns": refs}, "material": BODY, "message": DERIVED}
+        projected = sanitizer.compaction(metadata)
+        assert len(projected["sources"]["added_turns"]) == 32
+        assert projected["sources"]["turns_omitted"] == 268
+        assert BODY not in json.dumps(projected) and DERIVED not in json.dumps(projected)
+        payload = sanitizer.cap_payload({"inputs": {"metadata": projected}, "outputs": {"content_omitted": True}})
+        assert len(json.dumps(payload).encode()) < 65536 and len(refs) == 300
+        # A message that imitates the display marker has no application provenance.
+        plain = sanitizer.model_inputs("m", [{"role": "assistant", "content": DERIVED}], [])
+        assert DERIVED in json.dumps(plain) and "summary_content_omitted" not in plain
     print("PASS bounded lineage and explicit provenance; no prefix-based suppression")
-    print(f"6 compaction tracing checks passed; artifacts={CHECK_DIR}")
+    print(f"4 compaction tracing groups passed (5 trace harness exercises); artifacts={CHECK_DIR}")
 
 
 if __name__ == "__main__":

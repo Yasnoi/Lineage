@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, coverage_gap, observe_state
+
 from check_react import LocalClient, audit_recording, call, counts, message, outputs, read_events, response
 from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
@@ -105,6 +107,7 @@ async def run_case(scenario, root, replies, *, max_entries=100, settings=None, e
             "List the requested directory metadata.", settings or SETTINGS,
             tools=[DIRECTORY_TOOL], execute_tool=tracked,
         )
+        observe_state(state)
     assert client.closed and state["log_complete"] and Path.cwd() == before_cwd
     assert state["model_calls"] == len(client.requests)
     audit_recording(state, client, scenario=scenario)
@@ -395,6 +398,7 @@ async def check_io_failures(root):
 def skip_link(kind, exc):
     value = {"scenario": kind, "status": "SKIP", "reason": type(exc).__name__, "actual_link_created": False}
     SKIPPED.append(value)
+    coverage_gap(kind, value["reason"])
     print(json.dumps(value))
 
 
@@ -425,6 +429,8 @@ async def check_links(root, sibling):
             created.append((link, "junction", True))
         else:
             skip_link("junction", OSError("junction fixture creation failed"))
+    else:
+        coverage_gap("junction", "Windows-only fixture", applicable=False)
     try:
         if created:
             state, _, _ = await run_case("link_entries_without_targets", root, [response(directory_call("fs_links")), response(message())])
@@ -506,6 +512,8 @@ async def check_isolation(root, sibling):
             runtime.run_agent(shared, settings[index], tools=[DIRECTORY_TOOL], execute_tool=executor(index))
             for index in range(2)
         ))
+        for state in states:
+            observe_state(state)
     assert shared == untouched and Path.cwd() == original_cwd
     assert states[0]["run_id"] != states[1]["run_id"]
     for index, state in enumerate(states):
@@ -562,6 +570,7 @@ async def check_configuration_and_cli(root, base):
 
         async def captured_run(*args, **kwargs):
             state = await runtime.run_agent(*args, **kwargs)
+            observe_state(state)
             captured.append(state)
             return state
 
@@ -595,19 +604,21 @@ async def main():
         root, sibling = fixture(base)
         original_root, original_sibling = snapshot(root), snapshot(sibling)
         checks = [
-            ("listing_and_content_isolation", lambda: check_listing(root)),
-            ("bounded_enumeration", lambda: check_limits(root)),
-            ("parameter_validation", lambda: check_arguments(root)),
-            ("path_access_boundaries", lambda: check_paths(root, sibling)),
-            ("io_failure_boundaries", lambda: check_io_failures(root)),
-            ("real_links_and_junctions", lambda: check_links(root, sibling)),
-            ("concurrent_run_isolation", lambda: check_isolation(root, sibling)),
-            ("configuration_and_cli", lambda: check_configuration_and_cli(root, base)),
+            ("listing_and_content_isolation", "check_listing", lambda: check_listing(root)),
+            ("bounded_enumeration", "check_limits", lambda: check_limits(root)),
+            ("parameter_validation", "check_arguments", lambda: check_arguments(root)),
+            ("path_access_boundaries", "check_paths", lambda: check_paths(root, sibling)),
+            ("io_failure_boundaries", "check_io_failures", lambda: check_io_failures(root)),
+            ("real_links_and_junctions", "check_links", lambda: check_links(root, sibling)),
+            ("concurrent_run_isolation", "check_isolation", lambda: check_isolation(root, sibling)),
+            ("configuration_and_cli", "check_configuration_and_cli", lambda: check_configuration_and_cli(root, base)),
         ]
-        for name, check in checks:
-            await check()
+        for name, identifier, check in checks:
+            with check_group(f"check_filesystem/{identifier}"):
+                await check()
             print(f"PASS {name}")
-        assert snapshot(root) == original_root and snapshot(sibling) == original_sibling
+        with check_group("check_filesystem/fixture_integrity"):
+            assert snapshot(root) == original_root and snapshot(sibling) == original_sibling
     print(json.dumps({"groups_passed": len(checks), "skipped": SKIPPED, "logs": str(CHECK_DIR)}, ensure_ascii=False))
 
 

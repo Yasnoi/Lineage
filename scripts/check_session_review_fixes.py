@@ -22,6 +22,7 @@ import httpx
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import APIStatusError
 
+from check_support import check_group, evidence, observe_state, observe_turn
 from check_react import (
     LocalClient, SETTINGS as BASE_SETTINGS, TOOL, call, fixed_tool, message,
     outputs, read_events, recording_failure, response,
@@ -65,6 +66,7 @@ def resources():
     def recorder(*args, **kwargs):
         value = recorder_factory(*args, **kwargs)
         recorders.append(value)
+        evidence(value.path, kind="run_log", run_id=value.run_id)
         return value
 
     def tracer(*args, **kwargs):
@@ -80,6 +82,8 @@ def resources():
 
 def closed_resources(manager, sid, observed):
     recorders, tracers = observed
+    for recorder in recorders:
+        evidence(recorder.path, kind="run_log", run_id=recorder.run_id, session_id=sid)
     assert sid not in manager._checkpointer._recorders
     for recorder in recorders:
         assert recorder._closed
@@ -94,6 +98,7 @@ async def run_turn(manager, sid, replies, *, scenario, prompt="question", observ
     client = client or CountingClient(replies)
     with resources() as observed, patch.object(runtime, "create_client", return_value=client) as factory:
         result = await manager.run_turn(sid, prompt)
+        observe_turn(result)
     closed_resources(manager, sid, observed)
     assert client.close_calls == (1 if factory.called else 0)
     audit_turn(result, client, scenario, observations)
@@ -409,6 +414,8 @@ def report_aborted(sid, checkpoint_id, observed, scenario):
     if not observed[0]:
         print(json.dumps({"scenario": scenario, "session_id": sid, "run_id": None, "last_confirmed_checkpoint_id": checkpoint_id, "log_path": None, "execution_started": False, "checkpoint_unchanged": True}, ensure_ascii=False))
     for recorder in observed[0]:
+        evidence(recorder.path, kind="run_log", run_id=recorder.run_id,
+                 session_id=sid, last_confirmed_checkpoint_id=checkpoint_id)
         events = [json.loads(line) for line in recorder.path.read_text(encoding="utf-8").splitlines()]
         assert all(event.get("session_id") == sid for event in events)
         assert not any(event["event"] == "model.started" for event in events)
@@ -501,6 +508,8 @@ async def check_finally_and_primary_error():
     assert manager._sessions[sid].last_checkpoint_id is None
     last_confirmed = manager._checkpointer.last_confirmed(sid)
     saved = await manager._checkpointer.aget_tuple(config(sid, last_confirmed))
+    observe_state(saved.checkpoint["channel_values"], session_id=sid,
+                  last_confirmed_checkpoint_id=last_confirmed)
     assert saved.checkpoint["channel_values"]["model_calls"] == 1
     assert saved.checkpoint["channel_values"]["result"]["text"] == "answer before interrupted finalization"
     await blocked(manager, sid)
@@ -607,6 +616,7 @@ async def check_prepare_and_final_save_secondary_errors():
     last_confirmed = manager._checkpointer.last_confirmed(sid)
     saved = await manager._checkpointer.aget_tuple(config(sid, last_confirmed))
     facts = saved.checkpoint["channel_values"]
+    observe_state(facts, session_id=sid, last_confirmed_checkpoint_id=last_confirmed)
     assert facts["model_calls"] == 1 and facts["usage_totals"]["total_tokens"] == 12
     assert facts["result"]["text"] == "answer retained before cancelled save"
     assert PRIVATE not in json.dumps(transport.sent, ensure_ascii=False) + stderr.getvalue()
@@ -639,6 +649,7 @@ def check_cli_preconfiguration_retry():
     original_display = cli.display_turn
 
     def display(result, settings):
+        observe_turn(result)
         turns.append(result)
         return original_display(result, settings)
 
@@ -676,7 +687,8 @@ async def main():
     )
     with patch.dict(os.environ, {"LANGSMITH_TRACING": "false"}):
         for check in checks:
-            await check()
+            with check_group(f"check_session_review_fixes/{check.__name__}"):
+                await check()
             print(f"PASS {check.__name__}")
     return len(checks)
 
@@ -684,6 +696,7 @@ async def main():
 if __name__ == "__main__":
     groups = asyncio.run(main())
     with patch.dict(os.environ, {"LANGSMITH_TRACING": "false"}):
-        check_cli_preconfiguration_retry()
+        with check_group("check_session_review_fixes/check_cli_preconfiguration_retry"):
+            check_cli_preconfiguration_retry()
     print("PASS check_cli_preconfiguration_retry")
     print(json.dumps({"groups": groups + 1, "session_runs": len(RUNS), "check_log_dir": str(CHECK_DIR)}, ensure_ascii=False))

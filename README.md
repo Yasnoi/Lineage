@@ -501,25 +501,45 @@ state = asyncio.run(run_agent(
 
 ## Benchmark
 
-Benchmark 是独立评测入口，由评测端选择检查并形成判定。当前只接入 `control-react` 评测集中的 `react-script` 单元，按**一个脚本级单元**执行现有 `check_react.py` 全部检查。这是确定性模型替身的控制逻辑回归，不是实际 Research 效果评测，也不代表其他检查脚本已经执行。
+Benchmark 是独立评测入口，由评测端选择检查并形成判定。当前控制回归定义覆盖 14 个原脚本入口，组织为 **5 个主评测集、12 个隔离执行单元、138 个检查组**。这些数字描述可选择的覆盖范围，实际执行、失败、未执行及环境覆盖缺口以每次报告为准；确定性控制回归不代表真实 Research 质量通过。
+
+| 主评测集 | 主要职责 | 隔离单元数 | 定义检查组数 |
+| --- | --- | ---: | ---: |
+| `control-execution` | 执行与工具调度 | 2 | 30 |
+| `control-filesystem` | 文件系统访问 | 2 | 18 |
+| `control-sessions` | 会话与保存 | 2 | 25 |
+| `control-context` | 上下文预算与摘要 | 2 | 33 |
+| `control-recording` | 记录与追踪 | 4 | 32 |
+
+原入口、稳定组 ID、行为、主要归属、跨模块标签与间接覆盖见[控制回归覆盖映射](benchmarks/COVERAGE.md)。评测集按单元主要职责选择，跨模块组合场景保留完整链路；标签用于说明覆盖，不会增加执行次数，也不能据此断言已运行其他入口内的同类场景。
 
 使用前述 uv 环境，从项目根目录执行：
 
 ```powershell
 uv run --locked python -m benchmarks --list
-uv run --locked python -m benchmarks --suite control-react
-# 省略 --suite 时，同样只执行 control-react
+
+# 默认仍只运行 control-react，即原 ReAct 脚本的 20 组检查
 uv run --locked python -m benchmarks
+uv run --locked python -m benchmarks --suite control-react
+
+# 单集、多个评测集或完整控制回归
+uv run --locked python -m benchmarks --suite control-filesystem
+uv run --locked python -m benchmarks --suite control-execution --suite control-sessions
+uv run --locked python -m benchmarks --suite control-all
 
 # 框架自身的故障注入与契约检查，不调用真实端点
 uv run --locked python -m unittest discover -s benchmarks/tests -v
 ```
 
-未知评测集在执行前拒绝，不回退运行其他检查。Benchmark 不读取 `.env`，子进程使用筛选后的运行环境，关闭外部追踪并确保 Python 断言启用；该单元超时为 120 秒。原独立命令 `uv run --locked python scripts/check_react.py` 保持可用，其环境行为未因 Benchmark 接入而改变。
+`control-react` 保留为 `react-script` 的兼容选择，`control-all` 选择全部 12 个单元。`--suite` 可重复指定；重复或重叠选择按单元 ID 去重，依固定定义顺序运行一次，并记录选择来源。未知评测集在启动前拒绝，不回退执行其他检查。未选单元单独列出，不计为通过。
 
-每次运行使用独立的 `logs/benchmarks/<UTC时间>-<UUID>/`，输出 `result.json`、`report.md` 及单元目录中的 `stdout.txt`、`stderr.txt`、`receipt.json`。原始 Agent JSONL 仍保存在本次脚本的 `logs/checks/<CHECK_ID>/`，报告保留来源引用，不复制整份日志。回执绑定运行和单元标识、适配版本及脚本内容摘要；只有原 `main()` 完整返回、回执有效且进程退出一致时才判通过，不解析成功文字推导场景数量。
+每个单元在独立子进程中执行原脚本完整的 `__main__` 入口，包括同步、异步及入口后的检查：`check_sessions.py` 和 `check_session_review_fixes.py` 的异步 `main()` 后 CLI 检查仍执行；`check_tracing.py` 验证卡住上传的 CLI 子进程仍由原检查启动。`check_trace_data.py` 的 2 组及 `check_trace_usage.py` 的 4 组已由 Tracing 主入口完整调用，全量回归不再次安排独立单元。原脚本命令继续可用，例如 `uv run --locked python scripts/check_react.py`；完整列表见下方“独立验证”。
 
-结果契约 `schema_version="1"` 中，`units` 分别保存身份与定义版本、运行条件、执行状态、评测判定、Agent 终态、分项、问题、证据及效率。`baseline` 记录 Agent 提交、工作区修改状态、Python/实际依赖版本及锁文件摘要；配置、固定材料和断言规则由对应源码摘要标识。修改中的工作区不能仅凭提交号复现，本框架不保存源码快照。缺失值使用 `availability=unknown` 与原因，不适用使用 `not_applicable`；两者的 `value` 均为 `null`。耗时实测，替身 usage 不作为真实模型消耗。
+Benchmark 不读取 `.env`，子进程只继承筛选后的运行环境，不传递模型或追踪凭据，并确保 Python 断言启用。父环境的追踪开关关闭；离线 Tracing 检查仍在受控范围内使用合成配置开启追踪，保留真实 SDK 序列化、替身 HTTP、上传失败及有限收尾断言，不访问外部模型或追踪服务。每单元默认超时为 120 秒，超时请求终止进程树。
+
+每次运行使用独立的 `logs/benchmarks/<UTC时间>-<UUID>/`。执行前保存 `plan.json`，随后输出 `result.json`、`report.md`；单元目录保存 `stdout.txt`、`stderr.txt`、`receipt.json` 和逐条落盘的 `groups.jsonl`。回执绑定运行与单元标识、源码版本、组计划及事件摘要，并与进程退出行为核对。报告只依据有效组事件和回执判断，不解析成功文字补判通过。原始 Agent JSONL 及安全检查产物仍保留原位置，按显式观测的标识或路径关联，不因导入辅助模块产生目录而认定该组已执行。
+
+新结果使用 `schema_version="2"`。`units` 保留执行状态、评测判定和 Agent 终态分离的契约，新增 `groups`，记录计划序号、开始与结束、状态、失败环节、证据、观测及覆盖缺口。结果校验和报告仍接受 v1，按其原有脚本粒度呈现，不补造组明细。`baseline` 记录 Agent 提交、工作区修改状态、Python/实际依赖版本及锁文件摘要；定义、共享检查代码、配置和固定材料以对应内容摘要标识。修改中的工作区不能仅凭提交号复现，本框架不保存源码快照。缺失值使用 `availability=unknown` 与原因，不适用使用 `not_applicable`，不补零；耗时实测，替身 usage 不作为真实模型消耗。
 
 | 情况 | 执行状态 | 评测判定 |
 | --- | --- | --- |
@@ -528,13 +548,18 @@ uv run --locked python -m unittest discover -s benchmarks/tests -v
 | 启动、执行、超时或回执错误 | `failed` | `pending_review` |
 | 检查入口等前置条件缺失 | `blocked` | `pending_review` |
 | 已选择但未执行 | `not_run` | `pending_review` |
+| 其余断言已完成，但适用环境样例无法构造 | `completed` | `pending_review`，另记覆盖缺口 |
 | 研究执行完成但尚未评分（仅契约支持） | `completed` | `pending_review` |
 
-`pending_review` 的依据区分等待评分与执行故障导致无法判定。Agent `completed` 不自动等于评测通过；当前脚本包含多个运行，单元级 `agent_outcome` 不适用，逐次真实终态见原检查输出。预期故障中的 Agent `error` 不直接使整个检查失败。汇总按类别分别保留所有状态数量，不计算能够相互抵消的总分。`issues` 定位失败环节，不自动归因根本原因。
+Benchmark 中一个组断言失败后，保留已完成组，将当前脚本剩余组标为 `not_run`，不在状态不确定的同进程中强行继续；其他隔离单元可以继续。原 Review 脚本独立运行时仍保留其收集多个失败的行为，Benchmark 观察器激活后采用组级遇错停止。组执行异常或入口提前退出不伪造剩余组完成；中断、组记录故障或进程树收尾无法确认时停止后续调度。事件损坏时只保留有效前缀，缺失结束事件的组不判通过。环境能力不足的适用样例记录原因和覆盖缺口，不计为已验证；明确不适用的样例另行标记。
 
-退出码为：`0` 全部通过且报告保存成功；`1` 存在有效的未通过判定；`2` 选择、执行、适配、框架或保存故障，以及阻塞/未执行；`3` 执行完成但待评审。混合结果优先级为 `2 > 1 > 3 > 0`。保存失败不改写已取得的单元结论，尽力保留产物、报告到 stderr 并非零退出；仅确认保存的文件才显示 `Saved`。
+汇总分别报告所选评测集、单元、检查组的状态数量，以及组的计划、开始和完成数量，不能相加为“测试总数”。实际 Agent 运行按显式观测的 `run_id` 去重，标记 `completeness=partial`：取消等没有返回 State 的运行可能仅有日志引用。直接工具、SDK、检查点或追踪 harness 的观测单列，不把构造的状态与 UUID 当作 Agent 运行；模型请求数量与断言数量也不充当组数。Agent `completed` 不自动等于评测通过，预期的 Agent `error` 也可能是检查通过的证据。
 
-实现位于 [benchmarks](benchmarks/)，未来控制逻辑单元继续通过明确映射接入，无自动发现或插件注册。契约支持 `turns` 保存多轮的会话、检查点、回答、过程与摘要版本引用，`dimensions` 保存多个质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力，不是可运行研究评测集。真实研究执行器、评分器及效果基线尚未实现；后续参考答案与评分资料须与 Agent 可访问材料隔离。JSONL、经过过滤的 Tracing 与检查点用途不同，报告不将它们当作完整请求的等价副本。
+退出码为：`0` 全部通过且报告保存成功；`1` 存在有效断言失败，其导致的同脚本后续组 `not_run` 不升级为框架故障；`2` 选择、执行、适配、记录或保存故障，单元阻塞/未执行，或存在适用环境覆盖缺口；`3` 执行完成但尚待评审。混合结果优先级为 `2 > 1 > 3 > 0`。保存失败不抹去已取得的结论，尽力保留产物并向 stderr 报错；仅确认保存的文件才显示 `Saved`。
+
+定位失败时结合组事件、适用的运行/会话/步骤/调用/检查点标识、原日志及单元完整输出；组输出区间之外的 worker 异常堆栈仍可在完整 `stderr.txt` 中查看。`issues` 与覆盖标签说明发生环节和涉及能力，不自动证明根本原因。JSONL、经过过滤的 Tracing 与检查点用途不同，都不能默认作为完整模型请求或完整资料副本。
+
+实现位于 [benchmarks](benchmarks/)，通过明确映射接入，无自动发现或任意命令执行接口。契约保留 `turns` 的多轮会话、检查点、回答、过程与摘要版本引用，以及 `dimensions` 的质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力。真实研究执行器、评分器及效果基线尚未实现；后续参考答案与评分资料须与 Agent 可访问材料隔离。
 
 ## 独立验证
 

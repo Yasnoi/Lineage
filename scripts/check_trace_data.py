@@ -5,6 +5,7 @@ import json
 
 from lineage_agent.models.responses import parse_response
 from lineage_agent.recording.trace_data import TraceSanitizer
+from check_support import check_group, observe_harness
 
 
 SECRET = "SYNTHETIC-KNOWN-MODEL-KEY-8562"
@@ -33,7 +34,9 @@ def projected(sanitizer, items, output=None):
     return sanitizer.cap_payload(payload)
 
 
+@check_group("check_trace_data/check_redaction_boundaries")
 def check_redaction_boundaries():
+    observe_harness("trace_projection")
     sanitizer = TraceSanitizer([SECRET], None)
     samples = [
         'password="SYNTHETIC_HEAD,SYNTHETIC_TAIL"',
@@ -116,7 +119,9 @@ def assert_omission(owner, field, original_count):
     assert sorted(retained + omitted) == list(range(1, original_count + 1))
 
 
+@check_group("check_trace_data/check_capacity_and_rounds")
 def check_capacity_and_rounds():
+    observe_harness("trace_projection")
     sanitizer = TraceSanitizer([], None)
     for count in (127, 128, 129, 130):
         items = [text_item(f"item-{index}", "user") for index in range(count)]

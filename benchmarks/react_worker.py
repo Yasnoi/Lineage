@@ -102,7 +102,7 @@ def execute(
         if not _save_receipt(receipt_path, receipt):
             return 2
         if fixed_script:
-            sys.path.insert(0, str(ROOT / "src"))
+            sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
             _require_local_agent()
         module = _load_script(script_path)
         if fixed_script:

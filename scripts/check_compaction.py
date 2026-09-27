@@ -17,6 +17,7 @@ from typing import get_args
 from unittest.mock import patch
 from uuid import uuid4
 
+from check_support import check_group, observe_turn as observe_actual_turn
 from check_react import (
     LocalClient, SETTINGS as BASE_SETTINGS, TOOL, call, message,
     outputs, read_events, recording_failure, response,
@@ -131,6 +132,7 @@ class Client(LocalClient):
 
 
 def audit(turn, client, scenario, observations=None):
+    observe_actual_turn(turn)
     state = turn.state
     events = read_events(state)
     business = [item for item in client.requests if not is_summary(item)]
@@ -195,6 +197,7 @@ async def run(manager, sid, prompt, replies=(), *, summary=None, scenario, obser
     client = Client(replies, summary=summary)
     with resources() as observed, captured_measurements() as measured, patch.object(runtime, "create_client", return_value=client) as factory:
         turn = await manager.run_turn(sid, prompt)
+        observe_actual_turn(turn)
     assert not factory.called or client.closed
     closed_resources(manager, sid, observed)
     if turn.checkpoint_complete:
@@ -895,6 +898,7 @@ async def check_history_admission_and_cli():
 
     async def observe_turn(session_id, prompt):
         result = await original_run(session_id, prompt)
+        observe_actual_turn(result)
         delivered.append(result)
         return result
 
@@ -926,6 +930,8 @@ async def check_session_isolation():
     clients = [Client([response(message(f"answer_{index}"))], summary=lambda req, i=index: summary_response(req, text=f"ONLY_SESSION_{i}")) for index in range(2)]
     with patch.object(runtime, "create_client", side_effect=clients):
         turns = await asyncio.gather(*(manager.run_turn(sid, TRIGGER) for sid, _ in sessions))
+        for observed_turn in turns:
+            observe_actual_turn(observed_turn)
     for index, (turn, client, (sid, old)) in enumerate(zip(turns, clients, sessions, strict=True)):
         audit(turn, client, f"session_isolation_{index}")
         assert client.closed and turn.checkpoint_complete
@@ -1061,7 +1067,8 @@ async def main():
         check_checkpoint_boundaries, check_log_boundaries,
     )
     for check in checks:
-        await check()
+        with check_group(f"check_compaction/{check.__name__}"):
+            await check()
         print(f"PASS {check.__name__}")
     print(f"PASS {len(checks)} compaction groups; {len(RUNS)} captured runs; logs: {CHECK_DIR}")
 

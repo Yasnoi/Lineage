@@ -23,7 +23,9 @@ class RunnerTests(unittest.TestCase):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.definition = deepcopy(runner.SUITES["control-react"])
+        # Retain the original v1 adapter fault regression alongside v2 tests.
+        self.definition = deepcopy(runner.UNITS["react-script"])
+        self.definition.pop("groups")
         self.script = self.root / self.definition["script"]
         self.script.parent.mkdir()
         self.script.write_text("# Test fixture; never executed.\n", encoding="utf-8")

@@ -12,6 +12,7 @@ from uuid import uuid4
 from check_react import LocalClient, audit_recording, call, message, outputs, response
 from check_trace_data import readable
 from check_tracing import capture, stable
+from check_support import check_group, observe_state
 from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.recording import tracing
@@ -65,6 +66,7 @@ async def run_case(root, replies, *, scenario, mode="ok", enabled=True, executor
                 "Use the requested local file as data.", replace(SETTINGS, project_root=root),
                 tools=tools or [TEXT_TOOL], execute_tool=observed_executor,
             )
+    observe_state(state)
     assert client.closed and state["log_complete"]
     events = audit_recording(state, client, scenario=scenario)
     generated = outputs(state)
@@ -256,18 +258,23 @@ async def main():
             (root / name).write_bytes(content)
         before = {name: (root / name).read_bytes() for name in fixture}
         cwd = Path.cwd()
-        await check_real_read_and_equivalence(root)
+        with check_group("check_text_tracing/check_real_read_and_equivalence"):
+            await check_real_read_and_equivalence(root)
         print("PASS real reads, tracing toggle and five simulated upload failures")
-        await check_listing_and_model_quotation(root)
+        with check_group("check_text_tracing/check_listing_and_model_quotation"):
+            await check_listing_and_model_quotation(root)
         print("PASS directory/read metadata and model quotation are distinct")
-        await check_failure_reasons(root)
+        with check_group("check_text_tracing/check_failure_reasons"):
+            await check_failure_reasons(root)
         print("PASS safe reasons agree across model outputs, JSONL and tracing")
-        check_projection_boundaries(root)
+        with check_group("check_text_tracing/check_projection_boundaries"):
+            check_projection_boundaries(root)
         print("PASS trace capacity, source isolation and untrusted reason rejection")
-        assert {name: (root / name).read_bytes() for name in fixture} == before
-        assert sorted(path.name for path in root.iterdir()) == sorted(fixture)
-        assert Path.cwd() == cwd
-    print("PASS 4 text tracing groups; real files and SDK serialization, no real endpoint calls")
+        with check_group("check_text_tracing/fixture_integrity"):
+            assert {name: (root / name).read_bytes() for name in fixture} == before
+            assert sorted(path.name for path in root.iterdir()) == sorted(fixture)
+            assert Path.cwd() == cwd
+    print("PASS 5 text tracing groups; real files and SDK serialization, no real endpoint calls")
     print(f"Check logs: {CHECK_DIR}")
 
 

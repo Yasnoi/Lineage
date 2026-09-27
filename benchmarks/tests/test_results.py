@@ -38,6 +38,14 @@ class ResultContractTests(unittest.TestCase):
         self.assertEqual(counts["verdict"]["pending_review"], 3)
         self.assertEqual(exit_code(result), 3)
 
+    def test_v2_research_contract_examples_do_not_require_invented_control_groups(self):
+        result = example_result()
+        result["schema_version"] = "2"
+        validate_result(result)
+        self.assertEqual(exit_code(result), 3)
+        self.assertTrue(all("groups" not in unit for unit in result["units"]))
+        self.assertIn(EXAMPLE_NOTICE, render_report(result))
+
     def test_expected_agent_error_does_not_fail_control_assertions(self):
         unit = research_examples()[0]
         unit.update(
