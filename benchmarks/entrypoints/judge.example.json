@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "model": {
+    "base_url": "https://judge.example.invalid",
+    "model_name": "choose-an-approved-judge",
+    "timeout_seconds": 60,
+    "max_output_tokens": 4096
+  },
+  "credential_env": "BENCHMARK_JUDGE_KEY",
+  "max_requests": 9,
+  "max_input_bytes": 131072,
+  "execution_seconds": 600
+}

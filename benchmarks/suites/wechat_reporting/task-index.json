@@ -1,0 +1,14 @@
+{
+  "version": "2",
+  "tasks": [
+    "requirements-coverage",
+    "module-purpose",
+    "defect-reference",
+    "defect-changed",
+    "performance-risk",
+    "improvement-plan",
+    "handoff-correction",
+    "read-limit",
+    "compaction-continuation"
+  ]
+}

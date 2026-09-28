@@ -8,11 +8,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from benchmarks.common import atomic_write_json, sha256_file, utc_now
-from benchmarks.research import batch
-from benchmarks.research.definitions import PROFILE, get_case
-from benchmarks.research.worker import pending_turn
-from benchmarks.results import known
+from benchmarks.core.files import atomic_write_json, sha256_file, utc_now
+from benchmarks.core.executors import agent as batch
+from benchmarks.tests.task_fixtures import PROFILE, get_case
+from benchmarks.core.executors.agent_worker import pending_turn
+from benchmarks.core.contracts import known
 
 
 class ResearchProcessTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class ResearchProcessTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         self.case = get_case("wechat-capacity-ocr")
-        self.unit = batch.make_unit(self.case, "pilot", 1, "sample-id", PROFILE)
+        self.unit = batch.make_unit({**self.case, "suite_id": "test-only", "repeat": 1, "sample_run_id": "sample-id", "rubric": {"version": "test"}})
         self.spec = {"run_id": "sample-id", "case_id": self.case["case_id"],
                      "definition_version": self.case["version"], "prompts": self.case["turns"],
                      "ledger_path": str(self.directory / "requests.jsonl")}
@@ -46,7 +46,7 @@ class ResearchProcessTests(unittest.TestCase):
 
     def launch(self, process, *, final=True, status="completed", changes=None, global_stop=False):
         def spawn(command, **kwargs):
-            self.assertEqual(command[1:3], ["-m", "benchmarks.research.worker"])
+            self.assertEqual(command[1:3], ["-m", "benchmarks.core.executors.agent_worker"])
             self.assertEqual(kwargs["env"]["LANGSMITH_TRACING"], "false")
             self.assertNotIn("PYTHONOPTIMIZE", kwargs["env"])
             kwargs["stdout"].write(b"synthetic success text; never an assessment\n")

@@ -1,0 +1,25 @@
+{
+  "unit_id": "improvement-plan",
+  "case_id": "improvement-plan",
+  "version": "2",
+  "title": "研究改进方案与推进顺序",
+  "capabilities": [
+    "FR-07",
+    "alternatives",
+    "planning"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n以当前本地演示模板为范围，研究如何改善本地草稿和结果数据逐渐增加时的维护与访问。先读取相关实现，提出至少两种可行方案，说明收益、代价和适用条件，不要求现在实现。",
+    "请结合当前代码选择优先方案，给出修改范围、实施依赖、兼容风险及验证办法，并说明哪些信息不足会影响这个选择。"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ]
+}

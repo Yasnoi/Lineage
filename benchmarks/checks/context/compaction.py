@@ -1,0 +1,809 @@
+"""context / compaction behavior contracts."""
+
+
+import asyncio
+import json
+from benchmarks.checks.support.compaction import (
+    CHECK_DIR,
+    Client,
+    KEYS,
+    PRIVATE,
+    RUNS,
+    SETTINGS,
+    TRIGGER,
+    audit,
+    captured_measurements,
+    check_turn_slice,
+    is_summary,
+    material_for,
+    run,
+    seed,
+    source_ids,
+    summary_document,
+    summary_response,
+)
+from benchmarks.checks.support.events import group_id, check_group, observe_turn as observe_actual_turn
+from benchmarks.checks.support.runtime import (
+    SETTINGS as BASE_SETTINGS,
+    TOOL,
+    call,
+    message,
+    outputs,
+    read_events,
+    recording_failure,
+    response,
+)
+from benchmarks.checks.support.sessions import checkpoint_fault, saved_state
+from benchmarks.checks.support.text import snapshot
+from benchmarks.checks.support.tracing import capture
+from contextlib import redirect_stderr, redirect_stdout
+from copy import deepcopy
+from dataclasses import replace
+from io import StringIO
+from lineage_agent.agent import compaction, context, graph, runtime
+from lineage_agent.agent.sessions import SessionError, SessionManager
+from lineage_agent.agent.state import CompactionStatus
+from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.entrypoints import cli
+from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.recording.trace_data import TraceSanitizer
+from lineage_agent.tools.filesystem.executor import create_filesystem_executor
+from lineage_agent.tools.filesystem.text import TEXT_TOOL
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import get_args
+from unittest.mock import patch
+
+async def check_configuration():
+    defaults = {
+        "context_keep_recent_turns": 2, "context_target_percent": 70,
+        "summary_max_output_tokens": 2048, "summary_max_bytes": 8192,
+    }
+    for field, expected in defaults.items():
+        assert getattr(BASE_SETTINGS, field) == expected
+        for value in (True, False, 0, -1, "1", 1.5):
+            try:
+                replace(BASE_SETTINGS, **{field: value})
+            except ConfigurationError:
+                pass
+            else:
+                raise AssertionError((field, value))
+    for target in (90, 100, 101):
+        try:
+            replace(BASE_SETTINGS, context_target_percent=target)
+        except ConfigurationError:
+            pass
+        else:
+            raise AssertionError("target must stay below trigger")
+    print(json.dumps({"scenario": "configuration", "defaults": defaults}))
+
+async def check_stable_history_and_records():
+    manager, sid, turns = await seed(prefix="stable")
+    version = turns[0].state["active_context"]["version_id"]
+    assert all(item.state["active_context"]["version_id"] == version for item in turns)
+    record = await manager.get_record(sid, turns[0].state["run_id"])
+    before = deepcopy(record)
+    assert record["input"] == turns[0].state["input"]
+    assert record["admitted_input"] == record["input"]
+    assert len(record["model_results"]) == 1 and not record["summary_results"]
+    record["input"][0]["content"] = "MUTATE_RETURNED_RECORD"
+    turns[0].state["input"][0]["content"] = "MUTATE_RETURNED_STATE"
+    assert await manager.get_record(sid, turns[0].state["run_id"]) == before
+
+async def check_selection_read_path():
+    manager, sid, old = await seed(prefix="selection_read_path")
+    saver = manager._checkpointer
+    select = context.ContextRecords.select
+    observations = []
+
+    async def compared_select(records, state, *args, **kwargs):
+        with patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+            selected = await select(records, state, *args, **kwargs)
+        fast_ids = [call.args[1] for call in reads.await_args_list]
+        # The former selection path used the full public record for each turn.
+        with patch.object(context, "read_turn_slice", context.read_record), \
+                patch.object(saver, "read_confirmed", wraps=saver.read_confirmed) as reads:
+            full_selected = await select(records, state, *args, **kwargs)
+        assert selected == full_selected
+        full_count = reads.await_count
+        selection, reason = selected
+        assert selection is not None and reason is None
+        refs = selection["sources"]
+        expected_ids = ([refs["previous_summary"]["checkpoint_id"]] if refs["previous_summary"] else [])
+        expected_ids += [ref["checkpoint_id"] for ref in refs["added_turns"]]
+        assert fast_ids == expected_ids and len(fast_ids) < full_count
+        observations.append(deepcopy(selection))
+        print(json.dumps({
+            "scenario": "selection_requests_unchanged", "session_id": sid,
+            "run_id": state["run_id"], "summary_id": state["compaction"]["summary_id"],
+            "budget_step_id": state["context_budget"]["step_id"], "log_path": state["log_path"],
+            "source_checkpoints": fast_ids, "full_record_reads": full_count,
+            "selection_reads": len(fast_ids),
+        }, ensure_ascii=False))
+        return selected
+
+    with patch.object(context.ContextRecords, "select", compared_select):
+        turn, actual = await run(manager, sid, TRIGGER, [response(message("selection unchanged"))],
+                                 scenario="lightweight_selection_business_result")
+    assert len(observations) == 1
+    assert material_for(actual.requests[0]) == observations[0]["material"]
+    assert actual.requests[-1]["input"] == [turn.state["compaction"]["message"]] + (
+        old[-1].state["input"][observations[0]["removed_items"]:] + [{"role": "user", "content": TRIGGER}]
+    )
+    await check_turn_slice(manager, turn)
+
+    # A source read error still stops before either summary or business calls.
+    manager, sid, old = await seed(prefix="selection_read_failure")
+    saver = manager._checkpointer
+    get_tuple = saver.get_tuple
+    failed_reads = []
+
+    def fail_source(config):
+        if config["configurable"].get("checkpoint_id") == old[0].checkpoint_id:
+            failed_reads.append({"source": "fault_injection", "operation": "read_source",
+                                 "checkpoint_id": old[0].checkpoint_id})
+            raise OSError(PRIVATE)
+        return get_tuple(config)
+
+    with patch.object(saver, "get_tuple", side_effect=fail_source):
+        failed, actual = await run(manager, sid, TRIGGER, scenario="selection_source_read_failure",
+                                   observations=failed_reads)
+    assert len(failed_reads) == 1 and not actual.requests
+    assert failed.state["summary_calls"] == failed.state["model_calls"] == 0
+    assert failed.checkpoint_error == "checkpoint_read_error" and not failed.checkpoint_complete
+    assert failed.state["active_context"] == {**old[-1].state["active_context"],
+        "turn_start": len(old[-1].state["input"]),
+        "turns": [*old[-1].state["active_context"]["turns"], {
+            "run_id": old[-1].state["run_id"], "checkpoint_id": old[-1].checkpoint_id,
+            "item_count": len(old[-1].state["input"]) - old[-1].state["active_context"]["turn_start"],
+        }]}
+    try:
+        await manager.run_turn(sid, "must remain blocked")
+    except SessionError as exc:
+        assert exc.code == "session_blocked"
+    else:
+        raise AssertionError("source read failure unblocked the session")
+
+async def check_compaction_status_consumers():
+    manager = SessionManager()
+    sid = manager.create_session(SETTINGS)
+    turn, _ = await run(manager, sid, "status rendering baseline", [response(message())],
+                        scenario="status_contract_baseline")
+    statuses = get_args(CompactionStatus)
+    for status in statuses:
+        state = deepcopy(turn.state)
+        metadata = {"request_no": 1, "status": status, "reason": None,
+                    "document": {"private": PRIVATE}, "message": {"content": PRIVATE}}
+        state["compaction"] = metadata
+        projected = TraceSanitizer.compaction(metadata)
+        assert projected == {"request_no": 1, "status": status}
+        shown = cli.format_run_summary(state)
+        assert "上下文压缩：未确认" not in shown and PRIVATE not in shown
+        assert metadata["document"]["private"] == PRIVATE
+    print(json.dumps({"scenario": "compaction_status_consumers", "statuses": statuses,
+                      "session_id": sid, "run_id": turn.state["run_id"],
+                      "checkpoint_id": turn.checkpoint_id, "log_path": turn.state["log_path"]}, ensure_ascii=False))
+
+async def check_activation_and_stable_reuse():
+    manager, sid, old = await seed(prefix="activation")
+    originals = {item.state["run_id"]: await manager.get_record(sid, item.state["run_id"]) for item in old}
+    prior_version = old[-1].state["active_context"]["version_id"]
+    turn, client = await run(manager, sid, TRIGGER, [response(message("current answer"))], scenario="activation")
+    state = turn.state
+    assert state["stop_reason"] == "completed", state.get("error")
+    assert state["summary_calls"] == state["model_calls"] == 1
+    assert state["summary_usage_totals"]["total_tokens"] == 25
+    assert state["usage_totals"]["total_tokens"] == 37
+    assert state["result"]["usage"]["total_tokens"] == 12
+    assert state["summary_result"]["usage"]["total_tokens"] == 25
+    assert state["active_context"]["version_id"] != prior_version
+    assert state["compaction"]["status"] == "used"
+    assert state["compaction"]["confirmed_checkpoint_id"]
+    summary_request, business = client.requests
+    assert is_summary(summary_request) and not is_summary(business)
+    material = material_for(summary_request)
+    assert TRIGGER not in json.dumps(material)
+    assert business["input"][-1] == {"role": "user", "content": TRIGGER}
+    recent = old[-1].state["input"][-4:]
+    assert business["input"][-5:-1] == recent
+    assert business["input"][0]["role"] == "assistant"
+    assert "derived_context_summary" in business["input"][0]["content"]
+    assert "OLD_SOURCE_0" not in json.dumps(business["input"])
+    events = read_events(state)
+    activated = next(item for item in events if item["event"] == "compaction.activated")
+    started = next(item for item in events if item["event"] == "model.started")
+    assert events.index(activated) < events.index(started)
+    checkpoint = state["compaction"]["confirmed_checkpoint_id"]
+    assert any(item["event"] == "checkpoint.saved" and item["checkpoint_id"] == checkpoint for item in events[:events.index(activated)])
+    for run_id, original in originals.items():
+        assert await manager.get_record(sid, run_id) == original
+    current_record = await manager.get_record(sid, state["run_id"])
+    assert current_record["input"][0] == {"role": "user", "content": TRIGGER}
+    assert len(current_record["summary_results"]) == len(current_record["model_results"]) == 1
+    follow, actual = await run(manager, sid, "Short follow-up", [response(message("follow-up answer"))], scenario="stable_reuse")
+    assert follow.state["summary_calls"] == 0
+    assert follow.state["active_context"]["version_id"] == state["active_context"]["version_id"]
+    assert actual.requests[0]["input"] == state["input"] + [{"role": "user", "content": "Short follow-up"}]
+
+async def check_request_options_through_compaction():
+    """Selection, candidate and SDK delivery share the same business options."""
+    for max_calls in (5, 1):
+        settings = replace(SETTINGS, max_model_calls=max_calls)
+
+        async def unused_executor(name, arguments):
+            raise AssertionError("this scenario must not execute a tool")
+
+        manager, sid, old = await seed(
+            settings=settings, tools=[TOOL], executor=unused_executor,
+            prefix=f"request_options_{max_calls}",
+        )
+        expected_options = {
+            "instructions": graph.FINAL_ANSWER_INSTRUCTIONS if max_calls == 1 else None,
+            "tool_choice": "none" if max_calls == 1 else None,
+        }
+        selected_options, sent_versions = [], []
+        original_select, original_create = context.ContextRecords.select, Client.create
+
+        async def observed_select(records, state, settings, prepare_request, **options):
+            assert options == expected_options == state["compaction"]["request_options"]
+            selected_options.append(deepcopy(options))
+            return await original_select(records, state, settings, prepare_request, **options)
+
+        async def observed_create(client, **request):
+            if not is_summary(request):
+                # Inspect the real saved graph snapshot at SDK entry, not just
+                # the later log claim that activation was confirmed.
+                saver = manager._checkpointer
+                checkpoint_id = saver.last_confirmed(sid)
+                saved = await saver.read_confirmed(sid, checkpoint_id)
+                values = saved.checkpoint["channel_values"]
+                assert values["compaction"]["status"] == "pending_save"
+                assert values["active_context"]["version_id"] == values["compaction"]["candidate_version_id"]
+                assert values["input"] == request["input"]
+                assert values["compaction"]["request_options"] == expected_options
+                sent_versions.append((checkpoint_id, values["active_context"]["version_id"]))
+            return await original_create(client, **request)
+
+        # Quota discussion supplied by the user remains ordinary task material;
+        # only application-generated per-call management prompts are removed.
+        prompt = TRIGGER + " 用户资料提到剩余读取额度 123 字节；请保留这段问题。"
+        with captured_measurements() as measured, \
+                patch.object(context.ContextRecords, "select", observed_select), \
+                patch.object(Client, "create", observed_create):
+            turn, client = await run(
+                manager, sid, prompt, [response(message("answered after confirmed activation"))],
+                scenario=f"compaction_request_options_{max_calls}",
+            )
+        assert turn.state["stop_reason"] == "completed"
+        assert selected_options == [expected_options]
+        assert turn.state["model_calls"] == turn.state["summary_calls"] == 1
+        summary_request, business = client.requests
+        assert summary_request["instructions"] == SUMMARY_INSTRUCTIONS
+        assert business["input"][-1] == {"role": "user", "content": prompt}
+        assert business["input"][-5:-1] == old[-1].state["input"][-4:]
+        assert business["tools"] == [TOOL]
+        options_sent = {key: value for key, value in expected_options.items() if value is not None}
+        assert {key: business[key] for key in expected_options if key in business} == options_sent
+        selection = [item for item in measured if item["purpose"] == "selection"]
+        candidates = [item for item in measured if item["purpose"] == "compaction" and not is_summary(item["request"])]
+        assert selection and len(candidates) == 1
+        assert candidates[0]["request"] == business
+        for observation in selection:
+            assert {key: value for key, value in observation["request"].items() if key != "input"} == {
+                key: value for key, value in business.items() if key != "input"
+            }
+        current = turn.state["compaction"]
+        assert sent_versions == [(current["confirmed_checkpoint_id"], current["candidate_version_id"])]
+        print(json.dumps({
+            "scenario": f"request_options_saved_before_sdk_{max_calls}",
+            "session_id": sid, "run_id": turn.state["run_id"],
+            "summary_id": current["summary_id"], "version_id": current["candidate_version_id"],
+            "checkpoint_id": current["confirmed_checkpoint_id"],
+            "final_answer_call": max_calls == 1, "selection_checks": len(selection),
+            "candidate_checks": len(candidates), "call_ids": [],
+            "steps": [item["step_id"] for item in read_events(turn.state) if item["event"] == "context_budget.checked"],
+            "log_path": turn.state["log_path"],
+        }, ensure_ascii=False))
+
+async def check_refusal_boundaries():
+    manager = SessionManager()
+    sid = manager.create_session(SETTINGS)
+    oversized = "NEW_UNSENT_" + "x" * 26000
+    turn, actual = await run(manager, sid, oversized, scenario="no_old_history")
+    assert turn.state["stop_reason"] == "context_budget_exceeded"
+    assert turn.state["history_end"] == 0 and not actual.requests
+    short, actual = await run(manager, sid, "short", [response(message())], scenario="short_after_refusal")
+    assert actual.requests[0]["input"] == [{"role": "user", "content": "short"}]
+    assert short.state["summary_calls"] == 0
+    manager, sid, old = await seed(prefix="protected")
+    turn, actual = await run(manager, sid, "CURRENT_TOO_BIG_" + "x" * 20000, scenario="protected_current_too_large")
+    assert turn.state["stop_reason"] == "context_budget_exceeded" and not actual.requests
+    assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+    assert turn.state["history_end"] == len(old[-1].state["input"])
+
+async def check_summary_failure_cases():
+    def document_case(transform):
+        def build(request):
+            document = summary_document(request)
+            return response(message(transform(document)))
+        return build
+
+    cases = (
+        ("service", lambda _: RuntimeError(PRIVATE), "error"),
+        ("invalid_json", lambda _: response(message("not JSON")), "error"),
+        ("duplicate_keys", lambda _: response(message('{"facts":[],"facts":[]}')), "error"),
+        ("unknown_source", document_case(lambda doc: json.dumps({**doc, "facts": [{"text": "bad", "source_ids": ["forged:0"]}]})), "error"),
+        ("empty", document_case(lambda _: json.dumps({key: [] for key in KEYS})), "error"),
+        ("tool_request", lambda _: response(call("summary_must_not_execute")), "error"),
+        ("refusal", lambda _: response({**message(), "content": [{"type": "refusal", "refusal": "no"}]}), "error"),
+        ("incomplete", lambda req: response(message(json.dumps(summary_document(req))), status="incomplete"), "error"),
+        ("oversized", lambda req: summary_response(req, text="d" * 5000), "context_budget_exceeded"),
+    )
+    for name, make_summary, stop in cases:
+        manager, sid, old = await seed(prefix=f"failure_{name}")
+        turn, actual = await run(manager, sid, TRIGGER, summary=make_summary, scenario=f"summary_{name}")
+        assert turn.state["stop_reason"] == stop, (name, turn.state["error"])
+        assert turn.state["summary_calls"] == 1 and turn.state["model_calls"] == 0
+        assert len(actual.requests) == 1 and is_summary(actual.requests[0])
+        assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+        assert turn.state["history_end"] == len(old[-1].state["input"])
+        assert turn.state["tool_calls"] == 0
+        if name == "service":
+            assert turn.state["summary_usage_totals"]["missing_usage_calls"] == 1
+            assert turn.state["usage_totals"]["missing_usage_calls"] == 1
+        else:
+            assert turn.state["summary_result"] is not None
+            assert turn.state["usage_totals"]["total_tokens"] == (25 if name == "oversized" else 12)
+
+async def check_usage_missing():
+    manager, sid, _ = await seed(prefix="usage")
+    turn, _ = await run(
+        manager, sid, TRIGGER, [response(message(), usage=(7, None, None))],
+        summary=lambda req: summary_response(req, usage=None), scenario="summary_usage_missing",
+    )
+    assert turn.state["stop_reason"] == "completed"
+    assert turn.state["summary_usage_totals"] == {
+        "input_tokens": None, "output_tokens": None, "total_tokens": None, "missing_usage_calls": 1,
+    }
+    assert turn.state["usage_totals"] == {
+        "input_tokens": 7, "output_tokens": None, "total_tokens": None, "missing_usage_calls": 2,
+    }
+    next_turn, _ = await run(manager, sid, "next", [response(message())], scenario="usage_reset")
+    assert next_turn.state["summary_calls"] == 0
+    assert next_turn.state["usage_totals"]["total_tokens"] == 12
+    assert next_turn.state["summary_usage_totals"]["missing_usage_calls"] == 0
+
+async def check_summary_and_candidate_budget_boundaries():
+    oversized_reserve = replace(SETTINGS, summary_max_output_tokens=19000)
+    manager, sid, old = await seed(settings=oversized_reserve, prefix="summary_request_budget")
+    turn, actual = await run(manager, sid, TRIGGER, scenario="summary_input_budget_exceeded")
+    assert turn.state["stop_reason"] == "context_budget_exceeded" and not actual.requests
+    assert turn.state["compaction"]["reason"] == "summary_budget_exceeded"
+    assert turn.state["compaction"]["summary_budget"]["decision"] == "exceeded"
+    assert turn.state["summary_calls"] == turn.state["model_calls"] == 0
+    assert turn.state["usage_totals"]["missing_usage_calls"] == 0
+    assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+
+    manager, sid, old = await seed(prefix="summary_measurement")
+    with patch.object(compaction, "prepare_summary_request", side_effect=ValueError(PRIVATE)):
+        turn, actual = await run(manager, sid, TRIGGER, scenario="summary_preparation_error")
+    assert turn.state["stop_reason"] == "error" and not actual.requests
+    assert turn.state["error_code"] == "context_measurement_error"
+    assert turn.state["summary_calls"] == 0 and turn.state["usage_totals"]["missing_usage_calls"] == 0
+    assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+
+    # Explicit measurement fault injection tests the final candidate guard. The
+    # correct upper-bound selection makes this rejection unreachable for static
+    # valid inputs; it must nevertheless never dispatch an unapproved candidate.
+    manager, sid, old = await seed(prefix="candidate_growth")
+    original = compaction.check_context_budget
+
+    def candidate_growth(request, risks, settings, **kwargs):
+        result = original(request, risks, settings, **kwargs)
+        if not is_summary(request):
+            result["required_tokens"] = settings.context_budget_tokens
+            result["decision"] = "exceeded"
+        return result
+
+    with patch.object(compaction, "check_context_budget", side_effect=candidate_growth):
+        turn, actual = await run(manager, sid, TRIGGER, scenario="candidate_budget_fault_injection")
+    assert turn.state["stop_reason"] == "context_budget_exceeded"
+    assert turn.state["compaction"]["reason"] == "summary_not_effective"
+    assert turn.state["summary_calls"] == 1 and turn.state["model_calls"] == 0
+    assert len(actual.requests) == 1 and is_summary(actual.requests[0])
+    assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+    assert turn.state["usage_totals"]["total_tokens"] == 25
+
+async def check_opaque_barriers_and_omissions():
+    for kind, first_input in (
+        ("unknown", [{"role": "user", "content": "a" * 2000}, {"type": "vendor_private", "payload": "OPAQUE_PRIVATE"}]),
+        ("system", [{"role": "system", "content": "Never summarize this authority."}, {"role": "user", "content": "a" * 2000}]),
+        ("nontext", [{"role": "user", "content": [{"type": "input_text", "text": "a" * 2000}, {"type": "input_image", "image_url": "https://invalid.test/image"}]}]),
+    ):
+        manager = SessionManager()
+        sid = manager.create_session(replace(SETTINGS, opaque_fallback_tokens=100))
+        first, _ = await run(manager, sid, first_input, [response(message("b" * 2500))], scenario=f"opaque_{kind}_seed")
+        manager, sid, _ = await seed(manager=manager, sid=sid, count=3, prefix=f"opaque_{kind}")
+        turn, actual = await run(manager, sid, TRIGGER, scenario=f"opaque_{kind}_barrier")
+        assert turn.state["stop_reason"] == "context_budget_exceeded" and not actual.requests
+        assert turn.state["summary_calls"] == 0
+        assert turn.state["compaction"]["reason"] == "protected_history"
+        assert first.state["input"] == turn.state["input"][:len(first.state["input"])]
+
+    manager = SessionManager()
+    sid = manager.create_session(SETTINGS)
+    encrypted = "ENCRYPTED_OPAQUE_MUST_NOT_ENTER_SUMMARY"
+    first, _ = await run(manager, sid, "a" * 2000, [response(
+        {"type": "reasoning", "id": "rs_omitted", "summary": [], "encrypted_content": encrypted},
+        message("b" * 2500), usage=(10, 17, 27),
+    )], scenario="encrypted_seed")
+    manager, sid, _ = await seed(manager=manager, sid=sid, count=3, prefix="encrypted_recent")
+    turn, actual = await run(manager, sid, TRIGGER, [response(message())], scenario="encrypted_omitted")
+    assert turn.state["stop_reason"] == "completed" and turn.state["summary_calls"] == 1
+    material = material_for(actual.requests[0])
+    assert material["opaque_omissions"]
+    assert encrypted not in json.dumps(material)
+    assert encrypted not in json.dumps(actual.requests[1])
+    record = await manager.get_record(sid, first.state["run_id"])
+    assert encrypted in json.dumps(record)
+
+async def check_real_file_and_failure_source():
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        body = "FACT_FROM_FILE_ONLY_PURPLE_17\n" + "background " * 630
+        filename = "中文 note.md"
+        (root / filename).write_bytes(body.encode("utf-8"))
+        before, cwd = snapshot(root), Path.cwd()
+        manager = SessionManager()
+        sid = manager.create_session(
+            SETTINGS, tools=[TEXT_TOOL],
+            execute_tool=create_filesystem_executor(root),
+        )
+        first, first_client = await run(manager, sid, "Read the source and attempt missing file.", [
+            response(call("real_read", name="read_text_file", arguments=json.dumps({"path": filename}, ensure_ascii=False)),
+                     call("missing_read", name="read_text_file", arguments='{"path":"missing.txt"}')),
+            response(message("Source inspected; missing file failed.")),
+        ], scenario="real_file_source")
+        assert first.state["tool_outcomes"]["succeeded"] == first.state["tool_outcomes"]["failed"] == 1
+        actual_outputs = outputs(first.state)
+        assert actual_outputs == first_client.requests[-1]["input"][-2:]
+        assert json.loads(json.loads(actual_outputs[0]["output"])["result"])["content"] == body
+        manager, sid, _ = await seed(manager=manager, sid=sid, count=2, prefix="file_recent", prompt_size=1000, answer_size=1000)
+        prompt = "CURRENT_UNCHANGED_" + "x" * 10000
+        turn, captured = await run(manager, sid, prompt, [response(message("purple fact from note"))], scenario="real_file_compacted")
+        assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
+        material = material_for(captured.requests[0])
+        text = json.dumps(material, ensure_ascii=False)
+        assert body in [json.loads(json.loads(item["payload"]["output"])["result"])["content"]
+                        for item in material["sources"] if item["payload"].get("type") == "function_call_output"
+                        and json.loads(item["payload"]["output"])["ok"]]
+        assert "execution_error" in text and '"failed": 1' in text
+        assert "missing_read" in text and "real_read" in text
+        assert turn.state["tool_calls"] == 0, "compaction must not rerun old tools"
+        assert not outputs(turn.state)
+        assert await manager.get_record(sid, first.state["run_id"])
+        assert snapshot(root) == before and Path.cwd() == cwd
+
+async def check_repeated_compaction():
+    settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=1)
+    # Use a real executor invocation producing enough new material for a second
+    # recovery in the same user request; each business request gets at most one.
+    # Leave headroom beyond the trigger without relying on quota prompt bytes.
+    async def large_result(name, arguments):
+        return "REAL_TOOL_RESULT_" + "z" * 6700
+
+    # Sessions bind the executor at creation; construct this session correctly
+    # through its public API instead of replacing a live permission binding.
+    other = SessionManager()
+    other_id = other.create_session(settings, tools=[TOOL], execute_tool=large_result)
+    manager, sid, seeds = await seed(
+        settings=settings, manager=other, sid=other_id, count=8,
+        prefix="multi_bound", prompt_size=1400, answer_size=1400,
+    )
+    previous_version = seeds[-1].state["active_context"]["version_id"]
+    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 4200, [
+        response(call("fresh_big_result")), response(message("completed after two recoveries")),
+    ], scenario="same_run_two_recoveries")
+    assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
+    assert turn.state["summary_calls"] == 2 and turn.state["model_calls"] == 2
+    assert turn.state["tool_calls"] == turn.state["tool_outcomes"]["succeeded"] == 1
+    assert [is_summary(item) for item in client.requests] == [True, False, True, False]
+    first_material, second_material = map(material_for, (client.requests[0], client.requests[2]))
+    assert second_material["previous_summary"] is not None
+    first_ids = set(source_ids({"sources": first_material["sources"]}))
+    second_ids = set(source_ids({"sources": second_material["sources"]}))
+    assert not first_ids & second_ids
+    assert turn.state["active_context"]["version_id"] != previous_version
+    generated = outputs(turn.state)
+    assert len(generated) == 1 and generated[0]["call_id"] == "fresh_big_result"
+    assert generated[0] in client.requests[-1]["input"]
+    assert turn.state["usage_totals"]["total_tokens"] == 74
+    record = await manager.get_record(sid, turn.state["run_id"])
+    assert len(record["model_results"]) == len(record["summary_results"]) == 2
+    assert record["input"][0]["content"].startswith("CURRENT_MULTI_")
+    await check_turn_slice(manager, turn)
+
+async def check_unattempted_recovery_record():
+    settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=5)
+
+    async def large_result(name, arguments):
+        return "z" * 6700
+
+    manager, sid, old = await seed(
+        settings=settings, count=8, tools=[TOOL], executor=large_result,
+        prefix="unattempted_recovery", prompt_size=1400, answer_size=1400,
+    )
+    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 4200, [response(call("preserved_big"))], scenario="second_recovery_without_attempt")
+    assert turn.state["stop_reason"] == "context_budget_exceeded"
+    assert turn.state["summary_calls"] == turn.state["model_calls"] == turn.state["tool_calls"] == 1
+    assert [is_summary(item) for item in client.requests] == [True, False]
+    assert turn.state["compaction"]["status"] == "stopped"
+    assert turn.state["compaction"]["reason"] == "no_eligible_history"
+    actual_summary_id = json.loads(client.requests[1]["input"][0]["content"])["summary_id"]
+    assert actual_summary_id != turn.state["compaction"]["summary_id"]
+    record = await manager.get_record(sid, turn.state["run_id"])
+    assert len(record["summary_results"]) == len(record["model_results"]) == 1
+    summary = record["summary_results"][0]
+    assert summary["compaction"]["summary_id"] == actual_summary_id
+    assert summary["result"] == turn.state["summary_result"]
+    assert summary["compaction"]["request_no"] == 1
+    assert turn.state["history_end"] == len(turn.state["input"])
+    output = outputs(turn.state)[0]
+    assert output["call_id"] == "preserved_big"
+    assert not any(output in item["input"] for item in client.requests), "generated result was not sent"
+    assert turn.state["usage_totals"]["total_tokens"] == 37
+
+async def check_runtime_tracing():
+    marker = "DERIVED_SUMMARY_BODY_NEVER_UPLOAD_83e0"
+    baseline = None
+    for name, enabled, transport_mode in (("disabled", False, "ok"), ("enabled", True, "ok"), ("upload_failure", True, "connection")):
+        with capture(LANGSMITH_TRACING="false"):
+            manager, sid, _ = await seed(prefix=f"trace_{name}")
+        with capture(transport_mode, LANGSMITH_TRACING="true" if enabled else "false") as (transport, stderr):
+            turn, client = await run(manager, sid, TRIGGER, [response(message("final answer"))],
+                                     summary=lambda req: summary_response(req, text=marker), scenario=f"runtime_trace_{name}")
+        assert turn.state["stop_reason"] == "completed"
+        assert marker in json.dumps(client.requests[-1])
+        assert marker in turn.state["summary_result"]["text"]
+        comparable = {key: turn.state[key] for key in ("model_calls", "summary_calls", "tool_calls", "usage_totals", "summary_usage_totals", "stop_reason")}
+        if baseline is None:
+            baseline = comparable
+        assert comparable == baseline
+        if enabled:
+            wire = json.dumps(transport.sent, ensure_ascii=False)
+            assert marker not in wire and "OLD_SOURCE_0" not in wire
+            summaries = [span for span in transport.sent if span["extra"]["metadata"].get("purpose") == "summary"]
+            assert len(summaries) == 1
+            assert summaries[0]["extra"]["metadata"]["session_id"] == sid
+            business = [span for span in transport.sent if span["run_type"] == "llm" and span not in summaries]
+            assert len(business) == 1 and business[0]["inputs"]["summary_content_omitted"] is True
+            assert "final answer" in wire
+            assert bool(stderr.getvalue()) is (transport_mode != "ok")
+        else:
+            assert not transport.sent
+    # Existing business-reply tracing still permits quoted derived content.
+    # Its presence here must not be confused with summary payload publication.
+    with capture(LANGSMITH_TRACING="false"):
+        manager, sid, _ = await seed(prefix="trace_quoted")
+    with capture() as (transport, _):
+        turn, _ = await run(manager, sid, TRIGGER, [response(message(marker))],
+                            summary=lambda req: summary_response(req, text=marker), scenario="runtime_trace_answer_quote")
+    summaries = [span for span in transport.sent if span["extra"]["metadata"].get("purpose") == "summary"]
+    assert marker not in json.dumps(summaries)
+    assert marker in json.dumps([span["outputs"] for span in transport.sent if span["run_type"] == "llm" and span not in summaries])
+
+async def check_history_admission_and_cli():
+    settings = replace(SETTINGS, max_model_calls=1)
+    manager = SessionManager()
+    sid = manager.create_session(settings)
+    rejected, _ = await run(manager, sid, [{"role": "user", "content": 123}], scenario="invalid_new_input_before_compaction")
+    assert rejected.state["history_end"] == 0
+    failed, _ = await run(manager, sid, "EARLIER_FAILED_GOAL " + "a" * 4000, [
+        response(call("unexecuted_private", arguments='{"key":"UNEXECUTED_PRIVATE_ARGUMENT"}')),
+    ], scenario="failed_old_turn")
+    assert failed.state["stop_reason"] == "max_model_calls"
+    assert failed.state["tool_outcomes"]["skipped"] == 1 and failed.state["history_end"] == 1
+    manager, sid, _ = await seed(settings=settings, manager=manager, sid=sid, count=3, prefix="failed_old_recent")
+    turn, actual = await run(manager, sid, TRIGGER, [response(message("business answer only"))], scenario="failed_old_turn_compacted")
+    assert turn.state["stop_reason"] == "completed"
+    material = material_for(actual.requests[0])
+    assert "UNEXECUTED_PRIVATE_ARGUMENT" not in json.dumps(material)
+    assert not any(item["payload"].get("content") == 123 for item in material["sources"])
+    outcome = next(item for item in material["turn_outcomes"] if item["run_id"] == failed.state["run_id"])
+    assert outcome["stop_reason"] == "max_model_calls" and outcome["tool_outcomes"]["skipped"] == 1
+    original = await manager.get_record(sid, failed.state["run_id"])
+    assert original["input"][-1]["call_id"] == "unexecuted_private"
+    assert original["admitted_input"] == original["input"][:1]
+    await check_turn_slice(manager, failed)
+    invalid = await manager.get_record(sid, rejected.state["run_id"])
+    assert invalid["input"] == [{"role": "user", "content": 123}] and invalid["admitted_input"] == []
+    await check_turn_slice(manager, rejected)
+    stdout, stderr = StringIO(), StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        assert cli.display_run(turn.state, settings) == 0
+    assert stdout.getvalue().strip() == "business answer only"
+    assert turn.state["summary_result"]["text"] not in stdout.getvalue() + stderr.getvalue()
+    assert turn.state["compaction"]["summary_id"] in stderr.getvalue()
+    assert turn.state["compaction"]["confirmed_checkpoint_id"] in stderr.getvalue()
+    assert "业务 1，摘要 1" in stderr.getvalue()
+
+    # Drive the real interactive loop through two requests on the already seeded
+    # manager; both answers remain distinct from the internal summary response.
+    manager, sid, _ = await seed(prefix="cli_interactive")
+    original_run = manager.run_turn
+    delivered = []
+
+    async def observe_turn(session_id, prompt):
+        result = await original_run(session_id, prompt)
+        observe_actual_turn(result)
+        delivered.append(result)
+        return result
+
+    clients = [Client([response(message("compressed business"))]), Client([response(message("followup business"))])]
+    stdout, stderr = StringIO(), StringIO()
+    with patch.object(cli, "SessionManager", return_value=manager), \
+            patch.object(manager, "create_session", return_value=sid), \
+            patch.object(manager, "run_turn", side_effect=observe_turn), \
+            patch.object(runtime, "create_client", side_effect=clients), \
+            patch("builtins.input", side_effect=[TRIGGER, "next", "/exit"]), \
+            redirect_stdout(stdout), redirect_stderr(stderr):
+        assert await cli.interactive(SETTINGS, {}) == 0
+    assert stdout.getvalue().splitlines() == ["compressed business", "followup business"]
+    assert len(delivered) == 2
+    for index, (result, client) in enumerate(zip(delivered, clients, strict=True)):
+        assert client.closed
+        audit(result, client, f"interactive_compaction_{index}")
+    assert delivered[0].state["summary_calls"] == 1 and delivered[1].state["summary_calls"] == 0
+    assert delivered[0].state["active_context"]["version_id"] == delivered[1].state["active_context"]["version_id"]
+
+async def check_session_isolation():
+    manager = SessionManager()
+    sessions = []
+    for index in range(2):
+        sid = manager.create_session(SETTINGS)
+        _, _, old = await seed(manager=manager, sid=sid, prefix=f"isolation_{index}")
+        sessions.append((sid, old))
+    clients = [Client([response(message(f"answer_{index}"))], summary=lambda req, i=index: summary_response(req, text=f"ONLY_SESSION_{i}")) for index in range(2)]
+    with patch.object(runtime, "create_client", side_effect=clients):
+        turns = await asyncio.gather(*(manager.run_turn(sid, TRIGGER) for sid, _ in sessions))
+        for observed_turn in turns:
+            observe_actual_turn(observed_turn)
+    for index, (turn, client, (sid, old)) in enumerate(zip(turns, clients, sessions, strict=True)):
+        audit(turn, client, f"session_isolation_{index}")
+        assert client.closed and turn.checkpoint_complete
+        assert turn.state["stop_reason"] == "completed" and turn.state["summary_calls"] == 1
+        assert f"ONLY_SESSION_{index}" in turn.state["input"][0]["content"]
+        assert f"ONLY_SESSION_{1-index}" not in json.dumps(turn.state)
+        ids = source_ids(material_for(client.requests[0]))
+        own_runs = {item.state["run_id"] for item in old}
+        assert all(identifier.split(":")[0] in own_runs for identifier in ids)
+        saved = deepcopy(turn.state)
+        turn.state["input"][0]["content"] = "MUTATED_SUMMARY"
+        turn.state["compaction"]["sources"]["added_turns"].clear()
+        assert await saved_state(manager, turn) == saved
+        other_sid = sessions[1-index][0]
+        try:
+            await manager.get_record(other_sid, turn.state["run_id"])
+        except SessionError:
+            pass
+        else:
+            raise AssertionError("cross-session record lookup succeeded")
+    assert turns[0].state["active_context"]["version_id"] != turns[1].state["active_context"]["version_id"]
+
+async def check_checkpoint_boundaries():
+    cases = (
+        ("candidate", "put", lambda cp, meta, *_: (cp["channel_values"].get("compaction") or {}).get("status") == "candidate"),
+        ("candidate_pending", "put_writes", lambda writes, *_: (dict(writes).get("compaction") or {}).get("status") == "candidate"),
+        ("activation", "put", lambda cp, meta, *_: (cp["channel_values"].get("compaction") or {}).get("status") == "pending_save"),
+        ("final", "put", lambda cp, meta, *_: meta.get("source") == "update"),
+    )
+    for name, method, predicate in cases:
+        manager, sid, _ = await seed(prefix=f"storage_{name}")
+        with checkpoint_fault(manager, method, predicate) as observations:
+            turn, actual = await run(manager, sid, TRIGGER, [response(message())], scenario=f"checkpoint_{name}", observations=observations)
+        assert observations, f"fault injection missed {name}"
+        assert not turn.checkpoint_complete and turn.checkpoint_id is None
+        assert turn.state["summary_calls"] == 1
+        expected_business = 1 if name == "final" else 0
+        assert turn.state["model_calls"] == expected_business
+        assert turn.state["summary_result"] is not None
+        assert turn.state["usage_totals"]["total_tokens"] == 25 + 12 * expected_business
+        assert len(actual.requests) == 1 + expected_business
+        try:
+            await manager.run_turn(sid, "must stay blocked")
+        except SessionError as exc:
+            assert exc.code == "session_blocked"
+        else:
+            raise AssertionError("save-fault session was not blocked")
+
+    # The model node can stop at the budget gate without a new model result.
+    # Its retained result may describe a tool batch that has already executed.
+    executed = []
+
+    async def large_result(name, arguments):
+        executed.append((name, deepcopy(arguments)))
+        return "ALREADY_EXECUTED_RESULT_" + "z" * 6500
+
+    manager, sid, _ = await seed(
+        tools=[TOOL], executor=large_result, prefix="storage_preparing_after_tools",
+    )
+    predicate = lambda cp, meta, *_: (
+        (cp["channel_values"].get("compaction") or {}).get("status") == "preparing"
+        and cp["channel_values"].get("model_calls") == 1
+    )
+    with checkpoint_fault(manager, "put", predicate) as observations:
+        turn, actual = await run(
+            manager, sid, "Inspect the current tool result.",
+            [response(call("already_executed"))],
+            scenario="checkpoint_preparing_after_executed_tools", observations=observations,
+        )
+    state = turn.state
+    assert observations, "fault injection missed the post-tool budget gate"
+    assert turn.checkpoint_error == "checkpoint_write_error"
+    assert not turn.checkpoint_complete and turn.checkpoint_id is None
+    assert state["stop_reason"] == "error" and state["compaction"]["status"] == "preparing"
+    assert state["model_calls"] == state["tool_calls"] == len(executed) == 1
+    assert state["summary_calls"] == 0 and len(actual.requests) == 1
+    assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 0, "failed": 0, "skipped": 0}
+    result = outputs(state)
+    assert len(result) == 1 and result[0]["call_id"] == "already_executed"
+    assert json.loads(result[0]["output"]) == {
+        "ok": True, "result": "ALREADY_EXECUTED_RESULT_" + "z" * 6500,
+    }
+    assert result[0] not in actual.requests[0]["input"], "result was generated but not sent"
+    assert state["history_end"] == len(state["input"])
+    assert state["usage_totals"]["total_tokens"] == 12
+    events = read_events(state)
+    assert not any(item["event"] == "tool.skipped" for item in events)
+    assert any(item["event"] == "tool.result_created" and item["call_id"] == "already_executed" for item in events)
+    try:
+        await manager.run_turn(sid, "must stay blocked")
+    except SessionError as exc:
+        assert exc.code == "session_blocked"
+    else:
+        raise AssertionError("post-tool save-fault session was not blocked")
+
+async def check_log_boundaries():
+    for event, summary_calls in (("summary.started", 0), ("summary.returned", 1), ("compaction.activated", 1)):
+        manager, sid, _ = await seed(prefix=f"log_{event}")
+        with recording_failure(event) as observations:
+            turn, client = await run(manager, sid, TRIGGER, [response(message())], scenario=f"log_failure_{event}", observations=observations)
+        assert observations
+        assert not turn.state["log_complete"] and turn.state["stop_reason"] == "error"
+        assert turn.state["summary_calls"] == summary_calls and turn.state["model_calls"] == 0
+        assert len(client.requests) == summary_calls
+        if summary_calls:
+            assert turn.state["summary_result"] is not None
+            assert turn.state["usage_totals"]["total_tokens"] == 25
+    manager, sid, _ = await seed(prefix="log_summary_failed")
+    with recording_failure("summary.failed") as observations:
+        turn, client = await run(manager, sid, TRIGGER, summary=lambda _: RuntimeError(PRIVATE),
+                                 scenario="summary_failure_logging_failure", observations=observations)
+    assert observations and turn.state["error_code"] == "logging_error"
+    assert turn.state["summary_calls"] == 1 and turn.state["model_calls"] == 0
+    assert turn.state["summary_result"] is None
+    assert turn.state["usage_totals"]["missing_usage_calls"] == 1
+    assert len(client.requests) == 1
+
+async def main():
+    checks = (
+        check_configuration, check_stable_history_and_records,
+        check_selection_read_path, check_compaction_status_consumers,
+        check_activation_and_stable_reuse, check_request_options_through_compaction,
+        check_refusal_boundaries,
+        check_summary_failure_cases, check_usage_missing,
+        check_summary_and_candidate_budget_boundaries,
+        check_opaque_barriers_and_omissions, check_real_file_and_failure_source,
+        check_repeated_compaction, check_unattempted_recovery_record,
+        check_session_isolation, check_runtime_tracing,
+        check_history_admission_and_cli,
+        check_checkpoint_boundaries, check_log_boundaries,
+    )
+    for check in checks:
+        with check_group(group_id(check)):
+            await check()
+        print(f"PASS {check.__name__}")
+    print(f"PASS {len(checks)} compaction groups; {len(RUNS)} captured runs; logs: {CHECK_DIR}")
+
+def execute():
+    asyncio.run(main())

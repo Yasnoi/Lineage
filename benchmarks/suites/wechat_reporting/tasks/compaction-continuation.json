@@ -1,0 +1,49 @@
+{
+  "unit_id": "compaction-continuation",
+  "case_id": "compaction-continuation",
+  "version": "2.1",
+  "title": "摘要后继续模块研究",
+  "capabilities": [
+    "FR-06",
+    "compaction",
+    "history"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n为后续模块分析，请读取 code/miniprogram/domain/form.ts 和 evaluation-fixtures/background.txt。后者是无项目事实的评测构造背景。保留字段修改、签名有效性和笔迹判断的源码事实及来源。长期要求：有关判断须引用材料路径及函数名，区分事实与推断。从下一轮起不再调用工具。本轮仅回复“已阅”，暂不复述事实和要求。",
+    "本轮仅确认继续保留资料，回复“收到甲”；不调用工具，不复述旧事实与要求。",
+    "本轮仅确认继续保留资料，回复“收到乙”；不调用工具，不复述旧事实与要求。",
+    "以下是无项目事实的上下文压力字符。仅回复“收到丙”，不调用工具，不复述旧事实与要求。\n",
+    "继续完成这个模块的研究：字段值变化和未变化时，签名状态分别如何？笔迹检查证明什么？请据旧资料解释这些规则与内容确认要求的关系，给出来源及仍应遵守的交付要求；不要重新读取材料。"
+  ],
+  "settings_overrides": {
+    "context_keep_recent_turns": 2,
+    "context_target_percent": 80,
+    "summary_max_output_tokens": 2048,
+    "summary_max_bytes": 4096
+  },
+  "mechanism": {
+    "kind": "compaction",
+    "source_turn": 1,
+    "pressure_turn": 4,
+    "follow_up_turn": 5,
+    "no_tools_from_turn": 2,
+    "source_path": "code/miniprogram/domain/form.ts",
+    "background_path": "evaluation-fixtures/background.txt",
+    "background_bytes": 6144
+  },
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ],
+  "fixtures": [
+    {
+      "path": "evaluation-fixtures/background.txt",
+      "bytes": 6144,
+      "version": "neutral-background-v2"
+    }
+  ]
+}

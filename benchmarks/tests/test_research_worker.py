@@ -12,9 +12,9 @@ from unittest.mock import patch
 import httpx
 from openai import APIStatusError
 
-from benchmarks.research.budget import BudgetRecordError, RequestBudget, WorkerAbort, read_ledger
-from benchmarks.research.observe import ObservedTools, Observer, digest
-from benchmarks.research import worker
+from benchmarks.core.budgets import BudgetRecordError, RequestBudget, WorkerAbort, read_ledger
+from benchmarks.core.evidence import ObservedTools, Observer, digest
+from benchmarks.core.executors import agent_worker as worker
 from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.types import ToolArgumentError
@@ -152,8 +152,8 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertEqual(result["global_stop_reason"], "request_ledger_invalid")
         self.assertFalse(captured)
 
-    def test_profile_mismatch_is_blocked_without_endpoint(self):
-        self.spec["profile"]["model_name"] = "not-approved"
+    def test_invalid_profile_is_blocked_without_endpoint(self):
+        self.spec["profile"]["model_name"] = ""
         result, code, captured = self.execute(lambda _: self.fail("must not call endpoint"))
         self.assertEqual(code, 2)
         self.assertEqual(result["execution_status"], "blocked")
@@ -161,7 +161,8 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertFalse(captured)
 
     def test_missing_credentials_preserves_plan_and_mechanism_gap(self):
-        self.spec["case_id"] = "wechat-read-limit"
+        self.spec["case_id"] = "read-limit-fixture"
+        self.spec["mechanism"] = {"kind": "read_limit", "path": "code/tests/collection-service.test.ts"}
         self.spec["prompts"] = ["first", "followup"]
         with patch.dict("os.environ", {"API_KEY": ""}):
             result, code = asyncio.run(worker.execute_sample(self.spec, "spec-hash"))
@@ -180,9 +181,9 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertFalse(captured)
 
     def test_deadline_prevents_next_reservation(self):
-        with patch("benchmarks.research.budget.time.monotonic", return_value=100):
+        with patch("benchmarks.core.budgets.time.monotonic", return_value=100):
             budget = RequestBudget(self.root / "ledger", "run", "case", remaining_seconds=2)
-        with patch("benchmarks.research.budget.time.monotonic", return_value=102):
+        with patch("benchmarks.core.budgets.time.monotonic", return_value=102):
             with self.assertRaises(WorkerAbort) as raised:
                 budget.reserve(1, "business")
         self.assertEqual(raised.exception.code, "execution_time_exhausted")
@@ -222,7 +223,7 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
 
     def test_journal_failure_before_transport_stops(self):
-        with patch("benchmarks.research.observe.append_durable", side_effect=WorkerAbort("record_write_failed")):
+        with patch("benchmarks.core.evidence.append_durable", side_effect=WorkerAbort("record_write_failed")):
             result, code, captured = self.execute(lambda _: self.fail("must not call endpoint"))
         self.assertEqual(code, 2)
         self.assertTrue(result["global_stop"])
@@ -250,7 +251,8 @@ class ResearchWorkerTests(unittest.TestCase):
         target = self.material / "code/tests/collection-service.test.ts"
         target.parent.mkdir(parents=True)
         target.write_text("x" * 10000, encoding="utf-8")
-        self.spec["case_id"] = "wechat-read-limit"
+        self.spec["case_id"] = "read-limit-fixture"
+        self.spec["mechanism"] = {"kind": "read_limit", "path": "code/tests/collection-service.test.ts"}
         self.spec["profile"]["text_max_bytes"] = 4096
         self.spec["prompts"] = ["read target", "limitations"]
         count = 0
@@ -310,7 +312,8 @@ class ResearchWorkerTests(unittest.TestCase):
         background = self.material / "evaluation-fixtures/background.txt"
         background.parent.mkdir()
         background.write_text("b" * 12288, encoding="utf-8")
-        self.spec["case_id"] = "wechat-compaction"
+        self.spec["case_id"] = "compaction-fixture"
+        self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288}
         self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
         self.spec["profile"].update(summary_max_output_tokens=8192, summary_max_bytes=4096)
         business_count = 0
@@ -338,11 +341,11 @@ class ResearchWorkerTests(unittest.TestCase):
 
     def test_compaction_missing_mechanism_and_reread_cannot_pass(self):
         observer = Observer(RequestBudget(self.root / "ledger", "run", "case"), self.output, self.material)
-        result = worker.compaction_coverage(observer, [], None, None, ["a"] * 5)
+        result = worker.compaction_coverage(observer, [], None, None, ["a"] * 5, {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
         self.assertTrue(all(check["status"] == "gap" for check in result))
         states = [{"summary_calls": 0, "tool_calls": 0} for _ in range(5)]
         states[4]["tool_calls"] = 1
-        result = worker.compaction_coverage(observer, states, None, None, ["a"] * 5)
+        result = worker.compaction_coverage(observer, states, None, None, ["a"] * 5, {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
         self.assertEqual(next(check for check in result if check["name"] == "no_recent_tool_reads")["status"], "gap")
 
 

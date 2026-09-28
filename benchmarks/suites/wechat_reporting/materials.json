@@ -1,0 +1,93 @@
+{
+  "version": "wechat-materials-v2",
+  "sources": [
+    {
+      "prefix": "code",
+      "commit": "214b38ef4d813c7ae7ab2defb5406bc4165e8b9b",
+      "paths": [
+        "README.md",
+        "docs/development/architecture.md",
+        "docs/development/verification.md",
+        "miniprogram/app.json",
+        "miniprogram/app.ts",
+        "miniprogram/app.wxss",
+        "miniprogram/components/form-field/index.json",
+        "miniprogram/components/form-field/index.ts",
+        "miniprogram/components/form-field/index.wxml",
+        "miniprogram/components/form-field/index.wxss",
+        "miniprogram/config/form.ts",
+        "miniprogram/domain/form.ts",
+        "miniprogram/domain/signature-pad.ts",
+        "miniprogram/pages/collection/index.json",
+        "miniprogram/pages/collection/index.ts",
+        "miniprogram/pages/collection/index.wxml",
+        "miniprogram/pages/collection/index.wxss",
+        "miniprogram/pages/result/index.json",
+        "miniprogram/pages/result/index.ts",
+        "miniprogram/pages/result/index.wxml",
+        "miniprogram/pages/result/index.wxss",
+        "miniprogram/pages/signature/index.json",
+        "miniprogram/pages/signature/index.ts",
+        "miniprogram/pages/signature/index.wxml",
+        "miniprogram/pages/signature/index.wxss",
+        "miniprogram/pages/subjects/index.json",
+        "miniprogram/pages/subjects/index.ts",
+        "miniprogram/pages/subjects/index.wxml",
+        "miniprogram/pages/subjects/index.wxss",
+        "miniprogram/pages/welcome/index.json",
+        "miniprogram/pages/welcome/index.ts",
+        "miniprogram/pages/welcome/index.wxml",
+        "miniprogram/pages/welcome/index.wxss",
+        "miniprogram/platform/signature-canvas.ts",
+        "miniprogram/platform/signature-files.ts",
+        "miniprogram/platform/wechat-storage.ts",
+        "miniprogram/ports/platform.ts",
+        "miniprogram/services/collection-service.ts",
+        "miniprogram/services/index.ts",
+        "miniprogram/services/mock-gateway.ts",
+        "miniprogram/sitemap.json",
+        "miniprogram/storage/repository.ts",
+        "miniprogram/types/domain.ts",
+        "miniprogram/utils/display.ts",
+        "package.json",
+        "tests/collection-service.test.ts",
+        "tests/fixtures.ts",
+        "tests/form.test.ts",
+        "tests/pages.test.ts",
+        "tests/platform.test.ts"
+      ]
+    },
+    {
+      "prefix": "requirements",
+      "commit": "917efa1c4355f741486265ecd3d33db3cb0982e3",
+      "paths": [
+        "README.md",
+        "docs/README.md",
+        "docs/reference/简览.md"
+      ]
+    }
+  ],
+  "transcripts": [
+    {
+      "source_path": "docs/reference/简览.pdf",
+      "file": "简览.md",
+      "pages": 1,
+      "sha256": "6eff2f98215be14ef8f8fc158713e00191a386e9a4e1476aa2d2e79ae1570a1b",
+      "commit": "917efa1c4355f741486265ecd3d33db3cb0982e3",
+      "text_path": "benchmarks/suites/wechat_reporting/transcripts/简览.md",
+      "target": "requirements/transcripts/简览.md",
+      "version": "wechat-pdf-text-v1"
+    },
+    {
+      "source_path": "docs/reference/信息采集小程序需求简报.pdf",
+      "file": "信息采集小程序需求简报.md",
+      "pages": 2,
+      "sha256": "67d45dbcdfae31b04e43b5310bfe2c254c6a9158647a5c969ea008b36569cb37",
+      "commit": "917efa1c4355f741486265ecd3d33db3cb0982e3",
+      "text_path": "benchmarks/suites/wechat_reporting/transcripts/信息采集小程序需求简报.md",
+      "target": "requirements/transcripts/信息采集小程序需求简报.md",
+      "version": "wechat-pdf-text-v1"
+    }
+  ],
+  "index": "# 材料来源\n\ncode/：固定版本代码模板及其开发、测试文档。\nrequirements/：需求资料与带页码的 PDF 文本转写。\n两个目录来自独立提交，文件以本次固定材料版本为准。\nPDF 转写由评测端准备，Agent 未直接解析 PDF。\n"
+}

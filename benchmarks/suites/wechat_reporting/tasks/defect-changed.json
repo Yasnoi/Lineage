@@ -1,0 +1,24 @@
+{
+  "unit_id": "defect-changed",
+  "case_id": "defect-changed",
+  "version": "2",
+  "title": "签名生命周期缺陷分析（评测构造变体）",
+  "capabilities": [
+    "FR-07",
+    "defect_analysis",
+    "positive_negative_control"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n请审查表单修改与签名有效性这一条流程，尤其是已签名后修改实际字段值的情况。依据需求、源码和现有测试分析是否有逻辑缺陷，给出触发条件、关键路径、影响及验证办法。没有足够依据确认的问题不要写成已确认 Bug。无需审查其他模块的所有问题。"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency"
+  ],
+  "variant": "signature-staleness"
+}

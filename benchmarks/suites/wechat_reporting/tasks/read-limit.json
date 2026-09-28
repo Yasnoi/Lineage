@@ -1,0 +1,29 @@
+{
+  "unit_id": "read-limit",
+  "case_id": "read-limit",
+  "version": "2",
+  "title": "读取受限后的研究判断",
+  "capabilities": [
+    "FR-05",
+    "restricted_evidence"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n请先尝试读取 code/tests/collection-service.test.ts，判断该流程有哪些验证证据，哪些实际生产能力仍缺少证据。若读取失败，利用其他可取得材料继续分析。",
+    "请给出最终的验证覆盖说明，区分直接查阅、间接资料、未取得证据，以及它们如何限制判断。"
+  ],
+  "settings_overrides": {
+    "text_max_bytes": 4096
+  },
+  "mechanism": {
+    "kind": "read_limit",
+    "path": "code/tests/collection-service.test.ts"
+  },
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ]
+}

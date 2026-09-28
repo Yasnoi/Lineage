@@ -3,15 +3,15 @@
 import json
 import unittest
 
-from benchmarks.results import (
+from benchmarks.core.contracts import (
     exit_code,
     known,
     not_applicable,
-    render_report,
     summarize,
     unknown,
     validate_result,
 )
+from benchmarks.reporting.render import render_report
 from benchmarks.tests.contract_examples import (
     EXAMPLE_NOTICE,
     example_result,

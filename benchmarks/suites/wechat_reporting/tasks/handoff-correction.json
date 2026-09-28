@@ -1,0 +1,28 @@
+{
+  "unit_id": "handoff-correction",
+  "case_id": "handoff-correction",
+  "version": "2",
+  "title": "范围纠正与交接",
+  "capabilities": [
+    "FR-05",
+    "FR-06",
+    "history",
+    "correction",
+    "instruction_echo"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n按 requirements/ 最终业务目标分析当前模板的完成情况与主要差距，给出依据。",
+    "纠正：这次只验收模板 README 与开发说明承诺的范围。按“完成情况／依据／待办”三个栏目重做结论；未承诺的生产后端不算模板缺陷。后续沿用这个范围和格式。",
+    "请整理一份可以直接交给接手同事的简短交接报告。"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ]
+}

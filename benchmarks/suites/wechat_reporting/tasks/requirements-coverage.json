@@ -1,0 +1,24 @@
+{
+  "unit_id": "requirements-coverage",
+  "case_id": "requirements-coverage",
+  "version": "2",
+  "title": "需求到成果的覆盖分析",
+  "capabilities": [
+    "FR-05",
+    "requirements",
+    "implementation",
+    "verification"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n接手这个项目后，我想知道目前模板完成了哪些承诺。请从 code/README.md 和开发说明提取主要要求，逐项关联实现和已有验证资料，区分完成、部分完成、未实现和证据不足。再说明它与 requirements/ 最终业务目标的主要差距，重点核对离线采集、签名、加密脱敏与 OCR。不要把最终目标全部当作模板承诺。"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency"
+  ]
+}

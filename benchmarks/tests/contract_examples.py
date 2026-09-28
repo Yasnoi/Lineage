@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from benchmarks.results import known, not_applicable, summarize, unknown
+from benchmarks.core.contracts import known, not_applicable, summarize, unknown
 
 
 EXAMPLE_NOTICE = "契约样例，不是实际 Research 验收；所有轮次和证据引用均为虚构。"

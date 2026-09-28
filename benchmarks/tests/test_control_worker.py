@@ -12,10 +12,11 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
-from benchmarks import control_worker
-from benchmarks.common import ROOT, atomic_write_json, sha256_file
-from benchmarks.groups import GroupJournal, plan_digest, read_group_events
-from benchmarks.runner import safe_environment
+from benchmarks.core.executors import control_worker
+from benchmarks.core import processes
+from benchmarks.core.files import ROOT, atomic_write_json, sha256_file
+from benchmarks.core.events import GroupJournal, plan_digest, read_group_events
+from benchmarks.core.processes import safe_environment
 
 
 class ControlWorkerTests(unittest.TestCase):
@@ -35,6 +36,17 @@ class ControlWorkerTests(unittest.TestCase):
         self.catalog_patch = patch.object(
             control_worker, "load_catalog", return_value=({"trusted-fixture": self.definition}, {})
         )
+        import runpy
+        def execute_fixture(definition):
+            original = sys.argv
+            try:
+                sys.argv = [str(self.script)]
+                return runpy.run_path(str(self.script), run_name="__main__")
+            finally:
+                sys.argv = original
+        self.entry_patch = patch.object(control_worker, "_execute_entry", side_effect=execute_fixture)
+        self.entry_patch.start()
+        self.addCleanup(self.entry_patch.stop)
         self.catalog_patch.start()
         self.addCleanup(self.catalog_patch.stop)
 
@@ -49,7 +61,7 @@ class ControlWorkerTests(unittest.TestCase):
         self.script.write_text(source or (
             "import asyncio\n"
             "import sys\n"
-            "from check_support import check_group\n"
+            "from benchmarks.checks.support.events import check_group\n"
             "async def main():\n"
             "    with check_group('worker-fixture/async_main'):\n"
             "        await asyncio.sleep(0)\n"
@@ -95,14 +107,14 @@ class ControlWorkerTests(unittest.TestCase):
     def test_initial_journal_failure_is_fatal_recording_failure(self):
         self.write_script()
         with patch.object(control_worker, "GroupJournal", side_effect=OSError("journal unavailable")), \
-                patch.object(control_worker, "_execute_script") as script:
+                patch.object(control_worker, "_execute_entry") as script:
             code, receipt, _, _ = self.execute()
         self.assertEqual(code, 2)
         self.assertEqual(receipt["outcome"], "recording_failed")
         script.assert_not_called()
 
     def test_worker_interrupt_is_distinct_from_an_independent_script_error(self):
-        self.write_script("from check_support import check_group\n"
+        self.write_script("from benchmarks.checks.support.events import check_group\n"
                           "with check_group('worker-fixture/async_main'):\n"
                           "    raise KeyboardInterrupt()\n")
         code, receipt, _, _ = self.execute()
@@ -137,24 +149,13 @@ class ControlWorkerTests(unittest.TestCase):
         self.write_script()
         foreign = ModuleType("lineage_agent")
         foreign.__file__ = str(self.directory / "foreign" / "__init__.py")
-        with patch.object(control_worker, "import_module", return_value=foreign), patch.object(control_worker, "_execute_script") as execute:
+        with patch.object(processes, "import_module", return_value=foreign), patch.object(control_worker, "_execute_entry") as execute:
             code, receipt, _, _ = self.execute()
         execute.assert_not_called()
         self.assertEqual(code, 2)
         self.assertEqual(receipt["error"]["stage"], "import")
         self.assertEqual(receipt["error"]["exception_type"], "ImportError")
 
-    def test_foreign_check_support_is_rejected_before_script(self):
-        self.write_script()
-        foreign = ModuleType("check_support")
-        foreign.__file__ = str(self.directory / "foreign_support.py")
-        with patch.object(control_worker, "_require_local_agent"), patch.object(
-            control_worker, "import_module", return_value=foreign
-        ), patch.object(control_worker, "_execute_script") as execute:
-            code, receipt, _, _ = self.execute()
-        execute.assert_not_called()
-        self.assertEqual(code, 2)
-        self.assertEqual(receipt["error"]["exception_type"], "ImportError")
 
     def test_module_assertion_before_first_group_is_execution_error(self):
         self.write_script("assert False, 'synthetic import failure'\n")
@@ -177,7 +178,7 @@ class ControlWorkerTests(unittest.TestCase):
 
     def test_early_return_keeps_finished_group_and_marks_remaining_not_run(self):
         self.write_script(
-            "from check_support import check_group\n"
+            "from benchmarks.checks.support.events import check_group\n"
             "with check_group('worker-fixture/async_main'):\n"
             "    print('all passed')\n"
         )
@@ -192,7 +193,7 @@ class ControlWorkerTests(unittest.TestCase):
 
     def test_wrong_group_order_is_recording_failure_before_body(self):
         self.write_script(
-            "from check_support import check_group\n"
+            "from benchmarks.checks.support.events import check_group\n"
             "with check_group('worker-fixture/after_main_cli'):\n"
             "    print('must not execute')\n"
         )
@@ -204,7 +205,7 @@ class ControlWorkerTests(unittest.TestCase):
 
     def test_assertion_stops_remaining_groups_even_with_legacy_exception_catch(self):
         self.write_script(
-            "from check_support import check_group\n"
+            "from benchmarks.checks.support.events import check_group\n"
             "try:\n"
             "    with check_group('worker-fixture/async_main'):\n"
             "        print('all passed')\n"
@@ -248,7 +249,7 @@ class ControlWorkerTests(unittest.TestCase):
     def test_initial_receipt_failure_prevents_script_and_journal_creation(self):
         self.write_script()
         with patch.object(control_worker, "atomic_write_json", side_effect=OSError("synthetic disk failure")), patch.object(
-            control_worker, "_execute_script"
+            control_worker, "_execute_entry"
         ) as execute:
             code, receipt, output, error = self.execute()
         execute.assert_not_called()
@@ -280,7 +281,7 @@ class ControlWorkerTests(unittest.TestCase):
         self.write_script()
         previous = b'{"previous":true}\n'
         self.events_path.write_bytes(previous)
-        with patch.object(control_worker, "_execute_script") as execute:
+        with patch.object(control_worker, "_execute_entry") as execute:
             code, receipt, output, _ = self.execute()
         execute.assert_not_called()
         self.assertEqual(code, 2)
@@ -290,7 +291,7 @@ class ControlWorkerTests(unittest.TestCase):
 
     def test_environment_gap_is_recorded_as_incomplete_coverage(self):
         self.write_script(
-            "from check_support import check_group, coverage_gap\n"
+            "from benchmarks.checks.support.events import check_group, coverage_gap\n"
             "with check_group('worker-fixture/async_main'):\n"
             "    coverage_gap('fixture-capability', 'synthetic unavailable capability')\n"
             "with check_group('worker-fixture/after_main_cli'):\n"
@@ -308,7 +309,7 @@ class ControlWorkerTests(unittest.TestCase):
     def test_sync_decorator_and_async_context_share_correct_group_identity(self):
         self.write_script(
             "import asyncio\n"
-            "from check_support import check_group, observe_harness\n"
+            "from benchmarks.checks.support.events import check_group, observe_harness\n"
             "@check_group('worker-fixture/async_main')\n"
             "def decorated():\n"
             "    observe_harness('projection', scenario='sync decorated call')\n"
@@ -327,8 +328,7 @@ class ControlWorkerTests(unittest.TestCase):
         self.assertEqual(groups[1]["observations"][0]["kind"], "trace")
 
     def test_child_process_does_not_inherit_parent_observer_activation(self):
-        with control_worker._script_context(ROOT / "scripts/check_tracing.py"):
-            support = control_worker.import_module("check_support")
+        from benchmarks.checks.support import events as support
 
         class RejectingObserver:
             def emit(self, *args):
@@ -337,7 +337,7 @@ class ControlWorkerTests(unittest.TestCase):
         source = (
             "import sys\n"
             "sys.path.insert(0, sys.argv[1])\n"
-            "from check_support import check_group, observe_harness\n"
+            "from benchmarks.checks.support.events import check_group, observe_harness\n"
             "with check_group('child-only-group'):\n"
             "    observe_harness('child_process', returncode=0)\n"
             "print('standalone child completed')\n"

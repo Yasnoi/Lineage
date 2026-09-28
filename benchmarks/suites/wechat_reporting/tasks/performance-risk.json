@@ -1,0 +1,25 @@
+{
+  "unit_id": "performance-risk",
+  "case_id": "performance-risk",
+  "version": "2",
+  "title": "性能风险与验证设计",
+  "capabilities": [
+    "FR-07",
+    "performance",
+    "falsifiable_validation"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n结合资料的数据量目标，分析 code/miniprogram/storage/repository.ts 的读写和查询路径有哪些规模相关风险。说明分析中的数据规模和使用场景假设，不要把客户端模板等同于生产后端。",
+    "请选取最值得优先验证的一项风险，说明为何可能成为瓶颈，设计可以证伪该判断的实验、指标和对照条件。"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ]
+}

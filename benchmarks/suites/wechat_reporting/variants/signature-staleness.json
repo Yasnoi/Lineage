@@ -1,0 +1,22 @@
+{
+  "version": "signature-staleness-v1",
+  "kind": "evaluation_constructed",
+  "purpose": "检验识别实际签名失效缺陷与原版局部对照",
+  "task": "defect-changed",
+  "edits": [
+    {
+      "path": "code/miniprogram/domain/form.ts",
+      "version": "signature-staleness-v1",
+      "replacements": [
+        {
+          "before": "revision: draft.revision + 1",
+          "after": "revision: draft.revision"
+        },
+        {
+          "before": "  delete next.signature;",
+          "after": ""
+        }
+      ]
+    }
+  ]
+}

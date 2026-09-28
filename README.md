@@ -501,181 +501,45 @@ state = asyncio.run(run_agent(
 
 ## Benchmark
 
-Benchmark 是独立评测入口，由评测端选择检查并形成判定。当前控制回归定义覆盖 14 个原脚本入口，组织为 **5 个主评测集、12 个隔离执行单元、138 个检查组**。这些数字描述可选择的覆盖范围，实际执行、失败、未执行及环境覆盖缺口以每次报告为准；确定性控制回归不代表真实 Research 质量通过。
-
-| 主评测集 | 主要职责 | 隔离单元数 | 定义检查组数 |
-| --- | --- | ---: | ---: |
-| `control-execution` | 执行与工具调度 | 2 | 30 |
-| `control-filesystem` | 文件系统访问 | 2 | 18 |
-| `control-sessions` | 会话与保存 | 2 | 25 |
-| `control-context` | 上下文预算与摘要 | 2 | 33 |
-| `control-recording` | 记录与追踪 | 4 | 32 |
-
-原入口、稳定组 ID、行为、主要归属、跨模块标签与间接覆盖见[控制回归覆盖映射](benchmarks/COVERAGE.md)。评测集按单元主要职责选择，跨模块组合场景保留完整链路；标签用于说明覆盖，不会增加执行次数，也不能据此断言已运行其他入口内的同类场景。
-
-使用前述 uv 环境，从项目根目录执行：
+Benchmark 将工程约定、项目任务和验证方式分别组织。查看可用集合并执行离线工程回归：
 
 ```powershell
-uv run --locked python -m benchmarks --list
-
-# 默认仍只运行 control-react，即原 ReAct 脚本的 20 组检查
-uv run --locked python -m benchmarks
-uv run --locked python -m benchmarks --suite control-react
-
-# 单集、多个评测集或完整控制回归
-uv run --locked python -m benchmarks --suite control-filesystem
-uv run --locked python -m benchmarks --suite control-execution --suite control-sessions
-uv run --locked python -m benchmarks --suite control-all
-
-# 框架自身的故障注入与契约检查，不调用真实端点
+uv run --locked python -m benchmarks list
+uv run --locked python -m benchmarks run agent-contracts
 uv run --locked python -m unittest discover -s benchmarks/tests -v
 ```
 
-`control-react` 保留为 `react-script` 的兼容选择，`control-all` 选择全部 12 个单元。`--suite` 可重复指定；重复或重叠选择按单元 ID 去重，依固定定义顺序运行一次，并记录选择来源。未知评测集在启动前拒绝，不回退执行其他检查。未选单元单独列出，不计为通过。
+无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、15 条隔离行为链、138 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
 
-每个单元在独立子进程中执行原脚本完整的 `__main__` 入口，包括同步、异步及入口后的检查：`check_sessions.py` 和 `check_session_review_fixes.py` 的异步 `main()` 后 CLI 检查仍执行；`check_tracing.py` 验证卡住上传的 CLI 子进程仍由原检查启动。`check_trace_data.py` 的 2 组及 `check_trace_usage.py` 的 4 组已由 Tracing 主入口完整调用，全量回归不再次安排独立单元。原脚本命令继续可用，例如 `uv run --locked python scripts/check_react.py`；完整列表见下方“独立验证”。
-
-控制 Benchmark 不读取 `.env`，子进程只继承筛选后的运行环境，不传递模型或追踪凭据，并确保 Python 断言启用。父环境的追踪开关关闭；离线 Tracing 检查仍在受控范围内使用合成配置开启追踪，保留真实 SDK 序列化、替身 HTTP、上传失败及有限收尾断言，不访问外部模型或追踪服务。每单元默认超时为 120 秒，超时请求终止进程树。
-
-每次运行使用独立的 `logs/benchmarks/<UTC时间>-<UUID>/`。执行前保存 `plan.json`，随后输出 `result.json`、`report.md`；单元目录保存 `stdout.txt`、`stderr.txt`、`receipt.json` 和逐条落盘的 `groups.jsonl`。回执绑定运行与单元标识、源码版本、组计划及事件摘要，并与进程退出行为核对。报告只依据有效组事件和回执判断，不解析成功文字补判通过。原始 Agent JSONL 及安全检查产物仍保留原位置，按显式观测的标识或路径关联，不因导入辅助模块产生目录而认定该组已执行。
-
-新结果使用 `schema_version="2"`。`units` 保留执行状态、评测判定和 Agent 终态分离的契约，新增 `groups`，记录计划序号、开始与结束、状态、失败环节、证据、观测及覆盖缺口。结果校验和报告仍接受 v1，按其原有脚本粒度呈现，不补造组明细。`baseline` 记录 Agent 提交、工作区修改状态、Python/实际依赖版本及锁文件摘要；定义、共享检查代码、配置和固定材料以对应内容摘要标识。修改中的工作区不能仅凭提交号复现，本框架不保存源码快照。缺失值使用 `availability=unknown` 与原因，不适用使用 `not_applicable`，不补零；耗时实测，替身 usage 不作为真实模型消耗。
-
-| 情况 | 执行状态 | 评测判定 |
-| --- | --- | --- |
-| 原检查完整通过 | `completed` | `passed` |
-| 原检查断言失败 | `completed` | `failed` |
-| 启动、执行、超时或回执错误 | `failed` | `pending_review` |
-| 检查入口等前置条件缺失 | `blocked` | `pending_review` |
-| 已选择但未执行 | `not_run` | `pending_review` |
-| 其余断言已完成，但适用环境样例无法构造 | `completed` | `pending_review`，另记覆盖缺口 |
-| 研究执行完成但尚未评分 | `completed` | `pending_review` |
-
-Benchmark 中一个组断言失败后，保留已完成组，将当前脚本剩余组标为 `not_run`，不在状态不确定的同进程中强行继续；其他隔离单元可以继续。原 Review 脚本独立运行时仍保留其收集多个失败的行为，Benchmark 观察器激活后采用组级遇错停止。组执行异常或入口提前退出不伪造剩余组完成；中断、组记录故障或进程树收尾无法确认时停止后续调度。事件损坏时只保留有效前缀，缺失结束事件的组不判通过。环境能力不足的适用样例记录原因和覆盖缺口，不计为已验证；明确不适用的样例另行标记。
-
-汇总分别报告所选评测集、单元、检查组的状态数量，以及组的计划、开始和完成数量，不能相加为“测试总数”。实际 Agent 运行按显式观测的 `run_id` 去重，标记 `completeness=partial`：取消等没有返回 State 的运行可能仅有日志引用。直接工具、SDK、检查点或追踪 harness 的观测单列，不把构造的状态与 UUID 当作 Agent 运行；模型请求数量与断言数量也不充当组数。Agent `completed` 不自动等于评测通过，预期的 Agent `error` 也可能是检查通过的证据。
-
-退出码为：`0` 全部通过且报告保存成功；`1` 存在有效断言失败，其导致的同脚本后续组 `not_run` 不升级为框架故障；`2` 选择、执行、适配、记录或保存故障，单元阻塞/未执行，或存在适用环境覆盖缺口；`3` 执行完成但尚待评审。混合结果优先级为 `2 > 1 > 3 > 0`。保存失败不抹去已取得的结论，尽力保留产物并向 stderr 报错；仅确认保存的文件才显示 `Saved`。
-
-定位失败时结合组事件、适用的运行/会话/步骤/调用/检查点标识、原日志及单元完整输出；组输出区间之外的 worker 异常堆栈仍可在完整 `stderr.txt` 中查看。`issues` 与覆盖标签说明发生环节和涉及能力，不自动证明根本原因。JSONL、经过过滤的 Tracing 与检查点用途不同，都不能默认作为完整模型请求或完整资料副本。
-
-实现位于 [benchmarks](benchmarks/)，通过明确映射接入，无自动发现或任意命令执行接口。契约的 `turns` 保存多轮会话、检查点、回答、过程与摘要版本引用，`dimensions` 保存质量维度；[契约样例](benchmarks/tests/contract_examples.py) 只验证表达能力。真实研究通过独立的显式入口执行，参考事实与评分资料放在 Agent 可访问材料之外。
-
-### WeChat Reporting 研究评测
+`wechat-reporting` 是固定项目任务集，包含八类任务、九个实例、19 个计划轮次，沿需求覆盖、代码与需求的反向对应、缺陷/性能分析和改进方案组织，并覆盖多轮纠正、读取受限和摘要后继续研究。真实运行需另行核定模型与预算，使用通用配置：
 
 ```powershell
-# 会调用批准的真实模型：6 个试运行 + 每题 3 次正式重复，共 24 个样本
-uv run --locked python -m benchmarks --suite research-wechat --research-profile wechat-v1
-
-# 用户填写评审包后导入；本命令不调用模型、不覆盖原执行结果
-uv run --locked python -m benchmarks --review-result 'logs/benchmarks/<批次ID>/result.json' --review-file '<已填写评审JSON路径>'
+uv run --locked python -m benchmarks run wechat-reporting --config logs/run-config.json
+uv run --locked python -m benchmarks review logs/benchmarks/<运行ID> --file logs/review-filled.json
 ```
 
-该研究集使用固定 Git 提交的 WeChat Reporting 材料，默认来源为与本项目同级的 `WeChat Reporting` 仓库。仅读取必要的 `BASE_URL`、`MODEL_NAME`、`API_KEY`，要求与 `wechat-v1` 的 `deepseek-flash` / `https://api.deepseek.com` 一致；缺少配置或固定提交时阻塞，不替换模型。默认入口、`control-react`、`control-all` 仍完全离线，研究与控制不能在同次命令混选。
+配置样例默认禁用。仅运行工程集不会加载 `.env`、传递真实凭据、调用模型或外部追踪。研究材料取自固定 Git 对象，每个实例独立复制；评分资料不进入 Agent 可访问目录。共享入口与执行器不包含项目用例分支，新增项目只需定义材料、任务和 Rubric 并登记到固定目录表。
 
-每个样本独立材料副本与进程，多轮在同一样本内继承会话。整批最多 400 次请求开始记账、120 分钟累计执行时间；每个样本最多 300 秒，不自动重试。发送前持久化记账，无法确认是否发出的请求也占用预算，不回收为可再用额度。业务与摘要 usage 分字段报告缺失，费用无账单时为未知。
+结果使用 v3，继续只读校验、渲染 v1/v2；执行状态、评测判定和 Agent 终态分别记录。JSON、Markdown、逐组事件、输出和回执存入独占的 `logs/benchmarks/<运行ID>/`；组、任务、Agent 运行和模型消耗分别统计，未知不补零，不合成总分。机械规则、检查项清单、人工 Rubric 与 LLM 建议适配分别组织；未经人工核对的模型建议保持待评审。
 
-原始执行结果保持待人工评审，不能据 Agent 正常回答或关键词命中宣布质量通过。批次目录提供 `review.md`、`review-template.json`，用户逐条件填写依据并声明评审者；导入生成独立评分修订与报告。机制覆盖缺口另行报告，不与质量或成本合成总分。固定材料、六题内容、评分及复跑说明见 [研究评测说明](benchmarks/research/README.md)。
+退出优先级为 `2 > 1 > 3 > 0`：2 表示执行/证据/保存故障、阻塞或适用覆盖缺口，1 表示有效未通过，3 表示仍待评审，0 表示选定范围完整通过且成功保存。断言失败后保留组事实和依赖未执行项，其他独立行为链可继续；记录或收尾不确定时停止。标签与失败环节不自动证明根因。
 
-## 独立验证
+运行、配置、结构、扩展和评审方法见 [Benchmark 使用说明](benchmarks/README.md)，原检查去向见 [覆盖映射](benchmarks/COVERAGE.md)，项目事实与评分边界见 [WeChat Reporting 任务说明](benchmarks/suites/wechat_reporting/README.md)。本轮重构只验收离线实现，不宣称新任务的真实 Research 效果基线或 LLM 评分已完成。
 
-从项目根目录执行：
+## 独立端点诊断
+
+`scripts/verify_*.py` 保留为按需调用的真实端点诊断，使用当前本机配置；不会由 Benchmark 的列举或工程回归自动运行：
 
 ```powershell
-# 确定性响应替身：协议、控制流、异常、计数、usage 与运行记录
-uv run --locked python scripts/check_react.py
-
-# 当前 .env 端点：无工具回归及固定结果工具的完整循环
 uv run --locked python scripts/verify_function_calling.py
-
-# 真实临时目录与确定性模型：目录边界、截断、失败和实际回传
-uv run --locked python scripts/check_filesystem.py
-
-# 真实临时文件与确定性模型：限额读取、编码、失败、隔离和实际回传
-uv run --locked python scripts/check_text.py
-
-# 确定性追踪检查：真实 SDK 序列化、替身 HTTP、清洗和 CLI 有限退出
-uv run --locked python scripts/check_tracing.py
-
-# 读取工具追踪：正文省略、模型引用、元数据和上传故障
-uv run --locked python scripts/check_text_tracing.py
-
-# Review 回归：协议、收尾、配置、分页、读取预算和最后回答轮
-uv run --locked python scripts/check_review_fixes.py
-
-# 会话检查：连续追问、状态隔离、历史边界、预算重置及检查点故障
-uv run --locked python scripts/check_sessions.py
-
-# 会话 Tracing：实际会话集成、过滤范围、上传和保存故障
-uv run --locked python scripts/check_session_tracing.py
-
-# 会话 Review 回归：异常缓存、额度元数据、输入准入和配置拒绝
-uv run --locked python scripts/check_session_review_fixes.py
-
-# 上下文预算：边界、opaque 来源、超限历史、计量与保存故障
-uv run --locked python scripts/check_context_budget.py
-
-# 会话摘要：范围引用、候选校验、版本保存、实际请求和故障边界
-uv run --locked python scripts/check_compaction.py
-
-# 摘要压缩：真实 SDK 序列化下来源/正文省略和上传故障
-uv run --locked python scripts/check_compaction_tracing.py
-
-# 当前 .env 端点：压缩较早的非敏感资料，再从摘要追问事实与来源
-uv run --locked python scripts/verify_compaction.py
-
-# 当前 .env 端点：读取非敏感临时资料，再在同一会话中追问事实和来源
-uv run --locked python scripts/verify_sessions.py
-
-# 当前 .env 端点：分页发现、源码/配置读取及最后回答轮兼容性
-uv run --locked python scripts/verify_review_fixes.py
-
-# 当前 .env 端点：在非敏感临时目录中列举根目录、子目录并回答
 uv run --locked python scripts/verify_directory.py
-
-# 当前 .env 端点：发现随机文件、读取正文并引用事实和来源
 uv run --locked python scripts/verify_text.py
-
-# 已配置 LangSmith 后：非敏感临时目录、真实模型、远端 Trace 查询
+uv run --locked python scripts/verify_review_fixes.py
+uv run --locked python scripts/verify_sessions.py
+uv run --locked python scripts/verify_compaction.py
 uv run --locked python scripts/verify_tracing.py
 ```
 
-验证代码保留在独立脚本中，生产模块不导入脚本，CLI 不增加验证参数。`check_react.py` 和 `verify_function_calling.py` 自带临时固定结果工具；目录检查使用生产目录工具和真实临时目录。确定性检查使用标准库断言和模型替身，不需要测试框架或真实凭据。真实固定结果验证需至少两次模型调用额度；目录验证需至少三次额度，检查随机临时文件路径进入最终回答，不要求固定的实际调用次数，也不将一次回答视为具备代码理解能力。
+这些脚本使用非敏感临时材料，检查 Function Calling、目录列举、读取与回答、末轮额度、历史或摘要的真实服务表现。读取诊断需要至少三次模型调用额度；固定结果工具诊断需要至少两次。它们比较实际 SDK 参数、工具结果与最终回答，不要求固定调用顺序。跨轮验证不重复提供旧正文，保留会话、运行与日志标识；只验证进程内连续性，不证明跨进程恢复。
 
-确定性检查将日志保留在 `logs/checks/<检查标识>/`，逐场景输出运行、步骤、工具调用和日志路径。检查将日志中的关联列表与替身实际捕获的模型请求逐项比对，并覆盖工具失败后修正或误报成功、嵌套数据与并发运行隔离、摘要处理和日志 I/O 故障。真实脚本同时显示运行标识、工具处理统计和日志完整性。
-
-检查还覆盖同批部分失败、执行器非字符串返回、各层级重复参数键，以及 `tool.rejected`、`tool.failed`、`model.failed` 写入时再次发生故障。故障场景联合核对返回 State、实际调用记录和日志完整性；未落盘事件的定位信息来自故障注入器观察到的写入尝试，并单独标明来源，不视为已经持久化的日志。
-
-目录检查覆盖 Unicode 名称、上下级目录、空目录、条目上限、参数及路径拒绝、同批失败后继续、不同根目录运行隔离、配置和 CLI。权限与中途 I/O 故障使用标注的注入；Windows symlink/junction 尝试创建真实样例，无法构造时单独报告跳过原因。工具真实返回值与后续 SDK 请求逐项比对，日志关联和安全摘要分别核对。
-
-这两类结果分别报告，确定性检查不能代替真实端点的 Function Calling 兼容性验证。
-
-`check_tracing.py` 不使用真实凭据或网络，核对实际 SDK 序列化载荷、跨消息重组后的凭据遮盖、上下文成组保留、遗漏计数、容量限制、同批逐条记录和开关前后的业务等价性；也覆盖连接失败、HTTP 错误、初始化/清洗失败、队列溢出、取消和上传卡住时的 CLI 退出。边界检查由 `check_trace_data.py` 和 `check_trace_usage.py` 提供，并由该脚本统一执行。
-
-`verify_tracing.py` 使用 `.env` 中的真实模型与 LangSmith 配置，仅访问临时样例目录；它查询远端记录、输出私有 Trace 链接和本地运行标识，并分别报告同批请求、拒绝是否在该次真实运行中出现。usage 按最终投影与远端一致的字段报告每次调用的 `none`、`partial` 或 `full` 及汇总数量；合法零值有效，缺失字段不补零，`usage_covered=true` 仅表示至少一次调用有有效 token 字段。之后仍需登录网页核对参数、结果、调用关联和耗时。确定性检查不能证明真实服务接收或网页显示正确；真实远端与网页验收仍待执行。
-
-`check_review_fixes.py` 另核对输出角色与拒答、直接配置校验、关闭失败叠加错误、分页候选内存、累计预算及执行器复用隔离、最后回答轮和追踪字段。`verify_review_fixes.py` 使用随机非敏感 Python/TOML 文件验证分页、正文与来源引用，另发起一次仅允许回答的真实调用。脚本捕获实际 SDK 请求，检查普通请求省略额度指令、末轮使用固定收尾说明及 `tool_choice="none"`、上下文稳定追加，以及工具定义不随额度变化；读取额度仍与运行记录核对。
-
-真实验证单独报告端点实际返回的 `usage.input_tokens_details.cached_tokens`。只有有效的非负整数才作为缓存观测，缺失或无效标为不可观测，不推算为零。该观测不证明提示词调整带来缓存收益；一次命中或未命中也不能替代功能验收。
-
-`check_text.py` 使用真实临时文件，检查字节边界及实际读取量、短读和增长、UTF-8/BOM/换行、控制字符、路径拒绝、批次继续、隔离和文件未修改。权限、读取中途故障及元数据变化采用明确标注的注入；真实链接无法创建时报告跳过原因。`check_text_tracing.py` 使用真实 SDK 序列化和替身 HTTP，区分被省略的工具正文与允许按模型文本规则处理的回答引用，比较开关及上传故障下的实际模型请求和统计，不代表远端网页验收。
-
-`verify_text.py` 需要至少三次模型调用额度，并在不含敏感信息的临时目录内验证“列举 → 读取 → 回答”。文件名和正文识别码不预先出现在提示中，检查真实模型请求携带完整正文，最终回答引用内容与来源；实际调用次数不固定。
-
-`check_sessions.py` 将实际 SDK 请求与历史消息、真实临时文件结果逐项比较，检查历史不重复、不同会话隔离、新问题计数重置及同会话重叠拒绝。保存故障使用明确的注入，结合返回 State、实际调用与客户端关闭判断，不把缺失记录补造为成功；逐场景报告会话、运行、适用检查点和日志。`verify_sessions.py` 在第一轮发现并读取随机文件，第二轮不重供正文事实，分别核对真实请求携带的历史及模型回答引用的事实和来源，不固定实际调用次数。两者均只验证同进程保存，不证明跨进程加载或任意中断恢复。
-
-`check_session_review_fixes.py` 检查故障缓存不保留异常调用栈、额度观测异常不改变工具限额或收尾、无效新增输入不污染后续历史，以及执行前配置拒绝后同会话可继续。它对照实际 SDK 请求、返回 State、检查点和安全记录，并将元数据故障与日志或保存故障组合验证；不会把未知 HTTP 错误当作输入格式拒绝。
-
-`check_context_budget.py` 对照计量使用的准备请求与替身实际捕获的 SDK 参数，检查阈值两侧及相等边界、应用指令和工具占用、opaque 来源 usage 与回退、首次拒绝和工具后拒绝的历史差异。它还验证连续追问不改写历史、计量故障不产生虚假调用、对象隔离、日志/保存故障、CLI 和 Tracing，逐场景输出会话、运行、步骤、适用检查点及日志定位。既有大载荷检查显式配置符合其测试目的的预算，保留原有安全断言。真实端点只运行正常两轮会话回归，不发送巨大请求探测窗口，也不以一次真实成功证明估算精确。
-
-`check_compaction.py` 对照实际捕获的摘要与业务 SDK 请求，核对原文引用、连续覆盖范围、近期协议交互、候选保存和版本实际使用；确定性替身用于控制流、统计和故障边界，不证明摘要语义无损。`check_compaction_tracing.py` 使用真实 LangSmith SDK 序列化和替身 HTTP，验证摘要材料与正文省略、内部来源标记、容量上限、最终业务回答引用以及上传故障不影响模型结果。其独立追踪测试记录明确标为 trace harness，不声称存在原生图检查点。
-
-压缩检查还将轻量选源与完整记录查询逐项比较，报告实际检查点读取次数，核对多次摘要、失败轮次、无效尾部和副本隔离。压缩阶段及可选字段由类型声明描述，运行时保存校验和 Tracing 的独立允许字段规则仍保留；检查覆盖各阶段的记录、CLI 展示及正文省略。
-
-`verify_compaction.py` 通过当前端点，在可控预算内压缩非敏感临时资料后继续追问；关键事实来自被压缩的旧记录，不在近期原文或新提示重复提供。分别检查实际请求中的摘要来源与版本，以及模型是否保留关键事实、纠正、失败限制和来源。调用次数取决于实际端点表现，不固定次数，也不使用巨大请求探测窗口；真实结果仍不能保证未来摘要无损或估算精确。
-
-该真实脚本会打印样例使用的预算配置：总预算仍为 32768，摘要输出预留为 8192，摘要消息上限为 4096 字节，业务输出预留为 1024，安全余量为 256。这些是验证样例的显式覆盖，不修改应用默认值。摘要输出额度也包含推理输出；默认 2048 在某些模型上可能不足，此时明确停止，不自动提高额度或重试。摘要还可能遗漏事实；结构与来源校验通过不等于语义完整。
-
-当前提供目录直接子项分页列举、限额内 UTF-8 普通文本读取和进程内连续会话，不实现 PDF/Word 转换、正文分页、文件搜索、文件修改或命令执行，不包括工具自动发现、Skills、流式输出、并行执行、磁盘持久化或任务恢复。两类文件工具均不提供严格耗时保证，也不构成操作系统安全沙箱。
-
-项目设计依据见 [技术选型](docs/技术选型.md) 和 [开发阶段划分](docs/开发阶段划分.md)。
+Tracing 诊断会访问已配置的真实模型及 LangSmith，查询远端记录并给出私有 Trace 链接，之后仍需登录核对网页展示。usage 分类只使用最终投影中有效字段，零值有效、缺失不补零；缓存字段仅作端点观测，不推断提示优化收益。其 usage 对比公共函数与确定性回归复用，避免维护两份断言。离线 Tracing 检查则使用真实 SDK 序列化与替身 HTTP，不能证明真实服务接收或网页显示正确。

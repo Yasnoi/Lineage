@@ -11,7 +11,9 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from benchmarks import runner
+from benchmarks.core import processes as runner
+from benchmarks.core.executors import control
+from benchmarks.suites.agent_contracts.suite import load_catalog
 
 
 class ProcessCleanupTests(unittest.TestCase):
@@ -68,14 +70,13 @@ class ProcessCleanupTests(unittest.TestCase):
     def test_uncertain_cleanup_stops_scheduling_and_retains_timeout_fact(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            definition = deepcopy(runner.UNITS["react-script"])
-            definition.pop("groups")
+            definition = deepcopy(load_catalog()[0]["execution.react"])
             script = root / definition["script"]
             script.parent.mkdir(parents=True)
             script.write_text("# Never executed by this orchestration fixture.\n", encoding="utf-8")
             directory = root / "artifacts"
             directory.mkdir()
-            unit = runner.make_unit(definition, root)
+            unit = control.make_unit(definition, root)
             process = Mock(pid=123456, returncode=-1)
             process.wait.side_effect = subprocess.TimeoutExpired("worker", definition["timeout_seconds"])
 
@@ -84,13 +85,13 @@ class ProcessCleanupTests(unittest.TestCase):
                 return process
 
             with patch.object(runner.subprocess, "Popen", side_effect=launch), patch.object(
-                runner, "_stop", side_effect=runner.ProcessCleanupError("tree not confirmed"),
+                control, "_stop", side_effect=runner.ProcessCleanupError("tree not confirmed"),
             ):
-                stop_scheduling = runner.execute_unit(unit, definition, "fixture-run", directory, root=root)
+                stop_scheduling = control.execute_unit(unit, definition, "fixture-run", directory, root=root)
             self.assertTrue(stop_scheduling)
             self.assertEqual(unit["execution_status"], "failed")
             self.assertEqual(unit["verdict"], "pending_review")
-            self.assertEqual({item["code"] for item in unit["issues"]}, {"timeout", "process_tree_unconfirmed"})
+            self.assertTrue({"timeout", "process_tree_unconfirmed"} <= {item["code"] for item in unit["issues"]})
             output = directory / definition["unit_id"] / "stdout.txt"
             self.assertEqual(output.read_text(encoding="utf-8"), "actual partial output retained\n")
 

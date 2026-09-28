@@ -7,17 +7,18 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from benchmarks.groups import GroupJournal, planned_groups, read_group_events
-from benchmarks.results import exit_code, render_report, validate_result
+from benchmarks.core.events import GroupJournal, planned_groups, read_group_events
+from benchmarks.core.contracts import exit_code, validate_result
+from benchmarks.reporting.render import render_report
 from benchmarks.tests.contract_examples import example_result
-from scripts import check_support as support
+from benchmarks.checks.support import events as support
 
 
 def definition():
     return {
         "unit_id": "fixture-script",
         "script": "fixture.py",
-        "primary_suite": "control-fixture",
+        "module": "control-fixture",
         "groups": [
             {"group_id": f"fixture/{name}", "description": f"Fixture {name}",
              "source": {"path": "fixture.py", "symbol": name},

@@ -1,0 +1,2921 @@
+{
+  "version": "3",
+  "units": [
+    {
+      "unit_id": "execution.react",
+      "entrypoint": "benchmarks.checks.execution.react:execute",
+      "script": "benchmarks/checks/execution/react.py",
+      "groups": [
+        {
+          "group_id": "execution.react.direct_answer",
+          "description": "直接回答、工具缺省与用量统计",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_direct_answer"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_direct_answer",
+            "group_id": "check_react/check_direct_answer"
+          }
+        },
+        {
+          "group_id": "execution.react.unified_model_input",
+          "description": "字符串与结构化输入实际 SDK 参数",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_unified_model_input"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_unified_model_input",
+            "group_id": "check_react/check_unified_model_input"
+          }
+        },
+        {
+          "group_id": "execution.react.tool_loop",
+          "description": "工具调用结果关联、回传及累计用量",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_tool_loop"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_tool_loop",
+            "group_id": "check_react/check_tool_loop"
+          }
+        },
+        {
+          "group_id": "execution.react.multiple_requests_and_context",
+          "description": "同批串行执行及历史协议项完整保留",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_multiple_requests_and_context"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_multiple_requests_and_context",
+            "group_id": "check_react/check_multiple_requests_and_context"
+          }
+        },
+        {
+          "group_id": "execution.react.limits",
+          "description": "模型调用额度与末轮工具跳过",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_limits"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_limits",
+            "group_id": "check_react/check_limits"
+          }
+        },
+        {
+          "group_id": "execution.react.tool_errors",
+          "description": "工具名称、参数及执行错误正确回传",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_tool_errors"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_tool_errors",
+            "group_id": "check_react/check_tool_errors"
+          }
+        },
+        {
+          "group_id": "execution.react.model_failures",
+          "description": "模型请求失败、不完整响应与无效协议",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_model_failures"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_model_failures",
+            "group_id": "check_react/check_model_failures"
+          }
+        },
+        {
+          "group_id": "execution.react.usage_gaps_and_run_isolation",
+          "description": "用量缺失、真实零值与运行统计隔离",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_usage_gaps_and_run_isolation"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_usage_gaps_and_run_isolation",
+            "group_id": "check_react/check_usage_gaps_and_run_isolation"
+          }
+        },
+        {
+          "group_id": "execution.react.failure_history_and_final_display",
+          "description": "失败历史后继续及 CLI 回答与工具事实显示",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_failure_history_and_final_display"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_failure_history_and_final_display",
+            "group_id": "check_react/check_failure_history_and_final_display"
+          }
+        },
+        {
+          "group_id": "execution.react.protocol_protection",
+          "description": "拒绝伪造结果、重复调用标识及非法历史",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_protocol_protection"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_protocol_protection",
+            "group_id": "check_react/check_protocol_protection"
+          }
+        },
+        {
+          "group_id": "execution.react.nested_and_concurrent_isolation",
+          "description": "嵌套输入响应副本及并发运行隔离",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_nested_and_concurrent_isolation"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_nested_and_concurrent_isolation",
+            "group_id": "check_react/check_nested_and_concurrent_isolation"
+          }
+        },
+        {
+          "group_id": "execution.react.mixed_batches_and_return_types",
+          "description": "混合批次部分失败后继续及非字符串结果拒绝",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_mixed_batches_and_return_types"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_mixed_batches_and_return_types",
+            "group_id": "check_react/check_mixed_batches_and_return_types"
+          }
+        },
+        {
+          "group_id": "execution.react.duplicate_argument_keys",
+          "description": "嵌套与转义重复参数键拒绝及合法相似键接受",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_duplicate_argument_keys"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_duplicate_argument_keys",
+            "group_id": "check_react/check_duplicate_argument_keys"
+          }
+        },
+        {
+          "group_id": "execution.react.cli_exit_codes",
+          "description": "构造 Agent 终态与配置错误的 CLI 退出语义",
+          "source": {
+            "path": "benchmarks/checks/execution/react.py",
+            "symbol": "check_cli_exit_codes"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.execution.react",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_cli_exit_codes",
+            "group_id": "check_react/check_cli_exit_codes"
+          }
+        }
+      ],
+      "module": "execution"
+    },
+    {
+      "unit_id": "recording.runtime_events",
+      "entrypoint": "benchmarks.checks.recording.runtime_events:execute",
+      "script": "benchmarks/checks/recording/runtime_events.py",
+      "groups": [
+        {
+          "group_id": "recording.runtime_events.safe_summaries",
+          "description": "大载荷的有界安全日志摘要",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_safe_summaries"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_safe_summaries",
+            "group_id": "check_react/check_safe_summaries"
+          }
+        },
+        {
+          "group_id": "recording.runtime_events.safe_rejection_reasons",
+          "description": "工具拒绝原因白名单与敏感信息过滤",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_safe_rejection_reasons"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_safe_rejection_reasons",
+            "group_id": "check_react/check_safe_rejection_reasons"
+          }
+        },
+        {
+          "group_id": "recording.runtime_events.safe_execution_reasons",
+          "description": "工具执行错误原因白名单与敏感信息过滤",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_safe_execution_reasons"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_safe_execution_reasons",
+            "group_id": "check_react/check_safe_execution_reasons"
+          }
+        },
+        {
+          "group_id": "recording.runtime_events.tool_trace_hooks",
+          "description": "工具追踪钩子及日志失败后的结果与收尾",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_tool_trace_hooks"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_tool_trace_hooks",
+            "group_id": "check_react/check_tool_trace_hooks"
+          }
+        },
+        {
+          "group_id": "recording.runtime_events.recording_failures",
+          "description": "记录创建、写入、刷新与关闭故障边界",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_recording_failures"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_recording_failures",
+            "group_id": "check_react/check_recording_failures"
+          }
+        },
+        {
+          "group_id": "recording.runtime_events.failure_event_recording_failures",
+          "description": "工具或模型失败后失败事件再次写入故障",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_events.py",
+            "symbol": "check_failure_event_recording_failures"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_events",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_react.py",
+            "symbol": "check_failure_event_recording_failures",
+            "group_id": "check_react/check_failure_event_recording_failures"
+          }
+        }
+      ],
+      "module": "recording"
+    },
+    {
+      "unit_id": "filesystem.directory",
+      "entrypoint": "benchmarks.checks.filesystem.directory:execute",
+      "script": "benchmarks/checks/filesystem/directory.py",
+      "groups": [
+        {
+          "group_id": "filesystem.directory.listing",
+          "description": "真实目录列举、排序与正文读取隔离",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_listing"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_listing",
+            "group_id": "check_filesystem/check_listing"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.limits",
+          "description": "有界目录输出、实际枚举及资源关闭",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_limits"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_limits",
+            "group_id": "check_filesystem/check_limits"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.arguments",
+          "description": "目录参数拒绝与同批后续请求继续",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_arguments"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_arguments",
+            "group_id": "check_filesystem/check_arguments"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.paths",
+          "description": "目录路径访问与根边界限制",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_paths"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_paths",
+            "group_id": "check_filesystem/check_paths"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.io_failures",
+          "description": "真实枚举与分类故障后的结果回传",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_io_failures"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_io_failures",
+            "group_id": "check_filesystem/check_io_failures"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.links",
+          "description": "真实符号链接与 junction 的列举和访问拒绝",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_links"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_links",
+            "group_id": "check_filesystem/check_links"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.isolation",
+          "description": "不同目录根并发运行、上下文与用量隔离",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_isolation"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_isolation",
+            "group_id": "check_filesystem/check_isolation"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.configuration_and_cli",
+          "description": "目录配置、CLI 工具启用及非法根提前拒绝",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "check_configuration_and_cli"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "check_configuration_and_cli",
+            "group_id": "check_filesystem/check_configuration_and_cli"
+          }
+        },
+        {
+          "group_id": "filesystem.directory.fixture_integrity",
+          "description": "全部目录检查后输入资料与相邻目录保持不变",
+          "source": {
+            "path": "benchmarks/checks/filesystem/directory.py",
+            "symbol": "main"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.directory",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_filesystem.py",
+            "symbol": "main",
+            "group_id": "check_filesystem/fixture_integrity"
+          }
+        }
+      ],
+      "module": "filesystem"
+    },
+    {
+      "unit_id": "filesystem.text",
+      "entrypoint": "benchmarks.checks.filesystem.text:execute",
+      "script": "benchmarks/checks/filesystem/text.py",
+      "groups": [
+        {
+          "group_id": "filesystem.text.reading",
+          "description": "发现后读取真实 UTF-8、BOM、换行及空文件",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_reading"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_reading",
+            "group_id": "check_text/check_reading"
+          }
+        },
+        {
+          "group_id": "filesystem.text.limits",
+          "description": "有界实际读取、短读、增长与文件描述符大小注入",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_limits"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_limits",
+            "group_id": "check_text/check_limits"
+          }
+        },
+        {
+          "group_id": "filesystem.text.arguments",
+          "description": "文本参数拒绝与后续请求继续",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_arguments"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_arguments",
+            "group_id": "check_text/check_arguments"
+          }
+        },
+        {
+          "group_id": "filesystem.text.paths_and_formats",
+          "description": "文本路径、文件类型、编码与控制字符限制",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_paths_and_formats"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_paths_and_formats",
+            "group_id": "check_text/check_paths_and_formats"
+          }
+        },
+        {
+          "group_id": "filesystem.text.io_and_logging_failures",
+          "description": "读取失败及失败事件写入再次故障的停止边界",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_io_and_logging_failures"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_io_and_logging_failures",
+            "group_id": "check_text/check_io_and_logging_failures"
+          }
+        },
+        {
+          "group_id": "filesystem.text.links",
+          "description": "真实文件与目录链接及 junction 的直接和祖先访问拒绝",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_links"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_links",
+            "group_id": "check_text/check_links"
+          }
+        },
+        {
+          "group_id": "filesystem.text.untrusted_content",
+          "description": "资料中的伪指令不能扩大目录与工具权限",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_untrusted_content"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_untrusted_content",
+            "group_id": "check_text/check_untrusted_content"
+          }
+        },
+        {
+          "group_id": "filesystem.text.isolation",
+          "description": "不同资料根并发读取、输入副本及统计隔离",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_isolation"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_isolation",
+            "group_id": "check_text/check_isolation"
+          }
+        },
+        {
+          "group_id": "filesystem.text.configuration_and_cli",
+          "description": "文本额度配置及 CLI 列举后读取真实内容",
+          "source": {
+            "path": "benchmarks/checks/filesystem/text.py",
+            "symbol": "check_configuration_and_cli"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.text",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text.py",
+            "symbol": "check_configuration_and_cli",
+            "group_id": "check_text/check_configuration_and_cli"
+          }
+        }
+      ],
+      "module": "filesystem"
+    },
+    {
+      "unit_id": "execution.input_boundaries",
+      "entrypoint": "benchmarks.checks.execution.input_boundaries:execute",
+      "script": "benchmarks/checks/execution/input_boundaries.py",
+      "groups": [
+        {
+          "group_id": "execution.input_boundaries.output_roles",
+          "description": "无效输出角色与输入形状拒绝及合法扩展项保留",
+          "source": {
+            "path": "benchmarks/checks/execution/input_boundaries.py",
+            "symbol": "check_output_roles"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.execution.input_boundaries",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_output_roles",
+            "group_id": "check_review_fixes/check_output_roles"
+          }
+        },
+        {
+          "group_id": "execution.input_boundaries.refusal",
+          "description": "纯拒绝、混合拒绝与工具调用及无效拒绝内容",
+          "source": {
+            "path": "benchmarks/checks/execution/input_boundaries.py",
+            "symbol": "check_refusal"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.execution.input_boundaries",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_refusal",
+            "group_id": "check_review_fixes/check_refusal"
+          }
+        },
+        {
+          "group_id": "execution.input_boundaries.direct_config",
+          "description": "直接与 dotenv 配置边界及安全模型错误",
+          "source": {
+            "path": "benchmarks/checks/execution/input_boundaries.py",
+            "symbol": "check_direct_config"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.input_boundaries",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_direct_config",
+            "group_id": "check_review_fixes/check_direct_config"
+          }
+        },
+        {
+          "group_id": "execution.input_boundaries.close_failure",
+          "description": "客户端关闭故障保留结果、原错误与日志失败事实",
+          "source": {
+            "path": "benchmarks/checks/execution/input_boundaries.py",
+            "symbol": "check_close_failure"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.input_boundaries",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_close_failure",
+            "group_id": "check_review_fixes/check_close_failure"
+          }
+        },
+        {
+          "group_id": "execution.input_boundaries.final_answer_allowance",
+          "description": "末次请求回答指令、工具禁用及用户额度文字原样保留",
+          "source": {
+            "path": "benchmarks/checks/execution/input_boundaries.py",
+            "symbol": "check_final_answer_allowance"
+          },
+          "primary_area": "execution",
+          "tags": [
+            "execution",
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.execution.input_boundaries",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_final_answer_allowance",
+            "group_id": "check_review_fixes/check_final_answer_allowance"
+          }
+        }
+      ],
+      "module": "execution"
+    },
+    {
+      "unit_id": "filesystem.access_budget",
+      "entrypoint": "benchmarks.checks.filesystem.access_budget:execute",
+      "script": "benchmarks/checks/filesystem/access_budget.py",
+      "groups": [
+        {
+          "group_id": "filesystem.access_budget.file_scope",
+          "description": "代码、配置与无扩展名普通文本读取和扣账",
+          "source": {
+            "path": "benchmarks/checks/filesystem/access_budget.py",
+            "symbol": "check_file_scope"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.access_budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_file_scope",
+            "group_id": "check_review_fixes/check_file_scope"
+          }
+        },
+        {
+          "group_id": "filesystem.access_budget.pagination",
+          "description": "稳定排序分页、堆空间、真实结果回传及变化语义",
+          "source": {
+            "path": "benchmarks/checks/filesystem/access_budget.py",
+            "symbol": "check_pagination"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.access_budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_pagination",
+            "group_id": "check_review_fixes/check_pagination"
+          }
+        },
+        {
+          "group_id": "filesystem.access_budget.read_budgets",
+          "description": "跨轮读取累计额度、增长短读及成功后日志失败",
+          "source": {
+            "path": "benchmarks/checks/filesystem/access_budget.py",
+            "symbol": "check_read_budgets"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.access_budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_read_budgets",
+            "group_id": "check_review_fixes/check_read_budgets"
+          }
+        },
+        {
+          "group_id": "filesystem.access_budget.budget_isolation",
+          "description": "复用执行器顺序与并发运行的读取额度隔离",
+          "source": {
+            "path": "benchmarks/checks/filesystem/access_budget.py",
+            "symbol": "check_budget_isolation"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.access_budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_budget_isolation",
+            "group_id": "check_review_fixes/check_budget_isolation"
+          }
+        }
+      ],
+      "module": "filesystem"
+    },
+    {
+      "unit_id": "recording.runtime_projection",
+      "entrypoint": "benchmarks.checks.recording.runtime_projection:execute",
+      "script": "benchmarks/checks/recording/runtime_projection.py",
+      "groups": [
+        {
+          "group_id": "recording.runtime_projection.review_tracing",
+          "description": "额度与游标追踪投影、上传失败等价及拒绝和收尾脱敏",
+          "source": {
+            "path": "benchmarks/checks/recording/runtime_projection.py",
+            "symbol": "check_review_tracing"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.runtime_projection",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_review_fixes.py",
+            "symbol": "check_review_tracing",
+            "group_id": "check_review_fixes/check_review_tracing"
+          }
+        }
+      ],
+      "module": "recording"
+    },
+    {
+      "unit_id": "sessions.history",
+      "entrypoint": "benchmarks.checks.sessions.history:execute",
+      "script": "benchmarks/checks/sessions/history.py",
+      "groups": [
+        {
+          "group_id": "sessions.history.history_and_copy_isolation",
+          "description": "跨轮历史、返回值拷贝和检查点隔离",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_history_and_copy_isolation"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_history_and_copy_isolation",
+            "group_id": "check_sessions/check_history_and_copy_isolation"
+          }
+        },
+        {
+          "group_id": "sessions.history.file_history_and_budget",
+          "description": "真实文件历史继承与每轮读取额度重置",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_file_history_and_budget"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_file_history_and_budget",
+            "group_id": "check_sessions/check_file_history_and_budget"
+          }
+        },
+        {
+          "group_id": "sessions.history.failure_history_boundaries",
+          "description": "模型、协议、工具失败后的历史准入及次轮重置",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_failure_history_boundaries"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_failure_history_boundaries",
+            "group_id": "check_sessions/check_failure_history_boundaries"
+          }
+        },
+        {
+          "group_id": "sessions.history.partial_batch_and_usage",
+          "description": "半批工具日志失败后的历史边界及缺失用量",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_partial_batch_and_usage"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_partial_batch_and_usage",
+            "group_id": "check_sessions/check_partial_batch_and_usage"
+          }
+        },
+        {
+          "group_id": "sessions.history.invalid_new_input",
+          "description": "非法工具关联输入不发送且不继承",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_invalid_new_input"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_invalid_new_input",
+            "group_id": "check_sessions/check_invalid_new_input"
+          }
+        },
+        {
+          "group_id": "sessions.history.concurrency",
+          "description": "同会话重入拒绝与跨会话交错运行隔离",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_concurrency"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_concurrency",
+            "group_id": "check_sessions/check_concurrency"
+          }
+        },
+        {
+          "group_id": "sessions.history.checkpoint_write_failures",
+          "description": "六类真实检查点写入失败与会话阻塞",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_checkpoint_write_failures"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_write_failures",
+            "group_id": "check_sessions/check_checkpoint_write_failures"
+          }
+        },
+        {
+          "group_id": "sessions.history.checkpoint_and_skipped_log_failure",
+          "description": "检查点失败叠加工具跳过日志失败保留事实",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_checkpoint_and_skipped_log_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_and_skipped_log_failure",
+            "group_id": "check_sessions/check_checkpoint_and_skipped_log_failure"
+          }
+        },
+        {
+          "group_id": "sessions.history.checkpoint_read_failure",
+          "description": "检查点读取失败保留原存储并阻塞会话",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_checkpoint_read_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_checkpoint_read_failure",
+            "group_id": "check_sessions/check_checkpoint_read_failure"
+          }
+        },
+        {
+          "group_id": "sessions.history.creation_and_start_log_failure",
+          "description": "检查点创建失败与开始日志失败后的历史恢复",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_creation_and_start_log_failure"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_creation_and_start_log_failure",
+            "group_id": "check_sessions/check_creation_and_start_log_failure"
+          }
+        },
+        {
+          "group_id": "sessions.history.finalization_combinations",
+          "description": "最终保存、客户端关闭和结束日志组合失败",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_finalization_combinations"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_finalization_combinations",
+            "group_id": "check_sessions/check_finalization_combinations"
+          }
+        },
+        {
+          "group_id": "sessions.history.tracing_sessions",
+          "description": "会话追踪开关、过滤、上传故障及业务等价性",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_tracing_sessions"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_tracing_sessions",
+            "group_id": "check_sessions/check_tracing_sessions"
+          }
+        },
+        {
+          "group_id": "sessions.history.cli",
+          "description": "完整同步 CLI 交互、会话切换、单次命令及保存失败恢复",
+          "source": {
+            "path": "benchmarks/checks/sessions/history.py",
+            "symbol": "check_cli"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.history",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_sessions.py",
+            "symbol": "check_cli",
+            "group_id": "check_sessions/check_cli"
+          }
+        }
+      ],
+      "module": "sessions"
+    },
+    {
+      "unit_id": "sessions.admission",
+      "entrypoint": "benchmarks.checks.sessions.admission:execute",
+      "script": "benchmarks/checks/sessions/admission.py",
+      "groups": [
+        {
+          "group_id": "sessions.admission.cache_does_not_keep_frames",
+          "description": "检查点失败缓存不保留异常栈和已关闭资源",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_cache_does_not_keep_frames"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_cache_does_not_keep_frames",
+            "group_id": "check_session_review_fixes/check_cache_does_not_keep_frames"
+          }
+        },
+        {
+          "group_id": "sessions.admission.budget_helper_boundary",
+          "description": "读取额度观察异常与取消传播边界",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_budget_helper_boundary"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_budget_helper_boundary",
+            "group_id": "check_session_review_fixes/check_budget_helper_boundary"
+          }
+        },
+        {
+          "group_id": "sessions.admission.metadata_stages_and_tracing",
+          "description": "三阶段读取额度异常及日志追踪共享观察",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_metadata_stages_and_tracing"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_stages_and_tracing",
+            "group_id": "check_session_review_fixes/check_metadata_stages_and_tracing"
+          }
+        },
+        {
+          "group_id": "sessions.admission.metadata_keeps_real_budget",
+          "description": "元数据不可用时真实文件读取额度仍然生效",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_metadata_keeps_real_budget"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_keeps_real_budget",
+            "group_id": "check_session_review_fixes/check_metadata_keeps_real_budget"
+          }
+        },
+        {
+          "group_id": "sessions.admission.metadata_failure_combinations",
+          "description": "额度元数据与日志、检查点组合失败保留结果",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_metadata_failure_combinations"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_metadata_failure_combinations",
+            "group_id": "check_session_review_fixes/check_metadata_failure_combinations"
+          }
+        },
+        {
+          "group_id": "sessions.admission.invalid_input_history",
+          "description": "非法新输入拒绝且不污染可继承历史",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_invalid_input_history"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_invalid_input_history",
+            "group_id": "check_session_review_fixes/check_invalid_input_history"
+          }
+        },
+        {
+          "group_id": "sessions.admission.valid_protocol_and_http_history",
+          "description": "合法协议扩展历史与 HTTP 错误准入边界",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_valid_protocol_and_http_history"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_valid_protocol_and_http_history",
+            "group_id": "check_session_review_fixes/check_valid_protocol_and_http_history"
+          }
+        },
+        {
+          "group_id": "sessions.admission.preexecution_config_retry",
+          "description": "执行前配置失败保留历史并允许重试",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_preexecution_config_retry"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_preexecution_config_retry",
+            "group_id": "check_session_review_fixes/check_preexecution_config_retry"
+          }
+        },
+        {
+          "group_id": "sessions.admission.execution_started_still_blocks",
+          "description": "客户端进入失败后会话阻塞及资源关闭",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_execution_started_still_blocks"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_execution_started_still_blocks",
+            "group_id": "check_session_review_fixes/check_execution_started_still_blocks"
+          }
+        },
+        {
+          "group_id": "sessions.admission.finally_and_primary_error",
+          "description": "收尾取消传播、资源关闭及主错误保留",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_finally_and_primary_error"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_finally_and_primary_error",
+            "group_id": "check_session_review_fixes/check_finally_and_primary_error"
+          }
+        },
+        {
+          "group_id": "sessions.admission.prepare_and_final_save_secondary_errors",
+          "description": "准备和最终保存错误不被次级追踪异常覆盖",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_prepare_and_final_save_secondary_errors"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_prepare_and_final_save_secondary_errors",
+            "group_id": "check_session_review_fixes/check_prepare_and_final_save_secondary_errors"
+          }
+        },
+        {
+          "group_id": "sessions.admission.cli_preconfiguration_retry",
+          "description": "同步 CLI 配置失败重试及错误退出语义",
+          "source": {
+            "path": "benchmarks/checks/sessions/admission.py",
+            "symbol": "check_cli_preconfiguration_retry"
+          },
+          "primary_area": "sessions",
+          "tags": [
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.sessions.admission",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_review_fixes.py",
+            "symbol": "check_cli_preconfiguration_retry",
+            "group_id": "check_session_review_fixes/check_cli_preconfiguration_retry"
+          }
+        }
+      ],
+      "module": "sessions"
+    },
+    {
+      "unit_id": "context.budget",
+      "entrypoint": "benchmarks.checks.context.budget:execute",
+      "script": "benchmarks/checks/context/budget.py",
+      "groups": [
+        {
+          "group_id": "context.budget.configuration",
+          "description": "上下文预算默认值、配置校验及显式环境加载",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_configuration"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_configuration",
+            "group_id": "check_context_budget/check_configuration"
+          }
+        },
+        {
+          "group_id": "context.budget.transparent_request_and_boundary",
+          "description": "实际请求透明计量与精确预算阈值",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_transparent_request_and_boundary"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_transparent_request_and_boundary",
+            "group_id": "check_context_budget/check_transparent_request_and_boundary"
+          }
+        },
+        {
+          "group_id": "context.budget.stable_history_and_rejected_input",
+          "description": "超预算新输入拒绝后的历史稳定性",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_stable_history_and_rejected_input"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_stable_history_and_rejected_input",
+            "group_id": "check_context_budget/check_stable_history_and_rejected_input"
+          }
+        },
+        {
+          "group_id": "context.budget.tool_result_limit_and_real_file",
+          "description": "真实文件结果触发下一请求预算并保留事实",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_tool_result_limit_and_real_file"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_tool_result_limit_and_real_file",
+            "group_id": "check_context_budget/check_tool_result_limit_and_real_file"
+          }
+        },
+        {
+          "group_id": "context.budget.opaque_counting",
+          "description": "不透明内容风险计量、来源用量与后备值",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_opaque_counting"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_opaque_counting",
+            "group_id": "check_context_budget/check_opaque_counting"
+          }
+        },
+        {
+          "group_id": "context.budget.opaque_provenance_and_isolation",
+          "description": "不透明风险来源跨轮保留及会话隔离",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_opaque_provenance_and_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_opaque_provenance_and_isolation",
+            "group_id": "check_context_budget/check_opaque_provenance_and_isolation"
+          }
+        },
+        {
+          "group_id": "context.budget.file_sessions_isolation",
+          "description": "文件根、预算、历史及新轮额度共同隔离",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_file_sessions_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_file_sessions_isolation",
+            "group_id": "check_context_budget/check_file_sessions_isolation"
+          }
+        },
+        {
+          "group_id": "context.budget.every_call_and_usage",
+          "description": "每次实际请求先计量及部分用量累计",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_every_call_and_usage"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_every_call_and_usage",
+            "group_id": "check_context_budget/check_every_call_and_usage"
+          }
+        },
+        {
+          "group_id": "context.budget.measurement_failure",
+          "description": "不可计量输入与请求准备失败阻止发送",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_measurement_failure"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_measurement_failure",
+            "group_id": "check_context_budget/check_measurement_failure"
+          }
+        },
+        {
+          "group_id": "context.budget.session_invalid_storage_boundaries",
+          "description": "实际检查点序列化与请求计量失败边界",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_session_invalid_storage_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_session_invalid_storage_boundaries",
+            "group_id": "check_context_budget/check_session_invalid_storage_boundaries"
+          }
+        },
+        {
+          "group_id": "context.budget.budget_recording_failures",
+          "description": "预算日志失败及已执行工具事实保留",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_budget_recording_failures"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_budget_recording_failures",
+            "group_id": "check_context_budget/check_budget_recording_failures"
+          }
+        },
+        {
+          "group_id": "context.budget.budget_checkpoint_failures",
+          "description": "预算停止和工具完成后的检查点保存失败",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_budget_checkpoint_failures"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_budget_checkpoint_failures",
+            "group_id": "check_context_budget/check_budget_checkpoint_failures"
+          }
+        },
+        {
+          "group_id": "context.budget.tracing_diagnostics",
+          "description": "预算追踪诊断过滤及上传故障等价性",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_tracing_diagnostics"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_tracing_diagnostics",
+            "group_id": "check_context_budget/check_tracing_diagnostics"
+          }
+        },
+        {
+          "group_id": "context.budget.cli",
+          "description": "预算停止展示与交互拒绝后继续",
+          "source": {
+            "path": "benchmarks/checks/context/budget.py",
+            "symbol": "check_cli"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.budget",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_context_budget.py",
+            "symbol": "check_cli",
+            "group_id": "check_context_budget/check_cli"
+          }
+        }
+      ],
+      "module": "context"
+    },
+    {
+      "unit_id": "context.compaction",
+      "entrypoint": "benchmarks.checks.context.compaction:execute",
+      "script": "benchmarks/checks/context/compaction.py",
+      "groups": [
+        {
+          "group_id": "context.compaction.configuration",
+          "description": "摘要和历史保留配置边界",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_configuration"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_configuration",
+            "group_id": "check_compaction/check_configuration"
+          }
+        },
+        {
+          "group_id": "context.compaction.stable_history_and_records",
+          "description": "未压缩活动版本与运行记录拷贝隔离",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_stable_history_and_records"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_stable_history_and_records",
+            "group_id": "check_compaction/check_stable_history_and_records"
+          }
+        },
+        {
+          "group_id": "context.compaction.selection_read_path",
+          "description": "轻量历史选择与完整记录等价及源读取失败",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_selection_read_path"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_selection_read_path",
+            "group_id": "check_compaction/check_selection_read_path"
+          }
+        },
+        {
+          "group_id": "context.compaction.compaction_status_consumers",
+          "description": "压缩状态的 CLI 展示与追踪投影",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_compaction_status_consumers"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_compaction_status_consumers",
+            "group_id": "check_compaction/check_compaction_status_consumers"
+          }
+        },
+        {
+          "group_id": "context.compaction.activation_and_stable_reuse",
+          "description": "摘要保存确认、活动版本切换与后续复用",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_activation_and_stable_reuse"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_activation_and_stable_reuse",
+            "group_id": "check_compaction/check_activation_and_stable_reuse"
+          }
+        },
+        {
+          "group_id": "context.compaction.request_options_through_compaction",
+          "description": "请求选项贯穿选择、候选、真实保存和 SDK",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_request_options_through_compaction"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_request_options_through_compaction",
+            "group_id": "check_compaction/check_request_options_through_compaction"
+          }
+        },
+        {
+          "group_id": "context.compaction.refusal_boundaries",
+          "description": "无可压缩历史或当前请求过大时保持旧版本",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_refusal_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_refusal_boundaries",
+            "group_id": "check_compaction/check_refusal_boundaries"
+          }
+        },
+        {
+          "group_id": "context.compaction.summary_failure_cases",
+          "description": "摘要服务、协议、来源及大小失败停止业务请求",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_failure_cases"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_summary_failure_cases",
+            "group_id": "check_compaction/check_summary_failure_cases"
+          }
+        },
+        {
+          "group_id": "context.compaction.usage_missing",
+          "description": "摘要与业务用量缺失分计及新轮重置",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_usage_missing"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_usage_missing",
+            "group_id": "check_compaction/check_usage_missing"
+          }
+        },
+        {
+          "group_id": "context.compaction.summary_and_candidate_budget_boundaries",
+          "description": "摘要请求及候选预算和准备失败边界",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_and_candidate_budget_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_summary_and_candidate_budget_boundaries",
+            "group_id": "check_compaction/check_summary_and_candidate_budget_boundaries"
+          }
+        },
+        {
+          "group_id": "context.compaction.opaque_barriers_and_omissions",
+          "description": "受保护历史阻止压缩及加密内容省略",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_opaque_barriers_and_omissions"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_opaque_barriers_and_omissions",
+            "group_id": "check_compaction/check_opaque_barriers_and_omissions"
+          }
+        },
+        {
+          "group_id": "context.compaction.real_file_and_failure_source",
+          "description": "真实文件及工具失败事实进入摘要来源",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_real_file_and_failure_source"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_real_file_and_failure_source",
+            "group_id": "check_compaction/check_real_file_and_failure_source"
+          }
+        },
+        {
+          "group_id": "context.compaction.repeated_compaction",
+          "description": "同轮两次恢复的来源去重和工具结果保留",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_repeated_compaction"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_repeated_compaction",
+            "group_id": "check_compaction/check_repeated_compaction"
+          }
+        },
+        {
+          "group_id": "context.compaction.unattempted_recovery_record",
+          "description": "未尝试恢复与已调用摘要记录保持区分",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_unattempted_recovery_record"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_unattempted_recovery_record",
+            "group_id": "check_compaction/check_unattempted_recovery_record"
+          }
+        },
+        {
+          "group_id": "context.compaction.session_isolation",
+          "description": "并发摘要、来源、版本及记录查询会话隔离",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_session_isolation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_session_isolation",
+            "group_id": "check_compaction/check_session_isolation"
+          }
+        },
+        {
+          "group_id": "context.compaction.runtime_tracing",
+          "description": "摘要正文过滤、追踪开关和上传失败业务等价性",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_runtime_tracing"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_runtime_tracing",
+            "group_id": "check_compaction/check_runtime_tracing"
+          }
+        },
+        {
+          "group_id": "context.compaction.history_admission_and_cli",
+          "description": "失败历史摘要准入及 CLI 压缩后连续交互",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_admission_and_cli"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_history_admission_and_cli",
+            "group_id": "check_compaction/check_history_admission_and_cli"
+          }
+        },
+        {
+          "group_id": "context.compaction.checkpoint_boundaries",
+          "description": "候选、激活、最终保存及工具后恢复保存失败",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_checkpoint_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_checkpoint_boundaries",
+            "group_id": "check_compaction/check_checkpoint_boundaries"
+          }
+        },
+        {
+          "group_id": "context.compaction.log_boundaries",
+          "description": "摘要和版本日志失败及模型失败的组合边界",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_log_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction.py",
+            "symbol": "check_log_boundaries",
+            "group_id": "check_compaction/check_log_boundaries"
+          }
+        }
+      ],
+      "module": "context"
+    },
+    {
+      "unit_id": "recording.transport",
+      "entrypoint": "benchmarks.checks.recording.transport:execute",
+      "script": "benchmarks/checks/recording/transport.py",
+      "groups": [
+        {
+          "group_id": "recording.transport.projection",
+          "description": "字段投影、密钥及路径过滤、原对象不变与载荷上限。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_projection"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_projection",
+            "group_id": "check_tracing/check_projection"
+          }
+        },
+        {
+          "group_id": "recording.projection.redaction_boundaries",
+          "description": "引号、转义、跨文本及截断边界的凭据过滤与幂等性。",
+          "source": {
+            "path": "benchmarks/checks/recording/projection.py",
+            "symbol": "check_redaction_boundaries"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.projection",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_data.py",
+            "symbol": "check_redaction_boundaries",
+            "group_id": "check_trace_data/check_redaction_boundaries"
+          }
+        },
+        {
+          "group_id": "recording.projection.capacity_and_rounds",
+          "description": "容量与遗漏元数据、完整工具批次保留、回答和用量投影。",
+          "source": {
+            "path": "benchmarks/checks/recording/projection.py",
+            "symbol": "check_capacity_and_rounds"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.projection",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_data.py",
+            "symbol": "check_capacity_and_rounds",
+            "group_id": "check_trace_data/check_capacity_and_rounds"
+          }
+        },
+        {
+          "group_id": "recording.usage.usage_categories",
+          "description": "缺失、无效、零值和部分用量的覆盖分类。",
+          "source": {
+            "path": "benchmarks/checks/recording/usage.py",
+            "symbol": "check_usage_categories"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.usage",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_usage_categories",
+            "group_id": "check_trace_usage/check_usage_categories"
+          }
+        },
+        {
+          "group_id": "recording.usage.mixed_run_and_empty_run",
+          "description": "多次调用混合用量覆盖及空运行。",
+          "source": {
+            "path": "benchmarks/checks/recording/usage.py",
+            "symbol": "check_mixed_run_and_empty_run"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.usage",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_mixed_run_and_empty_run",
+            "group_id": "check_trace_usage/check_mixed_run_and_empty_run"
+          }
+        },
+        {
+          "group_id": "recording.usage.remote_mismatches",
+          "description": "拒绝本地与远端最终用量投影不一致。",
+          "source": {
+            "path": "benchmarks/checks/recording/usage.py",
+            "symbol": "check_remote_mismatches"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.usage",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_remote_mismatches",
+            "group_id": "check_trace_usage/check_remote_mismatches"
+          }
+        },
+        {
+          "group_id": "recording.usage.final_projection_only",
+          "description": "最终投影缺失用量时不使用原始用量补判覆盖。",
+          "source": {
+            "path": "benchmarks/checks/recording/usage.py",
+            "symbol": "check_final_projection_only"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.recording.usage",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_trace_usage.py",
+            "symbol": "check_final_projection_only",
+            "group_id": "check_trace_usage/check_final_projection_only"
+          }
+        },
+        {
+          "group_id": "recording.transport.serialized_redaction",
+          "description": "真实 SDK 序列化后重组过滤凭据，业务对象与请求不变。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_serialized_redaction"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_serialized_redaction",
+            "group_id": "check_tracing/check_serialized_redaction"
+          }
+        },
+        {
+          "group_id": "recording.transport.serialized_capacity",
+          "description": "超大输入的上传限额不丢失小回答及实际投影用量。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_serialized_capacity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_serialized_capacity",
+            "group_id": "check_tracing/check_serialized_capacity"
+          }
+        },
+        {
+          "group_id": "recording.transport.disabled_and_equivalence",
+          "description": "追踪开关的业务等价、混合工具结果、调用关联与统计。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_disabled_and_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_disabled_and_equivalence",
+            "group_id": "check_tracing/check_disabled_and_equivalence"
+          }
+        },
+        {
+          "group_id": "recording.transport.failures_and_shutdown",
+          "description": "上传、配置、初始化及过滤失败的隔离、不重试和有限收尾。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_failures_and_shutdown"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_failures_and_shutdown",
+            "group_id": "check_tracing/check_failures_and_shutdown"
+          }
+        },
+        {
+          "group_id": "recording.transport.concurrency_and_skips",
+          "description": "并发运行隔离、模型额度导致的工具跳过及关联。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_concurrency_and_skips"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_concurrency_and_skips",
+            "group_id": "check_tracing/check_concurrency_and_skips"
+          }
+        },
+        {
+          "group_id": "recording.transport.local_recording_failure",
+          "description": "本地记录失败后工具跳过事实与追踪保持一致。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_local_recording_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_local_recording_failure",
+            "group_id": "check_tracing/check_local_recording_failure"
+          }
+        },
+        {
+          "group_id": "recording.transport.late_protocol_failure",
+          "description": "后续重复调用标识的协议错误只标记对应模型调用。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_late_protocol_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_late_protocol_failure",
+            "group_id": "check_tracing/check_late_protocol_failure"
+          }
+        },
+        {
+          "group_id": "recording.transport.missing_usage_and_model_error",
+          "description": "缺失用量和模型异常的安全追踪投影。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_missing_usage_and_model_error"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_missing_usage_and_model_error",
+            "group_id": "check_tracing/check_missing_usage_and_model_error"
+          }
+        },
+        {
+          "group_id": "recording.transport.cancellation_and_queue_overflow",
+          "description": "模型与工具取消、资源关闭及有界上传队列。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_cancellation_and_queue_overflow"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_cancellation_and_queue_overflow",
+            "group_id": "check_tracing/check_cancellation_and_queue_overflow"
+          }
+        },
+        {
+          "group_id": "recording.transport.cli_exit_deadline",
+          "description": "真实 CLI 子进程在上传卡住时仍有限退出。",
+          "source": {
+            "path": "benchmarks/checks/recording/transport.py",
+            "symbol": "check_cli_exit_deadline"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.transport",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_tracing.py",
+            "symbol": "check_cli_exit_deadline",
+            "group_id": "check_tracing/check_cli_exit_deadline"
+          }
+        }
+      ],
+      "module": "recording"
+    },
+    {
+      "unit_id": "recording.files",
+      "entrypoint": "benchmarks.checks.recording.files:execute",
+      "script": "benchmarks/checks/recording/files.py",
+      "groups": [
+        {
+          "group_id": "recording.files.real_read_and_equivalence",
+          "description": "真实文件读取在追踪开关及五类上传失败下保持业务等价。",
+          "source": {
+            "path": "benchmarks/checks/recording/files.py",
+            "symbol": "check_real_read_and_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.files",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_real_read_and_equivalence",
+            "group_id": "check_text_tracing/check_real_read_and_equivalence"
+          }
+        },
+        {
+          "group_id": "recording.files.listing_and_model_quotation",
+          "description": "目录和 BOM 读取元数据隐藏正文，同时保留模型对资料的引用。",
+          "source": {
+            "path": "benchmarks/checks/recording/files.py",
+            "symbol": "check_listing_and_model_quotation"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.files",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_listing_and_model_quotation",
+            "group_id": "check_text_tracing/check_listing_and_model_quotation"
+          }
+        },
+        {
+          "group_id": "recording.files.failure_reasons",
+          "description": "同批读取拒绝、限制、权限、中途 I/O 与成功结果在模型、JSONL 和追踪中一致。",
+          "source": {
+            "path": "benchmarks/checks/recording/files.py",
+            "symbol": "check_failure_reasons"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.recording.files",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_failure_reasons",
+            "group_id": "check_text_tracing/check_failure_reasons"
+          }
+        },
+        {
+          "group_id": "recording.files.projection_boundaries",
+          "description": "文本结果容量、原对象隔离和不可信原因及元数据过滤。",
+          "source": {
+            "path": "benchmarks/checks/recording/files.py",
+            "symbol": "check_projection_boundaries"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.files",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "check_projection_boundaries",
+            "group_id": "check_text_tracing/check_projection_boundaries"
+          }
+        },
+        {
+          "group_id": "recording.files.fixture_integrity",
+          "description": "全部检查结束后文件内容、目录成员及当前目录保持不变。",
+          "source": {
+            "path": "benchmarks/checks/recording/files.py",
+            "symbol": "main:fixture_integrity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.files",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_text_tracing.py",
+            "symbol": "main:fixture_integrity",
+            "group_id": "check_text_tracing/fixture_integrity"
+          }
+        }
+      ],
+      "module": "recording"
+    },
+    {
+      "unit_id": "recording.sessions",
+      "entrypoint": "benchmarks.checks.recording.sessions:execute",
+      "script": "benchmarks/checks/recording/sessions.py",
+      "groups": [
+        {
+          "group_id": "recording.sessions.checkpoint_trace_equivalence",
+          "description": "检查点追踪 harness 在关闭、开启及上传失败下请求和结果等价。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "main:checkpoint_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:checkpoint_trace_equivalence",
+            "group_id": "check_session_tracing/checkpoint_trace_equivalence"
+          }
+        },
+        {
+          "group_id": "recording.sessions.checkpoint_error_metadata",
+          "description": "三类检查点错误的追踪元数据及安全投影，与正常 harness 业务结果等价。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "main:checkpoint_error_metadata"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:checkpoint_error_metadata",
+            "group_id": "check_session_tracing/checkpoint_error_metadata"
+          }
+        },
+        {
+          "group_id": "recording.sessions.session_history_trace_equivalence",
+          "description": "真实多轮会话、文件历史与检查点在追踪开关及上传失败下保持等价。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "main:session_history_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:session_history_trace_equivalence",
+            "group_id": "check_session_tracing/session_history_trace_equivalence"
+          }
+        },
+        {
+          "group_id": "recording.sessions.session_final_save_failure",
+          "description": "第二轮最终保存失败的追踪归属与已取得业务结果保留。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "main:session_final_save_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:session_final_save_failure",
+            "group_id": "check_session_tracing/session_final_save_failure"
+          }
+        },
+        {
+          "group_id": "recording.sessions.skipped_after_save_failure",
+          "description": "模型结果保存失败后停止工具执行，保留用量、跳过及关联事实。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "check_skipped_after_save_failure"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "execution",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "check_skipped_after_save_failure",
+            "group_id": "check_session_tracing/check_skipped_after_save_failure"
+          }
+        },
+        {
+          "group_id": "recording.sessions.fixture_integrity",
+          "description": "全部会话检查结束后实际来源文件保持不变。",
+          "source": {
+            "path": "benchmarks/checks/recording/sessions.py",
+            "symbol": "main:fixture_integrity"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "sessions",
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.recording.sessions",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_session_tracing.py",
+            "symbol": "main:fixture_integrity",
+            "group_id": "check_session_tracing/fixture_integrity"
+          }
+        }
+      ],
+      "module": "recording"
+    },
+    {
+      "unit_id": "recording.compaction",
+      "entrypoint": "benchmarks.checks.recording.compaction:execute",
+      "script": "benchmarks/checks/recording/compaction.py",
+      "groups": [
+        {
+          "group_id": "recording.compaction.summary_trace_equivalence",
+          "description": "摘要追踪 harness 的正常、关闭及上传失败保持请求结果等价，摘要正文与派生输入被省略。",
+          "source": {
+            "path": "benchmarks/checks/recording/compaction.py",
+            "symbol": "main:summary_trace_equivalence"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.recording.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_trace_equivalence",
+            "group_id": "check_compaction_tracing/summary_trace_equivalence"
+          }
+        },
+        {
+          "group_id": "recording.compaction.summary_tool_request",
+          "description": "摘要意外工具调用的失败投影保持正文省略。",
+          "source": {
+            "path": "benchmarks/checks/recording/compaction.py",
+            "symbol": "main:summary_tool_request"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.recording.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_tool_request",
+            "group_id": "check_compaction_tracing/summary_tool_request"
+          }
+        },
+        {
+          "group_id": "recording.compaction.summary_incomplete",
+          "description": "未完成摘要的追踪仍不暴露摘要正文。",
+          "source": {
+            "path": "benchmarks/checks/recording/compaction.py",
+            "symbol": "main:summary_incomplete"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.recording.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:summary_incomplete",
+            "group_id": "check_compaction_tracing/summary_incomplete"
+          }
+        },
+        {
+          "group_id": "recording.compaction.bounded_lineage_provenance",
+          "description": "摘要来源引用有界且只依据明确来源隐藏派生内容，不按文本前缀猜测。",
+          "source": {
+            "path": "benchmarks/checks/recording/compaction.py",
+            "symbol": "main:bounded_lineage_provenance"
+          },
+          "primary_area": "recording",
+          "tags": [
+            "recording",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.recording.compaction",
+          "legacy_source": {
+            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
+            "path": "scripts/check_compaction_tracing.py",
+            "symbol": "main:bounded_lineage_provenance",
+            "group_id": "check_compaction_tracing/bounded_lineage_provenance"
+          }
+        }
+      ],
+      "module": "recording"
+    }
+  ]
+}

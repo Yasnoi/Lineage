@@ -1,130 +1,86 @@
-"""Offline faults for the real-model dispatcher; no endpoint is called."""
-
-from contextlib import redirect_stdout, redirect_stderr
-import io
-import json
+"""Dataset-independent dispatch with a second synthetic suite and real artifacts."""
+from contextlib import redirect_stdout,redirect_stderr
+from copy import deepcopy
+import io,json
 from pathlib import Path
-import subprocess
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+from benchmarks.entrypoints import cli
+from benchmarks.core import runner
+from benchmarks.core.executors import agent
+from benchmarks.core.configuration import checked_config,load_connection
+from benchmarks.core.contracts import known,exit_code,validate_result
+from benchmarks.core.files import sha256_file
 
-from benchmarks import __main__ as cli
-from benchmarks.common import sha256_file
-from benchmarks.research import batch
-
+CONFIG={'schema_version':'1','enabled':True,'source_repository':'fixture-source','credential_env':'TEST_MODEL_KEY',
+        'model':{'base_url':'https://model.invalid','model_name':'test-model'},'repeats':2,
+        'limits':{'requests':6,'execution_seconds':30,'sample_seconds':5}}
+SUITE={'suite_id':'second-project','version':'fixture-v1','executor':'agent','network':True,'materials':{},
+       'rubric':{'version':'fixture-v1','dimensions':[{'id':'facts','description':'facts'}],
+                 'cases':{'fixture':{'conditions':[{'id':'facts','dimension':'facts','description':'source support'}],'severe_errors':[]}}},
+       'units':[{'unit_id':'fixture','case_id':'fixture','version':'fixture-v1','turns':['first','follow up'],
+                 'dimensions':['facts'],'mechanism':None,'settings_overrides':{}}]}
 
 class ResearchDispatchTests(unittest.TestCase):
-    def test_explicit_profile_and_separate_selection_required(self):
-        for args in (["--suite", "research-wechat"],
-                     ["--suite", "research-wechat", "--suite", "control-react", "--research-profile", "wechat-v1"],
-                     ["--research-profile", "wechat-v1"]):
-            with self.subTest(args=args), patch.object(cli, "run_benchmark") as run, redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as raised:
-                    cli.main(args)
-                self.assertEqual(raised.exception.code, 2)
-                run.assert_not_called()
+    def test_list_and_help_never_execute(self):
+        with patch.object(cli,'run_benchmark') as run,redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main([]),0);self.assertEqual(cli.main(['list']),0)
+        run.assert_not_called()
 
-    def test_default_keeps_control_path(self):
-        result = {"run_id": "fixture", "units": [], "framework_errors": []}
-        with patch.object(cli, "run_benchmark", return_value=(result, [])) as run, redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main([]), 2)
-        run.assert_called_once_with(["control-react"])
+    def test_unknown_or_retired_cli_never_executes(self):
+        for args in (['run','unknown'],['--suite','control-all'],['run','wechat-reporting','--research-profile','wechat-v1']):
+            with patch.object(cli,'run_benchmark') as run,redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:cli.main(args)
+                self.assertEqual(error.exception.code,2);run.assert_not_called()
 
-    def test_filtered_connection_and_no_mutating_environment(self):
-        profile = {"base_url": "https://api.deepseek.com", "model_name": "deepseek-flash"}
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / ".env").write_text("API_KEY=credential-marker\nBASE_URL=https://api.deepseek.com\n"
-                                       "MODEL_NAME=deepseek-flash\nLANGSMITH_API_KEY=trace-marker\n"
-                                       "MAX_MODEL_CALLS=999\n", encoding="utf-8")
-            env = {}
-            connection = batch.load_connection(root, profile, env)
-            self.assertEqual(env, {})
-            self.assertEqual(set(connection), {"API_KEY", "BASE_URL", "MODEL_NAME"})
-            with patch.dict("os.environ", {"LANGSMITH_API_KEY": "trace-marker", "PYTHONOPTIMIZE": "2"}):
-                child = batch.research_environment(connection)
-            self.assertNotIn("trace-marker", json.dumps(child))
-            self.assertNotIn("PYTHONOPTIMIZE", child)
-            self.assertEqual(child["LANGSMITH_TRACING"], "false")
-            with self.assertRaises(ValueError):
-                batch.load_connection(root, profile, {"MODEL_NAME": "unapproved"})
-            with self.assertRaises(ValueError):
-                batch.load_connection(root, profile, {"API_KEY": ""})
+    def test_explicit_config_and_filtered_credentials(self):
+        config=checked_config(CONFIG);env={'TEST_MODEL_KEY':'secret-marker','LANGSMITH_API_KEY':'tracing-marker'}
+        connection=load_connection(config,env)
+        self.assertEqual(env['LANGSMITH_API_KEY'],'tracing-marker')
+        with patch.dict('os.environ',{'LANGSMITH_API_KEY':'tracing-marker','PYTHONOPTIMIZE':'2'}):child=agent.research_environment(connection)
+        self.assertEqual(child['LANGSMITH_TRACING'],'false');self.assertNotIn('PYTHONOPTIMIZE',child)
+        self.assertNotIn('tracing-marker',json.dumps(child))
+        for changed in (None,{**CONFIG,'enabled':False},{**CONFIG,'API_KEY':'must not persist'},{**CONFIG,'model':{**CONFIG['model'],'base_url':'https://secret@model.invalid'}}):
+            with self.assertRaises(ValueError):checked_config(changed)
+        with self.assertRaises(ValueError):load_connection(config,{})
 
-    def test_receipt_identity_and_finality_not_success_text(self):
-        with TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            spec = {"run_id": "sample-a", "case_id": "case", "prompts": ["one"]}
-            spec_path = directory / "spec.json"
-            spec_path.write_text(json.dumps(spec), encoding="utf-8")
-            path = directory / "receipt.json"
-            data = {"schema_version": "1", "run_id": "sample-a", "case_id": "case",
-                    "spec_sha256": sha256_file(spec_path), "final": True,
-                    "verdict": "pending_review", "global_stop": False,
-                    "execution_status": "completed", "ended_at": "now", "turns": [{}]}
-            path.write_text(json.dumps(data), encoding="utf-8")
-            batch._receipt(path, spec, spec_path, final=True, returncode=0)
-            for changes in ({"run_id": "old"}, {"spec_sha256": "old"}, {"final": False}, {"turns": []}):
-                path.write_text(json.dumps({**data, **changes}), encoding="utf-8")
-                with self.assertRaises(ValueError):
-                    batch._receipt(path, spec, spec_path, final=True, returncode=0)
+    def test_missing_configuration_is_blocked_without_worker(self):
+        with TemporaryDirectory() as temp,patch.object(agent,'execute_sample') as execute,patch.object(runner,'collect_baseline',return_value={}):
+            result,saved=runner.run_benchmark('second-project',root=Path(temp),registry={'second-project':lambda:deepcopy(SUITE)})
+        execute.assert_not_called();self.assertEqual(exit_code(result),2)
+        self.assertTrue(all(u['execution_status']=='blocked' for u in result['units']))
+        self.assertEqual({p.name for p in saved},{'result.json','report.md','review-template.json','review.md'})
 
-    def test_complete_batch_keeps_all_samples_and_review_packets(self):
-        from benchmarks.research import materials
-        from benchmarks.results import known
-        from benchmarks.research.definitions import CASES
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            manifest = {"material_version": "fixture", "files": []}
-
-            def instantiate(prepared, destination, case):
-                material_root = destination / "material"
-                material_root.mkdir(parents=True)
-                return {**manifest, "material_root": str(material_root)}
-
-            def execute(unit, spec, directory, connection, **kwargs):
-                # Explicit adapter fixture: no Agent/model runs, only real saved artifacts.
-                unit["execution_status"] = "completed"
-                unit["agent_outcome"] = known("completed")
-                unit["coverage"] = []
-                unit["metrics"]["duration_seconds"] = known(0.1)
-                for turn in unit["turns"]:
-                    answer = directory / f"turn-{turn['turn']}-answer.md"
-                    answer.write_text("确定性适配 fixture；不是 Research 结果。", encoding="utf-8")
-                    turn.update(execution_status="completed", run_id=known(f"fixture-{unit['unit_id']}-{turn['turn']}"),
-                                agent_outcome=known("completed"), answer_sha256=sha256_file(answer),
-                                answer_evidence={"kind": "answer", "path": str(answer), "source": "fixture", "availability": "available"})
+    def test_second_project_and_repeats_use_same_runner_without_project_branch(self):
+        with TemporaryDirectory() as temp:
+            root=Path(temp);manifests={};specs=[]
+            def prepare(repo,source,path,definition):
+                value={'material_root':str(path/'material'),'files':[],'material_version':'fixture'};manifests[str(path)]=value;return value
+            def instantiate(prepared,path,task):
+                return prepare(None,None,path,None)
+            def execute(unit,spec,directory,connection,**kwargs):
+                specs.append(spec);unit.update(execution_status='completed',agent_outcome=known('completed'))
+                for turn in unit['turns']:
+                    answer=directory/f"turn-{turn['turn']}.md";answer.write_text('Synthetic adapter output; no real model',encoding='utf-8')
+                    turn.update(execution_status='completed',run_id=known(spec['run_id']+str(turn['turn'])),agent_outcome=known('completed'),
+                                answer_sha256=sha256_file(answer),answer_evidence={'kind':'answer','path':str(answer),'source':'fixture','availability':'available'})
                 return False
+            with patch.object(runner,'collect_baseline',return_value={}),patch.object(agent,'load_connection',return_value={}),\
+                 patch.object(agent,'prepare_materials',side_effect=prepare),patch.object(agent,'instantiate_materials',side_effect=instantiate),\
+                 patch.object(agent,'verify_materials',side_effect=lambda p:manifests[str(p)]),\
+                 patch('benchmarks.core.materials.verify_materials',side_effect=lambda p:manifests[str(p)]),\
+                 patch.object(agent,'execute_sample',side_effect=execute):
+                result,saved=runner.run_benchmark('second-project',config=CONFIG,root=root,registry={'second-project':lambda:deepcopy(SUITE)})
+            validate_result(result)
+            self.assertEqual(exit_code(result),3);self.assertFalse(result['framework_errors'])
+            self.assertEqual(len(specs),2);self.assertNotEqual(specs[0]['material_root'],specs[1]['material_root'])
+            self.assertNotEqual(specs[0]['run_id'],specs[1]['run_id'])
+            self.assertEqual(result['batch']['planned_turns'],4)
+            self.assertTrue(all(p.is_file() for p in saved))
 
-            with (patch.object(batch, "collect_baseline", return_value={}),
-                  patch.object(batch, "load_connection", return_value={}),
-                  patch.object(materials, "prepare_materials", return_value=manifest),
-                  patch.object(materials, "instantiate_materials", side_effect=instantiate),
-                  patch.object(materials, "verify_materials", side_effect=lambda path: {**manifest, "material_root": str(path / "material")}),
-                  patch.object(batch, "execute_sample", side_effect=execute), redirect_stdout(io.StringIO())):
-                result, saved = batch.run_research("wechat-v1", root=root)
-            self.assertEqual(len(result["units"]), 24)
-            self.assertEqual(sum(len(unit["turns"]) for unit in result["units"]), 56)
-            self.assertEqual(len({unit["sample_run_id"] for unit in result["units"]}), 24)
-            self.assertTrue(all(unit["verdict"] == "pending_review" for unit in result["units"]))
-            self.assertEqual(result["framework_errors"], [])
-            self.assertEqual({path.name for path in saved}, {"result.json", "report.md", "review-template.json", "review.md"})
-            self.assertTrue((saved[0].parent / "pilot-gate.json").is_file())
-            for sample in result["batch"]["samples"]:
-                self.assertTrue((Path(sample["directory"]) / "result.json").is_file())
-
-    def test_missing_configuration_blocks_without_worker(self):
-        with TemporaryDirectory() as temporary:
-            with (patch.object(batch, "collect_baseline", return_value={}),
-                  patch.object(batch, "load_connection", side_effect=ValueError("missing_credentials")),
-                  patch.object(batch, "execute_sample") as execute, redirect_stderr(io.StringIO())):
-                result, saved = batch.run_research("wechat-v1", root=Path(temporary))
-            execute.assert_not_called()
-            self.assertTrue(all(unit["execution_status"] == "blocked" for unit in result["units"]))
-            self.assertEqual(len(result["units"]), 24)
-            self.assertTrue(any(path.name == "report.md" for path in saved))
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_unavailable_plan_directory_does_not_start(self):
+        with TemporaryDirectory() as temp,patch.object(Path,'mkdir',side_effect=PermissionError()),\
+             patch.object(agent,'prepare') as prepare,patch.object(runner,'collect_baseline',return_value={}):
+            result,saved=runner.run_benchmark('second-project',root=Path(temp),registry={'second-project':lambda:deepcopy(SUITE)})
+        prepare.assert_not_called();self.assertEqual(saved,[]);self.assertEqual(exit_code(result),2)

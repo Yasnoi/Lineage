@@ -7,12 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from benchmarks.common import atomic_write_json, sha256_file
-from benchmarks.results import known, unknown, summarize
-from benchmarks.research.contracts import (
+from benchmarks.core.files import atomic_write_json, sha256_file
+from benchmarks.core.contracts import known, unknown, summarize
+from benchmarks.reporting.tasks import (
     validate_research_result, summarize_research, research_exit_code,
 )
-from benchmarks.research.review import (
+from benchmarks.evaluators.review import (
     ReviewSaveError, apply_review, import_review, make_review_packet,
 )
 
@@ -55,7 +55,7 @@ class ReviewTest(unittest.TestCase):
                        "answer_sha256": sha256_file(self.answer), "process_evidence": []}],
         }
         self.result = {
-            "schema_version": "2", "run_id": "fixture-evaluation", "started_at": "2026-09-27T00:00:00+00:00",
+            "schema_version": "3", "run_id": "fixture-evaluation", "started_at": "2026-09-27T00:00:00+00:00",
             "ended_at": "2026-09-27T00:00:01+00:00", "selected_suites": ["test-only"],
             "baseline": {}, "units": [unit], "summary": summarize([unit]), "framework_errors": [],
         }
@@ -198,7 +198,7 @@ class ReviewTest(unittest.TestCase):
         review = self.completed_review()
         review_path = self.directory / "filled.json"
         atomic_write_json(review_path, review)
-        with patch("benchmarks.research.review.atomic_write_text", side_effect=OSError("injected")):
+        with patch("benchmarks.evaluators.review.atomic_write_text", side_effect=OSError("injected")):
             with self.assertRaises(ReviewSaveError) as caught:
                 import_review(self.path, review_path, rubric=RUBRIC)
         self.assertEqual(set(caught.exception.saved), {"review", "result"})

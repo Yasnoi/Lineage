@@ -1,0 +1,25 @@
+{
+  "unit_id": "module-purpose",
+  "case_id": "module-purpose",
+  "version": "2",
+  "title": "模块到需求的反向追溯",
+  "capabilities": [
+    "FR-06",
+    "reverse_traceability",
+    "design"
+  ],
+  "turns": [
+    "请仅依据本次项目目录中的文档和代码完成研究。code/ 是模板，requirements/ 是需求资料；来源说明见 SOURCE_INDEX.md。按问题需要查阅材料，给出文件和函数或段落定位。区分文档记载、推断、建议和证据不足；没有执行测试时不得声称验证通过。\n\n请解释 code/miniprogram/services/collection-service.ts 与 code/miniprogram/domain/form.ts 的职责和关键设计分别服务于哪些项目要求。按“代码行为／对应要求／关联理由／证据与不确定性”组织，不要只逐行翻译代码。",
+    "针对你上轮最重要的两项设计关联，补充调用关系和边界条件。哪些设计动机有文档记载，哪些只是根据实现推断？"
+  ],
+  "settings_overrides": {},
+  "mechanism": null,
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "reasoning",
+    "uncertainty_boundaries",
+    "execution_consistency",
+    "constraints_history"
+  ]
+}

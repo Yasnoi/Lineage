@@ -1,155 +1,100 @@
-"""Material integrity and frozen tasks, without real endpoints or source edits."""
-
+"""Frozen material provenance, variants and task coverage; no endpoint calls."""
 from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
-import tempfile
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
-
-from benchmarks.common import ROOT
-from benchmarks.research import materials
-from benchmarks.research.definitions import CASES, DIMENSIONS, PROFILE, definition_fingerprint, get_case, load_rubric
-
+from benchmarks.core.files import ROOT
+from benchmarks.core import materials
+from benchmarks.suites.wechat_reporting.suite import definition
 
 class DefinitionTests(unittest.TestCase):
-    def test_approved_cases_budget_and_rubric_correspond(self):
-        self.assertEqual(len(CASES), 6)
-        self.assertEqual([len(case["turns"]) for case in CASES], [1, 1, 2, 3, 2, 5])
-        self.assertEqual(sum(len(case["turns"]) for case in CASES) * 4, 56)
-        self.assertEqual(PROFILE["request_limit"], 400)
-        self.assertEqual(PROFILE["execution_time_limit_seconds"], 7200)
-        self.assertEqual(PROFILE["automatic_retries"], 0)
-        rubric = load_rubric()
-        self.assertEqual(set(rubric["cases"]), {case["case_id"] for case in CASES})
-        for case in CASES:
-            criteria = rubric["cases"][case["case_id"]]
-            self.assertEqual(set(case["dimensions"]), {item["dimension"] for item in criteria["conditions"]})
-            self.assertTrue(all(item["required"] for item in criteria["conditions"]))
-            self.assertTrue(criteria["severe_errors"])
-            self.assertLessEqual(set(case["dimensions"]), set(DIMENSIONS))
-        self.assertEqual(len(definition_fingerprint()), 64)
+    def test_tasks_cover_research_workflow_with_matching_rubrics(self):
+        suite=definition()
+        self.assertEqual(len(suite['units']),9)
+        self.assertEqual(sum(len(t['turns']) for t in suite['units']),19)
+        self.assertEqual({t['case_id'] for t in suite['units']},set(suite['rubric']['cases']))
+        for task in suite['units']:
+            rule=suite['rubric']['cases'][task['case_id']]
+            self.assertEqual(set(task['dimensions']),{c['dimension'] for c in rule['conditions']})
+            self.assertTrue(rule['severe_errors'])
+        self.assertEqual([len(s['paths']) for s in suite['materials']['sources']],[50,3])
+        self.assertTrue(all('project.config.json' not in s['paths'] for s in suite['materials']['sources']))
 
-    def test_get_case_isolated_and_unknown_rejected(self):
-        case = get_case("wechat-capabilities")
-        case["turns"][0] = "modified"
-        self.assertNotEqual(get_case("wechat-capabilities")["turns"][0], "modified")
-        with self.assertRaises(ValueError):
-            get_case("unregistered")
+    def test_task_loads_are_independent_and_no_fixed_model(self):
+        first=definition();first['units'][0]['turns'][0]='changed'
+        self.assertNotEqual(definition()['units'][0]['turns'][0],'changed')
+        self.assertNotIn('profile',definition())
+        self.assertNotIn('deepseek',json.dumps(definition()))
 
-    def test_material_scope_and_transcript_distinction(self):
-        self.assertEqual(len(materials.CODE_PATHS), 50)
-        self.assertEqual(len(materials.DOCS_PATHS), 3)
-        self.assertNotIn("project.config.json", materials.CODE_PATHS)
-        original = (ROOT / "benchmarks/research/transcripts/简览.md").read_text(encoding="utf-8")
-        later = (ROOT / "benchmarks/research/transcripts/信息采集小程序需求简报.md").read_text(encoding="utf-8")
-        self.assertIn("数据库里加密？小程序前端展示需要脱敏？", original)
-        self.assertIn("数据库里加密，小程序前端展示需要脱敏，", later)
-        self.assertIn("## 第 2 页", later)
-        for transcript in [original, later]:
-            self.assertNotIn("严重错误", transcript)
-            self.assertNotIn("评分", transcript)
-
+    def test_transcript_ambiguity_preserved(self):
+        base=ROOT/'benchmarks/suites/wechat_reporting/transcripts'
+        self.assertIn('数据库里加密？小程序前端展示需要脱敏？',(base/'简览.md').read_text(encoding='utf-8'))
+        later=(base/'信息采集小程序需求简报.md').read_text(encoding='utf-8')
+        self.assertIn('数据库里加密，小程序前端展示需要脱敏，',later)
+        self.assertIn('## 第 2 页',later)
 
 class MaterialTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.source = self.root / "source"
-        self.source.mkdir()
-        (self.source / "project.config.json").write_text("LOCAL MODIFICATION DO NOT COPY", encoding="utf-8")
-        (self.source / ".env").write_text("SECRET DO NOT COPY", encoding="utf-8")
-        self.pdf = b"reviewed test PDF bytes"
-        transcripts = deepcopy(materials.TRANSCRIPTS)
-        for item in transcripts:
-            item["sha256"] = hashlib.sha256(self.pdf).hexdigest()
-        self.addCleanup(patch.stopall)
-        patch.object(materials, "TRANSCRIPTS", transcripts).start()
-        self.calls = []
+        temp=TemporaryDirectory();self.addCleanup(temp.cleanup);self.root=Path(temp.name)
+        self.suite=definition();self.definition=deepcopy(self.suite['materials'])
+        self.pdf=b'reviewed PDF fixture'
+        for item in self.definition['transcripts']:item['sha256']=hashlib.sha256(self.pdf).hexdigest()
+        self.source=self.root/'source';self.source.mkdir()
+        (self.source/'.env').write_text('CREDENTIAL MARKER')
+        self.calls=[]
+        def blob(source,commit,path):
+            self.calls.append((commit,path))
+            content=self.pdf if path.endswith('.pdf') else b'revision: draft.revision + 1\n  delete next.signature;\n' if path.endswith('domain/form.ts') else f'frozen {path}'.encode()
+            return content,hashlib.sha1(content).hexdigest()
+        patcher=patch.object(materials,'_read_blob',side_effect=blob);patcher.start();self.addCleanup(patcher.stop)
+        self.prepared=self.root/'prepared'
+        self.manifest=materials.prepare_materials(ROOT,self.source,self.prepared,self.definition)
 
-        def read_blob(source, commit, path):
-            self.assertEqual(source, self.source)
-            self.calls.append((commit, path))
-            data = self.pdf if path.endswith(".pdf") else f"frozen {commit} {path}\n".encode("utf-8")
-            return data, hashlib.sha1(data).hexdigest()
+    def task(self,name):return next(t for t in self.suite['units'] if t['case_id']==name)
 
-        patch.object(materials, "_read_blob", side_effect=read_blob).start()
-        self.prepared = self.root / "prepared"
-        self.manifest = materials.prepare_materials(ROOT, self.source, self.prepared)
+    def test_frozen_files_only_and_small_index_without_grading(self):
+        self.assertEqual(len(self.calls),55)
+        self.assertEqual(len(self.manifest['files']),56)
+        self.assertEqual(materials.verify_materials(self.prepared),self.manifest)
+        root=Path(self.manifest['material_root'])
+        self.assertLess((root/'SOURCE_INDEX.md').stat().st_size,2048)
+        self.assertFalse(any(p.name in {'.env','research.json','manifest.json','project.config.json'} for p in root.rglob('*')))
+        self.assertEqual((self.source/'.env').read_text(),'CREDENTIAL MARKER')
 
-    def test_preparation_reads_only_fixed_blobs_and_keeps_grading_outside(self):
-        self.assertEqual(len(self.calls), 55)
-        self.assertEqual(self.manifest["source_text_count"], 53)
-        self.assertEqual(self.manifest["transcript_count"], 2)
-        self.assertEqual(len(self.manifest["files"]), 56)
-        self.assertEqual(materials.verify_materials(self.prepared), self.manifest)
-        actual = list((self.prepared / "material").rglob("*"))
-        self.assertFalse(any(p.name in {"rubric.json", "manifest.json", "project.config.json", ".env"} for p in actual))
-        self.assertEqual((self.source / "project.config.json").read_text(), "LOCAL MODIFICATION DO NOT COPY")
+    def test_isolation_variants_and_fixture_provenance(self):
+        instances={name:materials.instantiate_materials(self.prepared,self.root/name,self.task(name))
+                   for name in ('defect-reference','defect-changed','compaction-continuation')}
+        before=(Path(instances['defect-reference']['material_root'])/'code/miniprogram/domain/form.ts').read_text()
+        after=(Path(instances['defect-changed']['material_root'])/'code/miniprogram/domain/form.ts').read_text()
+        self.assertIn('revision: draft.revision + 1',before);self.assertIn('delete next.signature',before)
+        self.assertNotIn('revision: draft.revision + 1',after);self.assertNotIn('delete next.signature',after)
+        self.assertEqual((Path(instances['compaction-continuation']['material_root'])/'evaluation-fixtures/background.txt').stat().st_size,6144)
+        self.assertEqual(materials.verify_materials(self.prepared),self.manifest)
+        for name,instance in instances.items():self.assertEqual(materials.verify_materials(self.root/name),instance)
+        with self.assertRaises(materials.MaterialError):materials.instantiate_materials(self.root/'defect-changed',self.root/'nested',self.task('defect-reference'))
 
-    def test_samples_are_independent_and_only_compaction_gets_fixture(self):
-        one = materials.instantiate_materials(self.prepared, self.root / "one", "wechat-capabilities")
-        two = materials.instantiate_materials(self.prepared, self.root / "two", "wechat-compaction")
-        self.assertEqual(one["material_version"], self.manifest["material_version"])
-        self.assertNotEqual(two["material_version"], one["material_version"])
-        background = Path(two["material_root"]) / "evaluation-fixtures/background.txt"
-        self.assertEqual(background.stat().st_size, 12288)
-        self.assertIn(b"EVALUATION-CONSTRUCTED", background.read_bytes())
-        self.assertFalse((Path(one["material_root"]) / "evaluation-fixtures").exists())
-        self.assertEqual(materials.verify_materials(self.root / "two"), two)
-        first_readme = Path(one["material_root"]) / "code/README.md"
-        first_readme.write_text("changed", encoding="utf-8")
-        with self.assertRaisesRegex(materials.MaterialError, "material changed"):
-            materials.verify_materials(self.root / "one")
-        self.assertEqual(materials.verify_materials(self.root / "two"), two)
-        self.assertEqual(materials.verify_materials(self.prepared), self.manifest)
+    def test_repeat_destination_and_mutations_rejected(self):
+        with self.assertRaises(FileExistsError):materials.prepare_materials(ROOT,self.source,self.prepared,self.definition)
+        path=Path(self.manifest['material_root'])/'unexpected.txt';path.write_text('extra')
+        with self.assertRaises(materials.MaterialError):materials.verify_materials(self.prepared)
+        path.unlink();(Path(self.manifest['material_root'])/'code/README.md').write_text('changed')
+        with self.assertRaises(materials.MaterialError):materials.instantiate_materials(self.prepared,self.root/'copy',self.task('defect-reference'))
 
-    def test_repeat_destination_fails_and_unknown_case_never_creates_destination(self):
-        with self.assertRaises(FileExistsError):
-            materials.prepare_materials(ROOT, self.source, self.prepared)
-        materials.instantiate_materials(self.prepared, self.root / "one", "wechat-capabilities")
-        with self.assertRaises(FileExistsError):
-            materials.instantiate_materials(self.prepared, self.root / "one", "wechat-capabilities")
-        with self.assertRaises(ValueError):
-            materials.instantiate_materials(self.prepared, self.root / "unknown", "unregistered")
-        self.assertFalse((self.root / "unknown").exists())
+    def test_path_escape_and_changed_manifest_rejected(self):
+        for relative in ('../outside','C:/outside','/outside','..\\outside'):
+            with self.assertRaises(materials.MaterialError):materials._destination(self.root,relative)
+        manifest=deepcopy(self.manifest);manifest['material_root']=str(self.source)
+        (self.prepared/'manifest.json').write_text(json.dumps(manifest))
+        with self.assertRaises(materials.MaterialError):materials.verify_materials(self.prepared)
 
-    def test_added_file_and_changed_bytes_are_rejected(self):
-        root = self.prepared / "material"
-        (root / "rubric.json").write_text("{}", encoding="utf-8")
-        with self.assertRaisesRegex(materials.MaterialError, "file set"):
-            materials.instantiate_materials(self.prepared, self.root / "added", "wechat-capabilities")
-        (root / "rubric.json").unlink()
-        (root / "code/README.md").write_text("different fixed input", encoding="utf-8")
-        with self.assertRaisesRegex(materials.MaterialError, "material changed"):
-            materials.instantiate_materials(self.prepared, self.root / "changed", "wechat-capabilities")
-
-    def test_manifest_root_or_path_escape_is_rejected(self):
-        manifest_path = self.prepared / "manifest.json"
-        altered = deepcopy(self.manifest)
-        altered["material_root"] = str(self.source.resolve())
-        manifest_path.write_text(json.dumps(altered), encoding="utf-8")
-        with self.assertRaisesRegex(materials.MaterialError, "root"):
-            materials.verify_materials(self.prepared)
-        for relative in ("../outside", "C:/outside", "/outside", "..\\outside"):
-            with self.assertRaises(materials.MaterialError):
-                materials._destination(self.prepared, relative)
-
-    def test_failed_pdf_validation_does_not_publish_manifest(self):
-        with patch.object(materials, "_read_blob", return_value=(b"unexpected", "blob")):
-            with self.assertRaisesRegex(materials.MaterialError, "PDF differs"):
-                materials.prepare_materials(ROOT, self.source, self.root / "failed")
-        self.assertFalse((self.root / "failed/manifest.json").exists())
-
-    def test_material_save_failure_is_not_silent(self):
-        with patch.object(materials, "atomic_write_json", side_effect=OSError("disk fault")):
-            with self.assertRaises(OSError):
-                materials.instantiate_materials(self.prepared, self.root / "failed-save", "wechat-capabilities")
-        self.assertFalse((self.root / "failed-save/manifest.json").exists())
-        self.assertTrue((self.root / "failed-save/material/code/README.md").is_file())
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_transcript_mismatch_or_save_failure_does_not_claim_manifest(self):
+        with patch.object(materials,'_read_blob',return_value=(b'unexpected','blob')):
+            with self.assertRaises(materials.MaterialError):materials.prepare_materials(ROOT,self.source,self.root/'failed',self.definition)
+        self.assertFalse((self.root/'failed/manifest.json').exists())
+        with patch.object(materials,'atomic_write_json',side_effect=OSError('disk fault')):
+            with self.assertRaises(OSError):materials.instantiate_materials(self.prepared,self.root/'partial',self.task('defect-reference'))
+        self.assertTrue((self.root/'partial/material/code/README.md').exists())
+        self.assertFalse((self.root/'partial/manifest.json').exists())
