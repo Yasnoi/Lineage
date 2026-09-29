@@ -21,7 +21,7 @@ from dataclasses import replace
 from io import StringIO
 from langgraph.errors import NodeCancelledError
 from lineage_agent.agent import runtime
-from lineage_agent.config.settings import ConfigurationError, load_settings
+from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, parse_response
 from lineage_agent.tools.types import ToolArgumentError
@@ -82,6 +82,39 @@ async def check_refusal():
         assert state["error_code"] == "invalid_response"
 
 async def check_direct_config():
+    defaults = {
+        "timeout_seconds": 300.0, "max_model_calls": 30, "directory_max_entries": 1000,
+        "text_max_bytes": 131072, "text_total_max_bytes": 1048576,
+        "context_budget_tokens": 250000, "max_output_tokens": 16384,
+        "context_safety_margin_tokens": 8192,
+    }
+    direct = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name)
+    assert {key: getattr(direct, key) for key in defaults} == defaults
+    with TemporaryDirectory() as temporary:
+        env_file = Path(temporary) / "fixture.env"
+        connection = {"BASE_URL": SETTINGS.base_url, "MODEL_NAME": SETTINGS.model_name}
+        with patch.dict(os.environ, connection, clear=True):
+            loaded = load_settings(env_file)
+        assert {key: getattr(loaded, key) for key in defaults} == defaults
+        file_values = {**defaults, "timeout_seconds": 1.5, "max_model_calls": 3,
+                       "directory_max_entries": 7, "text_max_bytes": 101,
+                       "text_total_max_bytes": 202, "context_budget_tokens": 40000,
+                       "max_output_tokens": 7000, "context_safety_margin_tokens": 99}
+        env_file.write_text("\n".join(
+            f"{key}={value}" for key, value in {
+                **connection, **{key.upper(): value for key, value in file_values.items()},
+            }.items()
+        ), encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            loaded = load_settings(env_file)
+        assert {key: getattr(loaded, key) for key in defaults} == file_values
+        process_values = {key: value + 1 for key, value in file_values.items()}
+        with patch.dict(os.environ, {key.upper(): str(value) for key, value in process_values.items()}, clear=True):
+            loaded = load_settings(env_file)
+            explicit = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, **file_values)
+        assert {key: getattr(loaded, key) for key in defaults} == process_values
+        assert {key: getattr(explicit, key) for key in defaults} == file_values
+        assert {key: getattr(replace(direct, **file_values), key) for key in defaults} == file_values
     for changes in (
         {"base_url": "file:///tmp"}, {"base_url": "https://host:99999"},
         {"model_name": " "}, {"timeout_seconds": True},

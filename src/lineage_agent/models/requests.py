@@ -3,6 +3,7 @@
 from copy import deepcopy
 from typing import Any
 
+from lineage_agent.config.settings import DEFAULT_MAX_OUTPUT_TOKENS
 from lineage_agent.models.types import ModelInput, ToolDefinition
 
 
@@ -13,7 +14,7 @@ def prepare_request(
     tools: list[ToolDefinition] | None = None,
     instructions: str | None = None,
     tool_choice: str | None = None,
-    max_output_tokens: int = 4096,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> dict[str, Any]:
     """Do not measure a filtered tracing projection or reconstruct after checking."""
     request: dict[str, Any] = {

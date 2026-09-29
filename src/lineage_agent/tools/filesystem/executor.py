@@ -3,6 +3,9 @@
 from pathlib import Path
 from typing import Any
 
+from lineage_agent.config.settings import (
+    DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_TEXT_MAX_BYTES, DEFAULT_TEXT_TOTAL_MAX_BYTES,
+)
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, directory_executor
 from lineage_agent.tools.filesystem.paths import bind_project_root
 from lineage_agent.tools.filesystem.text import TEXT_TOOL, TextExecutor
@@ -10,8 +13,8 @@ from lineage_agent.tools.types import ToolArgumentError, ToolExecutor
 
 
 def create_filesystem_executor(
-    root: str | Path, *, max_entries: int = 100, max_bytes: int = 65536,
-    max_total_bytes: int = 262144,
+    root: str | Path, *, max_entries: int = DEFAULT_DIRECTORY_MAX_ENTRIES,
+    max_bytes: int = DEFAULT_TEXT_MAX_BYTES, max_total_bytes: int = DEFAULT_TEXT_TOTAL_MAX_BYTES,
 ) -> ToolExecutor:
     """Bind both capabilities; run_agent's supplied schemas control exposure."""
     project_root = bind_project_root(root)

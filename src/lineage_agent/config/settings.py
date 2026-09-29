@@ -9,6 +9,16 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
+DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_MAX_MODEL_CALLS = 30
+DEFAULT_DIRECTORY_MAX_ENTRIES = 1000
+DEFAULT_TEXT_MAX_BYTES = 131072
+DEFAULT_TEXT_TOTAL_MAX_BYTES = 1048576
+DEFAULT_CONTEXT_BUDGET_TOKENS = 250000
+DEFAULT_MAX_OUTPUT_TOKENS = 16384
+DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 8192
+
+
 class ConfigurationError(ValueError):
     """A required configuration value is missing or invalid."""
 
@@ -33,16 +43,16 @@ class ModelSettings:
 
     base_url: str
     model_name: str
-    timeout_seconds: float = 60.0
-    max_model_calls: int = 5
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    max_model_calls: int = DEFAULT_MAX_MODEL_CALLS
     log_dir: Path = Path("logs")
     project_root: Path | None = None
-    directory_max_entries: int = 100
-    text_max_bytes: int = 65536
-    text_total_max_bytes: int = 262144
-    context_budget_tokens: int = 32768
-    max_output_tokens: int = 4096
-    context_safety_margin_tokens: int = 1024
+    directory_max_entries: int = DEFAULT_DIRECTORY_MAX_ENTRIES
+    text_max_bytes: int = DEFAULT_TEXT_MAX_BYTES
+    text_total_max_bytes: int = DEFAULT_TEXT_TOTAL_MAX_BYTES
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    context_safety_margin_tokens: int = DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
     opaque_fallback_tokens: int = 4096
     context_keep_recent_turns: int = 2
     summary_target_percent: int = 40
@@ -148,26 +158,26 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     base_url = os.environ.get("BASE_URL", "").strip()
     model_name = os.environ.get("MODEL_NAME", "").strip()
     try:
-        timeout_seconds = float(os.environ.get("TIMEOUT_SECONDS", "60"))
+        timeout_seconds = float(os.environ.get("TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
     except ValueError as exc:
         raise ConfigurationError("TIMEOUT_SECONDS 必须是有限正数。") from exc
 
     try:
-        max_model_calls = int(os.environ.get("MAX_MODEL_CALLS", "5"))
+        max_model_calls = int(os.environ.get("MAX_MODEL_CALLS", str(DEFAULT_MAX_MODEL_CALLS)))
     except ValueError as exc:
         raise ConfigurationError("MAX_MODEL_CALLS 必须是正整数。") from exc
 
     try:
-        directory_max_entries = int(os.environ.get("DIRECTORY_MAX_ENTRIES", "100"))
+        directory_max_entries = int(os.environ.get("DIRECTORY_MAX_ENTRIES", str(DEFAULT_DIRECTORY_MAX_ENTRIES)))
     except ValueError as exc:
         raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。") from exc
 
     try:
-        text_max_bytes = int(os.environ.get("TEXT_MAX_BYTES", "65536"))
+        text_max_bytes = int(os.environ.get("TEXT_MAX_BYTES", str(DEFAULT_TEXT_MAX_BYTES)))
     except ValueError as exc:
         raise ConfigurationError("TEXT_MAX_BYTES 必须是正整数。") from exc
     try:
-        text_total_max_bytes = int(os.environ.get("TEXT_TOTAL_MAX_BYTES", "262144"))
+        text_total_max_bytes = int(os.environ.get("TEXT_TOTAL_MAX_BYTES", str(DEFAULT_TEXT_TOTAL_MAX_BYTES)))
     except ValueError as exc:
         raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。") from exc
 
@@ -185,9 +195,9 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
 
     budget_values: dict[str, int] = {}
     for name, default in (
-        ("CONTEXT_BUDGET_TOKENS", 32768),
-        ("MAX_OUTPUT_TOKENS", 4096),
-        ("CONTEXT_SAFETY_MARGIN_TOKENS", 1024),
+        ("CONTEXT_BUDGET_TOKENS", DEFAULT_CONTEXT_BUDGET_TOKENS),
+        ("MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+        ("CONTEXT_SAFETY_MARGIN_TOKENS", DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS),
         ("OPAQUE_FALLBACK_TOKENS", 4096),
         ("CONTEXT_KEEP_RECENT_TURNS", 2),
         ("SUMMARY_TARGET_PERCENT", 40),

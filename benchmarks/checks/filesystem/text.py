@@ -131,6 +131,28 @@ async def check_limits(root):
     assert result_envelopes(state)[0]["error"]["reason_code"] == "file_too_large"
     assert opened == [root / "short.txt", root / "plain private.txt"] and probes[0].reads == []
     print(json.dumps({"scenario": "opened_descriptor_size_injection", "fault_source": "fstat size injection after real open", "run_id": state["run_id"]}))
+    with TemporaryDirectory(prefix="lineage-default-text-") as temporary:
+        expanded = Path(temporary)
+        (expanded / "exact.txt").write_bytes(b"x" * 131072)
+        (expanded / "over.txt").write_bytes(b"y" * 131073)
+        original = snapshot(expanded)
+        for factory in (create_text_executor, create_filesystem_executor):
+            with monitor_reads(expanded) as (opened, probes):
+                state, client, _ = await run_case(
+                    f"production_text_budget_{factory.__name__}", expanded,
+                    [response(text_call("default_exact", "exact.txt")),
+                     response(text_call("default_over", "over.txt")), response(message())],
+                    executor=factory(expanded), tools=[TEXT_TOOL],
+                )
+            exact, rejected = result_envelopes(state)
+            value = json.loads(exact["result"])
+            assert value["content"] == "x" * 131072 and value["bytes_read"] == 131072
+            assert value["complete"] is True and rejected["error"]["reason_code"] == "file_too_large"
+            assert opened == [expanded / "exact.txt"] and len(probes) == 1
+            assert sum(count for _, count in probes[0].reads) == 131072
+            counts(state, 3, 2, 2)
+            assert client.requests[1]["input"][-1] == outputs(state)[0]
+            assert snapshot(expanded) == original
     for value in (0, -1, True, False, 1.5, "64", None):
         for factory in (create_text_executor, create_filesystem_executor):
             try:
@@ -344,7 +366,7 @@ async def check_configuration_and_cli(root, base):
         assert load_settings(env).text_max_bytes == 1234
     with patch.dict(os.environ, {"TEXT_MAX_BYTES": "4321"}, clear=True):
         assert load_settings(env).text_max_bytes == 4321
-    assert SETTINGS.text_max_bytes == 65536
+    assert SETTINGS.text_max_bytes == 131072
     for value in ("0", "-1", "false", "1.5", ""):
         with patch.dict(os.environ, {"TEXT_MAX_BYTES": value}, clear=True):
             try:

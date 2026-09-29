@@ -17,7 +17,11 @@ from uuid import uuid4
 
 CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 
-SETTINGS = replace(BASE_SETTINGS, log_dir=CHECK_DIR)
+# Boundary fixtures retain their original scale when production defaults grow.
+SETTINGS = replace(
+    BASE_SETTINGS, log_dir=CHECK_DIR, context_budget_tokens=32768,
+    max_output_tokens=4096, context_safety_margin_tokens=1024,
+)
 
 RUNS = []
 

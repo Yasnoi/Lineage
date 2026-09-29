@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-from openai import AsyncOpenAI
+from openai import APITimeoutError, AsyncOpenAI
 
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models import responses
@@ -43,6 +43,8 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
 
         def construct(**kwargs):
             self.assertEqual(kwargs["max_retries"], 0)
+            self.assertEqual(SETTINGS.timeout_seconds, 300.0)
+            self.assertEqual(kwargs["timeout"], 300.0)
             return AsyncOpenAI(http_client=http, **kwargs)
 
         # Exercise the production no-retry client configuration. Only a local
@@ -58,6 +60,9 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         def capture(request):
             self.assertEqual(request.url.host, "compact.invalid")
             self.assertEqual(request.url.path, "/v1/responses")
+            self.assertEqual(request.extensions["timeout"], {
+                "connect": 300.0, "read": 300.0, "write": 300.0, "pool": 300.0,
+            })
             bodies.append(json.loads(request.content))
             return httpx.Response(200, json=completed_response())
 
@@ -117,6 +122,24 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "http_error")
         self.assertEqual(bodies, [request])
         self.assertTrue(is_summary_request(bodies[0]))
+        self.assertTrue(http.is_closed)
+
+        # Exercise the SDK timeout path immediately, without a real 300-second
+        # wait or network access, while preserving the configured HTTP deadline.
+        bodies = []
+
+        def timed_out(request):
+            bodies.append(json.loads(request.content))
+            self.assertEqual(request.extensions["timeout"]["read"], 300.0)
+            raise httpx.ReadTimeout("offline injected timeout", request=request)
+
+        client, http = self.make_client(timed_out)
+        async with client:
+            with self.assertRaises(responses.ModelError) as raised:
+                await responses.send_prepared_response(client, request, purpose="summary")
+        self.assertEqual(raised.exception.code, "model_timeout")
+        self.assertIsInstance(raised.exception.__cause__, APITimeoutError)
+        self.assertEqual(bodies, [request])
         self.assertTrue(http.is_closed)
 
     def test_summary_recognition_requires_canonical_dynamic_protocol(self):

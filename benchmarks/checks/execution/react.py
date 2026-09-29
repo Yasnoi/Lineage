@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import httpx
 from benchmarks.checks.support.events import check_group, observe_harness, observe_state
 from benchmarks.checks.support.runtime import (
     CHECK_DIR,
@@ -27,6 +28,7 @@ from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ConfigurationError
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.responses import ModelError, generate_response
+from openai import APITimeoutError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,6 +55,7 @@ async def check_unified_model_input():
     assert result["text"] == "" and result["tool_calls"][0]["call_id"] == "call_1"
     for request in client.requests:
         assert request["stream"] is False and request["store"] is False
+        assert request["max_output_tokens"] == 16384
         assert "previous_response_id" not in request
 
 async def check_tool_loop():
@@ -107,7 +110,8 @@ async def check_multiple_requests_and_context():
     assert [item["call_id"] for item in outputs(state)] == ["a", "b"]
 
 async def check_limits():
-    for limit in (1, 5, 15):
+    assert SETTINGS.max_model_calls == 30
+    for limit in (1, 5, 15, SETTINGS.max_model_calls):
         state, _ = await run(
             [response(call(f"call_{i}")) for i in range(limit)],
             tools=[TOOL], execute_tool=fixed_tool, limit=limit,
@@ -257,6 +261,16 @@ async def check_model_failures():
     assert state["result"] is None and state["error"]
     assert state["usage_totals"]["total_tokens"] == 12
     assert state["usage_totals"]["missing_usage_calls"] == 1
+    state, client = await run(
+        [response(call()), APITimeoutError(request=httpx.Request("POST", "https://unused.invalid/v1/responses"))],
+        tools=[TOOL], execute_tool=fixed_tool,
+    )
+    counts(state, 2, 1, 1, "error")
+    assert state["error_code"] == "model_timeout" and client.closed
+    assert state["usage_totals"]["total_tokens"] == 12
+    assert state["usage_totals"]["missing_usage_calls"] == 1
+    assert len(client.requests) == 2 and len(outputs(state)) == 1
+    assert next(event for event in read_events(state) if event["event"] == "model.failed")["stage"] == "model_request"
     state, _ = await run([response(message("partial"), status="incomplete")])
     counts(state, 1, 0, 0, "error")
     assert state["result"]["raw_response"]["status"] == "incomplete"

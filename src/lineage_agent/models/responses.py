@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from openai import AsyncOpenAI, APIConnectionError, APIError, APIStatusError, APITimeoutError
 from openai.types.responses import Response
 
-from lineage_agent.config.settings import ConfigurationError, ModelSettings
+from lineage_agent.config.settings import DEFAULT_MAX_OUTPUT_TOKENS, ConfigurationError, ModelSettings
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.types import ModelInput, ModelResult, TokenUsage, ToolDefinition
 
@@ -78,7 +78,7 @@ async def generate_response(
     tracer: "RunTrace | None" = None,
     instructions: str | None = None,
     tool_choice: str | None = None,
-    max_output_tokens: int = 4096,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> ModelResult:
     """Compatibility entry point for a standalone Responses call."""
     request = prepare_request(

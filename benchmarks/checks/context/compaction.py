@@ -45,7 +45,7 @@ from hashlib import sha256
 from lineage_agent.agent import compaction, context, graph, runtime
 from lineage_agent.agent.sessions import SessionError, SessionManager
 from lineage_agent.agent.state import CompactionStatus
-from lineage_agent.config.settings import ConfigurationError, load_settings
+from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS, minimum_summary_message_bytes
 from lineage_agent.recording.trace_data import TraceSanitizer
@@ -443,15 +443,22 @@ async def check_summary_and_candidate_budget_boundaries():
 async def check_dynamic_summary_budgets():
     """Measure all dynamic terms from requests actually used by the graph."""
     observed = {}
+    production_defaults = ModelSettings(
+        base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=CHECK_DIR,
+    )
+    assert (production_defaults.context_budget_tokens, production_defaults.max_output_tokens,
+            production_defaults.context_safety_margin_tokens) == (250000, 16384, 8192)
     for label, overrides, prompt_size in (
         ("baseline", {}, 7000),
         ("window", {"context_budget_tokens": 24500}, 7000),
         ("output", {"max_output_tokens": 512}, 7000),
         ("fixed", {"max_model_calls": 1}, 7000),
         ("preserved", {}, 7200),
+        ("production_defaults", {}, 30000),
     ):
-        settings = replace(SETTINGS, **overrides)
-        manager, sid, old = await seed(settings=settings, prefix=f"dynamic_{label}")
+        settings = production_defaults if label == "production_defaults" else replace(SETTINGS, **overrides)
+        seed_sizes = {"prompt_size": 25000, "answer_size": 25000} if label == "production_defaults" else {}
+        manager, sid, old = await seed(settings=settings, prefix=f"dynamic_{label}", **seed_sizes)
         # The response deliberately exceeds the requested soft target. It is
         # accepted only if the complete reconstructed business request fits W.
         prompt = "CURRENT_QUESTION_MUST_REMAIN: " + "c" * prompt_size

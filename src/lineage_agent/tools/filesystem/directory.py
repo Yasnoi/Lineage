@@ -7,7 +7,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
-from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.config.settings import DEFAULT_DIRECTORY_MAX_ENTRIES, ConfigurationError
 from lineage_agent.models.types import ToolDefinition
 from lineage_agent.tools.filesystem.paths import (
     bind_project_root,
@@ -55,7 +55,7 @@ def _entry_type(info: os.stat_result) -> str:
     return "other"
 
 
-def create_directory_executor(root: str | Path, *, max_entries: int = 100) -> ToolExecutor:
+def create_directory_executor(root: str | Path, *, max_entries: int = DEFAULT_DIRECTORY_MAX_ENTRIES) -> ToolExecutor:
     """Bind access once for an agent run; this tool never reads configuration."""
     return directory_executor(bind_project_root(root), max_entries=max_entries)
 

@@ -21,26 +21,28 @@ Copy-Item .env.example .env
 BASE_URL=https://your-provider.example/v1
 API_KEY=your-api-key
 MODEL_NAME=your-model-name
-TIMEOUT_SECONDS=60
-MAX_MODEL_CALLS=5
-CONTEXT_BUDGET_TOKENS=32768
-MAX_OUTPUT_TOKENS=4096
-CONTEXT_SAFETY_MARGIN_TOKENS=1024
+TIMEOUT_SECONDS=300
+MAX_MODEL_CALLS=30
+CONTEXT_BUDGET_TOKENS=250000
+MAX_OUTPUT_TOKENS=16384
+CONTEXT_SAFETY_MARGIN_TOKENS=8192
 OPAQUE_FALLBACK_TOKENS=4096
 CONTEXT_KEEP_RECENT_TURNS=2
 SUMMARY_TARGET_PERCENT=40
 LOG_DIR=logs
 PROJECT_ROOT=
-DIRECTORY_MAX_ENTRIES=100
-TEXT_MAX_BYTES=65536
-TEXT_TOTAL_MAX_BYTES=262144
+DIRECTORY_MAX_ENTRIES=1000
+TEXT_MAX_BYTES=131072
+TEXT_TOTAL_MAX_BYTES=1048576
 ```
 
-`BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；超时默认为 60 秒且必须为有限正数，模型调用上限默认为 5 次且必须为正整数。连接地址、模型名称及超时由配置对象共同校验，直接构造与 dotenv 加载遵循相同规则；超时不接受布尔值。
+`BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；请求超时默认为 300 秒且必须为有限正数，业务模型调用上限默认为 30 次且必须为正整数。超时沿用 SDK 的请求超时语义，不是 Agent 整轮时限；本项目没有整轮时限配置。连接地址、模型名称及超时由配置对象共同校验，直接构造与 dotenv 加载遵循相同规则；超时不接受布尔值。
 
-`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为 100，`TEXT_MAX_BYTES` 默认为 65,536 字节（64 KiB），`TEXT_TOTAL_MAX_BYTES` 为每次运行成功读取的累计额度，默认 262,144 字节（256 KiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
+`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为每页 1000 条，`TEXT_MAX_BYTES` 默认为 131,072 字节（128 KiB），`TEXT_TOTAL_MAX_BYTES` 为每次运行成功读取的累计额度，默认 1,048,576 字节（1 MiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
 
-配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；已有进程环境变量优先。真实 `.env` 已加入忽略规则，连接配置本身不进入 Agent State 或应用日志；但根目录内的文件正文另受下述文件访问授权规则约束。
+累计读取许可不等于单次请求能够容纳全部资料。即使单文件不超过 128 KiB，包装、已有历史和当前轮其他工具结果也可能使后续请求超限。当前轮工具事实完整保留，按现有预算检查和 Compact 恢复或停止；不截断文件、丢弃结果或分块压缩，不能据此保证任意大文件任务完成。
+
+配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；优先顺序为进程环境、`.env`、生产默认值。直接构造 `ModelSettings` 或调用模型与工具便捷接口时，以显式参数为准，不自动读取环境。各生产入口共用预算默认值；升级不会覆盖已有 `.env` 或进程环境中的显式值。真实 `.env` 已加入忽略规则，连接配置本身不进入 Agent State 或应用日志；但根目录内的文件正文另受下述文件访问授权规则约束。
 
 ```powershell
 uv run lineage-agent "请用一句话介绍你自己"
@@ -135,12 +137,14 @@ asyncio.run(main())
 
 | 配置 | 默认值 | 含义 |
 | --- | ---: | --- |
-| `CONTEXT_BUDGET_TOKENS` | 32768 | 应用总预算，不能从模型别名推断为端点实际窗口 |
-| `MAX_OUTPUT_TOKENS` | 4096 | 输出预留及实际请求的输出上限 |
-| `CONTEXT_SAFETY_MARGIN_TOKENS` | 1024 | 协议转换及估算误差的安全余量 |
+| `CONTEXT_BUDGET_TOKENS` | 250000 | 十进制 250K 应用工作窗口，不能从模型别名推断为端点实际窗口 |
+| `MAX_OUTPUT_TOKENS` | 16384 | 输出预留及实际请求的输出上限，包含推理与可见回答 |
+| `CONTEXT_SAFETY_MARGIN_TOKENS` | 8192 | 协议转换及估算误差的安全余量 |
 | `OPAQUE_FALLBACK_TOKENS` | 4096 | 缺少可信来源 usage 时，每个 opaque 单元的预留 |
 
 这些值可通过环境变量或 `ModelSettings` 显式设置；额度为正整数，安全余量允许零，均拒绝布尔值。工作窗口必须大于业务输出预留与安全余量之和。
+
+默认组合的可用输入预算为 225424，输入中的 opaque 风险仍按既有规则计入。预算选值面向多步只读研究：30 次业务调用保留发现、读取和核对空间，250K 工作窗口与 16K 输出主动限制请求规模；读取额度和请求等待分别控制，不按同一倍数扩张。服务商最大值不直接成为应用默认值，真实任务完成率和消耗仍需另行评测。
 
 ```text
 所需预算 = 透明内容估算 + opaque 风险预留 + 输出预留 + 安全余量
@@ -163,7 +167,7 @@ asyncio.run(main())
 | `CONTEXT_KEEP_RECENT_TURNS` | 2 | 原样保留最近的完整有效用户轮次，不包含当前交互 |
 | `SUMMARY_TARGET_PERCENT` | 40 | 扣除全部保留内容后，摘要可用空间的软目标百分比，允许 `1–100` |
 
-上述配置不接受布尔值。旧的 `CONTEXT_TRIGGER_PERCENT`、`CONTEXT_TARGET_PERCENT`、`SUMMARY_MAX_OUTPUT_TOKENS`、`SUMMARY_MAX_BYTES` 已移除；环境或 `ModelSettings` 构造仍提供这些字段时明确报错，应删除并按新语义配置 `SUMMARY_TARGET_PERCENT`。工作窗口默认仍为 32768。
+上述配置不接受布尔值。旧的 `CONTEXT_TRIGGER_PERCENT`、`CONTEXT_TARGET_PERCENT`、`SUMMARY_MAX_OUTPUT_TOKENS`、`SUMMARY_MAX_BYTES` 已移除；环境或 `ModelSettings` 构造仍提供这些字段时明确报错，应删除并按新语义配置 `SUMMARY_TARGET_PERCENT`。
 
 对实际请求分别测量空历史开销 `F` 和全部保留历史的增量 `P`，计算摘要可用空间 `B = I − F − P`，软目标 `T = floor(B × SUMMARY_TARGET_PERCENT / 100)`。消息包装、来源标识、JSON 转义及插入分隔符均计入摘要占用；输出预留和安全余量只扣一次。摘要自己的请求也要独立计量，计入源资料、指令、输出预留和安全余量，超限时停止，不自动分块。
 
@@ -291,7 +295,7 @@ src/lineage_agent/
 
 初始上下文中的 `function_call` 与 `function_call_output` 必须使用非空字符串 `call_id`，请求先于结果且一一对应；缺失、重复或无法配对时返回错误终态，模型调用次数为零。其他协议项原样保留。模型响应不得夹带由应用生成的 `function_call_output`，否则按协议错误终止；字典形式的响应同样深拷贝，避免不同运行共享嵌套数据。输出消息只接受 `type="message"`、`role="assistant"`，其他角色、缺失角色、伪装输入消息或非消息项夹带角色均按协议错误拒绝，不进入后续上下文。合法 `refusal` 内容与 `output_text` 按顺序合为展示文本；纯拒答是有效回答，与请求失败区分。
 
-独立模型接口为 `await generate_response(client, model_name, input, *, tools=None, instructions=None, tool_choice=None, max_output_tokens=4096)`（可另注入追踪器）；该兼容入口只负责单次请求，完整的调用前预算检查通过 `run_agent` 或 `SessionManager.run_turn` 使用。图按普通或收尾策略准备请求，适用时包含 `instructions` 和 `tool_choice`，完成预算检查后调用 `send_prepared_response` 发送同一份参数。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
+独立模型接口为 `await generate_response(client, model_name, input, *, tools=None, instructions=None, tool_choice=None, max_output_tokens=16384)`（可另注入追踪器）；该兼容入口只负责单次请求，完整的调用前预算检查通过 `run_agent` 或 `SessionManager.run_turn` 使用。图按普通或收尾策略准备请求，适用时包含 `instructions` 和 `tool_choice`，完成预算检查后调用 `send_prepared_response` 发送同一份参数。工具定义使用 Responses 的 `type: "function"` 格式及 JSON Schema，不使用 Chat Completions 的工具格式。
 
 ## 目录列举
 
@@ -453,7 +457,7 @@ state = asyncio.run(run_agent(
 
 执行器返回非字符串同样计为一次执行尝试和一次失败，返回 `execution_error`；不自动将返回值转换成字符串或 JSON。同批成功、失败和拒绝结果均按原请求顺序关联，全部处理后才发起下一次模型请求。若写入拒绝或失败事件时日志故障，已有统计及已生成结果仍留在 State，剩余请求跳过且不再调用模型；State 中存在错误结果并不表示它已经回传。
 
-剩余调用次数包含即将发出的本次业务调用。大于一次时，普通业务请求不注入额度指令；只剩一次时，`instructions` 固定为“本次仅根据已有资料回答；资料不足时明确说明，不再请求工具。”，同时设置 `tool_choice="none"`。默认最多 5 次，`MAX_MODEL_CALLS=1` 时从第一次起就采用该收尾策略。调用次数、读取额度、用量及预算判断由 Agent 代码管理，并保留在 JSONL 和 Tracing 中，不改写消息或工具定义来逐轮播报。读取拒绝及失败仍作为关联原调用的工具事实进入模型上下文，不会随额度提示一并删除。
+剩余调用次数包含即将发出的本次业务调用。大于一次时，普通业务请求不注入额度指令；只剩一次时，`instructions` 固定为“本次仅根据已有资料回答；资料不足时明确说明，不再请求工具。”，同时设置 `tool_choice="none"`。默认最多 30 次，`MAX_MODEL_CALLS=1` 时从第一次起就采用该收尾策略。调用次数、读取额度、用量及预算判断由 Agent 代码管理，并保留在 JSONL 和 Tracing 中，不改写消息或工具定义来逐轮播报。读取拒绝及失败仍作为关联原调用的工具事实进入模型上下文，不会随额度提示一并删除。
 
 调用次数耗尽后不发起额外请求。若兼容端点在末轮仍返回工具请求，则保留请求事实，以 `max_model_calls` 结束，不执行该批工具，也不发起第 N+1 次请求。模型错误说明和阶段由固定错误码生成，超时、连接、HTTP 与协议错误可区分，不展示任意异常文本。模型或协议错误以 `error` 结束，返回已产生的上下文、计数、可取得的响应及 usage，而不是丢失失败节点的统计。配置或输入错误在调用模型前报告。摘要模型的固定任务指令和独立调用统计不受这一业务请求策略影响。
 
@@ -523,6 +527,8 @@ uv run --locked python -m benchmarks review logs/benchmarks/<运行ID> --file lo
 退出优先级为 `2 > 1 > 3 > 0`：2 表示执行/证据/保存故障、阻塞或适用覆盖缺口，1 表示有效未通过，3 表示仍待评审，0 表示选定范围完整通过且成功保存。断言失败后保留组事实和依赖未执行项，其他独立行为链可继续；记录或收尾不确定时停止。标签与失败环节不自动证明根因。
 
 运行、配置、结构、扩展和评审方法见 [Benchmark 使用说明](benchmarks/README.md)，原检查去向见 [覆盖映射](benchmarks/COVERAGE.md)，项目事实与评分边界见 [WeChat Reporting 任务说明](benchmarks/suites/wechat_reporting/README.md)。本轮重构只验收离线实现，不宣称新任务的真实 Research 效果基线或 LLM 评分已完成。
+
+生产预算与研究运行配置分别维护。[研究运行样例](benchmarks/entrypoints/run.example.json) 仍显式指定调用上限 8、请求超时 60 秒、窗口 32768、输出 4096；未填写的模型预算按现有配置加载逻辑继承生产默认值。真实试运行前须核定完整组合，避免混用新旧额度；读取受限和摘要触发任务保留必要的专用覆盖。还需协调样本与批次时限、请求总数及执行器校验上限（当前单样本 300 秒、累计 7200 秒、400 次请求），业务、摘要及失败请求均计数。上调生产默认值不会自动扩大这些外层限制，也不证明真实任务完成率或摘要质量提升。
 
 ## 独立端点诊断
 

@@ -87,6 +87,24 @@ async def check_limits(root):
         assert len(probes[0].yielded) == 6
         assert result["limit"] == limit and result["truncated"] is expected_truncation
         assert [item["name"] for item in result["entries"]] == sorted(probes[0].yielded, key=lambda name: (name.casefold(), name))[:limit]
+    with TemporaryDirectory(prefix="lineage-default-directory-") as temporary:
+        expanded = Path(temporary)
+        names = [f"entry_{index:03}.txt" for index in range(137)]
+        for name in reversed(names):
+            (expanded / name).write_bytes(b"")
+        original = snapshot(expanded)
+        state, client, _ = await run_case(
+            "production_directory_budget_beyond_old_limit", expanded,
+            [response(directory_call("default_directory")), response(message())],
+            executor=create_directory_executor(expanded),
+        )
+        result = json.loads(decoded_results(state)[0]["result"])
+        assert result["limit"] == SETTINGS.directory_max_entries == 1000
+        assert [entry["name"] for entry in result["entries"]] == names
+        assert result["truncated"] is False and result["next_after"] is None
+        counts(state, 2, 1, 1)
+        assert client.requests[1]["input"][-1] == outputs(state)[0]
+        assert snapshot(expanded) == original
     for invalid in (True, False, 0, -1, 1.5, "2", None):
         try:
             create_directory_executor(root, max_entries=invalid)

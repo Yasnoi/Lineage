@@ -37,7 +37,7 @@ from dataclasses import replace
 from io import StringIO
 from lineage_agent.agent import graph, runtime
 from lineage_agent.agent.sessions import SessionError, SessionManager
-from lineage_agent.config.settings import ConfigurationError, load_settings
+from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.entrypoints import cli
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
 from lineage_agent.models.requests import prepare_request
@@ -50,10 +50,13 @@ from unittest.mock import patch
 
 async def check_configuration():
     defaults = {
-        "context_budget_tokens": 32768, "max_output_tokens": 4096,
-        "context_safety_margin_tokens": 1024, "opaque_fallback_tokens": 4096,
+        "context_budget_tokens": 250000, "max_output_tokens": 16384,
+        "context_safety_margin_tokens": 8192, "opaque_fallback_tokens": 4096,
     }
-    assert all(getattr(SETTINGS, key) == value for key, value in defaults.items())
+    configured_defaults = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name)
+    assert all(getattr(configured_defaults, key) == value for key, value in defaults.items())
+    assert (SETTINGS.context_budget_tokens, SETTINGS.max_output_tokens,
+            SETTINGS.context_safety_margin_tokens) == (32768, 4096, 1024)
     for field in defaults:
         invalid = [True, False, -1, 1.5, "2"]
         if field != "context_safety_margin_tokens":
@@ -122,6 +125,25 @@ async def check_transparent_request_and_boundary():
     assert compact_bytes(prepared) > compact_bytes(stripped)
     assert state["model_calls"] == 1
 
+    # Exercise the new default window at its inclusive boundary using actual
+    # requests; retain the original small-window cases above independently.
+    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
+    padded = [{"role": "user", "content": ""}]
+    prepared = prepare_request(production.model_name, padded)
+    assert prepared["max_output_tokens"] == production.max_output_tokens == 16384
+    padded[0]["content"] = "p" * (225424 - compact_bytes(prepared))
+    for extra in (0, 1):
+        candidate = [{**padded[0], "content": padded[0]["content"] + "x" * extra}]
+        state, actual, checked = await run(
+            [response(message())], prompt=candidate, settings=production,
+            scenario=f"production_input_boundary_{extra}",
+        )
+        assert state["context_budget"]["required_tokens"] == 250000 + extra
+        assert state["stop_reason"] == ("completed" if extra == 0 else "context_budget_exceeded")
+        assert len(actual.requests) == state["model_calls"] == (1 if extra == 0 else 0)
+        if extra == 0:
+            assert checked[0]["request"] == actual.requests[0]
+
 async def check_stable_history_and_rejected_input():
     settings = replace(SETTINGS, context_budget_tokens=11000)
     manager = SessionManager()
@@ -186,16 +208,20 @@ async def check_opaque_counting():
     risks = annotate_context_risks(items, fallback_tokens=4096, run_id="caller")
     assert [item["opaque_count"] for item in risks] == [1, 1, 1]
     assert all(item["risk_tokens"] == 4096 and item["source_model_call"] is None for item in risks)
-    request = prepare_request(SETTINGS.model_name, items)
+    request = prepare_request(SETTINGS.model_name, items, max_output_tokens=SETTINGS.max_output_tokens)
     diag = check_context_budget(request, risks, SETTINGS, step_id="opaque-unit")
     assert diag["opaque_items"] == 3 and diag["opaque_risk_tokens"] == 3 * 4096
     larger_cipher = deepcopy(items)
     larger_cipher[0]["encrypted_content"] *= 5000
-    grown = check_context_budget(prepare_request(SETTINGS.model_name, larger_cipher), risks, SETTINGS)
+    grown = check_context_budget(prepare_request(
+        SETTINGS.model_name, larger_cipher, max_output_tokens=SETTINGS.max_output_tokens,
+    ), risks, SETTINGS)
     assert grown["transparent_tokens"] == diag["transparent_tokens"], "encrypted bytes were charged as transparent text"
     visible_growth = deepcopy(items)
     visible_growth[0]["summary"][0]["text"] += "visible growth" * 10
-    assert check_context_budget(prepare_request(SETTINGS.model_name, visible_growth), risks, SETTINGS)["transparent_tokens"] > diag["transparent_tokens"]
+    assert check_context_budget(prepare_request(
+        SETTINGS.model_name, visible_growth, max_output_tokens=SETTINGS.max_output_tokens,
+    ), risks, SETTINGS)["transparent_tokens"] > diag["transparent_tokens"]
     assert items == original
     for output_tokens in (None, 0, -1, True, "99", 1.5):
         usage = {"output_tokens": output_tokens}

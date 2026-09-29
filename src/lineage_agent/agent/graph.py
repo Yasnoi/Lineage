@@ -13,7 +13,7 @@ from lineage_agent.agent.state import AgentState, CompactionRequestOptions, Comp
 from lineage_agent.agent.compaction import MAX_COMPACT_PASSES, SummaryCall, build_compaction_nodes
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
-from lineage_agent.config.settings import ModelSettings
+from lineage_agent.config.settings import DEFAULT_MAX_MODEL_CALLS, ModelSettings
 from lineage_agent.models.budget import (
     annotate_context_risks, budget_measurement_error, check_context_budget,
 )
@@ -54,7 +54,7 @@ def build_graph(
     settings: ModelSettings,
     tools: list[ToolDefinition] | None = None,
     execute_tool: ToolExecutor | None = None,
-    max_model_calls: int = 5,
+    max_model_calls: int = DEFAULT_MAX_MODEL_CALLS,
     recorder: RunRecorder | None = None,
     tracer: "RunTrace | None" = None,
     checkpointer: BaseCheckpointSaver | None = None,

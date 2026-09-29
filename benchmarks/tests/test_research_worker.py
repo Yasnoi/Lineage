@@ -321,7 +321,12 @@ class ResearchWorkerTests(unittest.TestCase):
         self.spec["case_id"] = "compaction-fixture"
         self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288}
         self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
-        self.spec["profile"].update(summary_target_percent=40)
+        # This 12 KiB history and bounded pressure fixture targets the original
+        # window; larger production defaults must not remove the tested event.
+        self.spec["profile"].update(
+            context_budget_tokens=32768, max_output_tokens=4096,
+            context_safety_margin_tokens=1024, summary_target_percent=40,
+        )
         business_count = 0
         summaries = []
         def respond(kwargs):

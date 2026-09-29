@@ -23,6 +23,7 @@ CHECK_DIR = ROOT / "logs" / "checks" / CHECK_ID
 
 SETTINGS = ModelSettings(
     base_url="https://unused.invalid/v1", model_name="local-check", log_dir=CHECK_DIR,
+    context_budget_tokens=32768, max_output_tokens=4096, context_safety_margin_tokens=1024,
 )
 
 TOOL = {

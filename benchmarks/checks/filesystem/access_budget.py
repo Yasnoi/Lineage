@@ -17,7 +17,7 @@ from benchmarks.checks.support.runtime import (
 from benchmarks.checks.support.text import metadata_override, monitor_reads, snapshot
 from copy import deepcopy
 from lineage_agent.agent import runtime
-from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL, TextExecutor, create_text_executor
@@ -96,7 +96,7 @@ async def check_read_budgets(root):
     (root / "four").write_bytes(b"1234")
     (root / "empty").write_bytes(b"")
     (root / "invalid").write_bytes(b"\xff")
-    executor = create_text_executor(root)
+    executor = create_text_executor(root, max_bytes=65536, max_total_bytes=262144)
     calls = [file_call(f"many_{index}", "large.py") for index in range(20)]
     with monitor_reads(root) as (opened, probes):
         state, _, events = await run_case("twenty_file_budget", [response(*calls), response(message())], tools=[TEXT_TOOL], executor=executor)
@@ -104,6 +104,22 @@ async def check_read_budgets(root):
     assert len(opened) == 4 and sum(sum(length for _, length in p.reads) for p in probes) == 262144
     assert events[-1]["read_budget"] == {"limit_bytes": 262144, "used_bytes": 262144, "remaining_bytes": 0}
     assert all(item["error"]["reason_code"] == "read_budget_exceeded" for item in envelopes(state)[4:])
+    # A larger tool allowance still cannot bypass the complete-request budget.
+    expanded = create_text_executor(root)
+    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
+    with monitor_reads(root) as (opened, probes), patch("benchmarks.checks.support.access.SETTINGS", production):
+        state, client, events = await run_case(
+            "production_total_read_budget_preserves_oversized_current_turn",
+            [response(*calls)], tools=[TEXT_TOOL], executor=expanded,
+        )
+    assert state["tool_outcomes"] == {"succeeded": 16, "rejected": 4, "failed": 0, "skipped": 0}
+    assert len(opened) == 16 and sum(sum(length for _, length in p.reads) for p in probes) == 1048576
+    assert events[-1]["read_budget"] == {"limit_bytes": 1048576, "used_bytes": 1048576, "remaining_bytes": 0}
+    assert all(item["error"]["reason_code"] == "read_budget_exceeded" for item in envelopes(state)[16:])
+    assert [json.loads(item["result"])["content"] for item in envelopes(state)[:16]] == ["x" * 65536] * 16
+    assert state["stop_reason"] == "context_budget_exceeded" and state["model_calls"] == len(client.requests) == 1
+    assert state["summary_calls"] == 0 and state["context_budget"]["request_sent"] is False
+    assert state["context_budget"]["limit_tokens"] == 250000
     bounded = create_text_executor(root, max_bytes=8, max_total_bytes=6)
     state, client, events = await run_case(
         "cross_round_repeat_failure_credit_and_small_file",

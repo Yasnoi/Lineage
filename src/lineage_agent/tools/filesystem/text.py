@@ -7,7 +7,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
-from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.config.settings import DEFAULT_TEXT_MAX_BYTES, DEFAULT_TEXT_TOTAL_MAX_BYTES, ConfigurationError
 from lineage_agent.models.types import ToolDefinition
 from lineage_agent.tools.filesystem.paths import (
     bind_project_root,
@@ -37,7 +37,8 @@ TEXT_TOOL: ToolDefinition = {
 
 
 def create_text_executor(
-    root: str | Path, *, max_bytes: int = 65536, max_total_bytes: int = 262144,
+    root: str | Path, *, max_bytes: int = DEFAULT_TEXT_MAX_BYTES,
+    max_total_bytes: int = DEFAULT_TEXT_TOTAL_MAX_BYTES,
 ) -> ToolExecutor:
     """Bind trusted access; run_agent obtains an independent budget via bind_run."""
     return TextExecutor(bind_project_root(root), max_bytes, max_total_bytes)
