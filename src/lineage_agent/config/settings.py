@@ -2,7 +2,7 @@
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -11,6 +11,20 @@ from dotenv import load_dotenv
 
 class ConfigurationError(ValueError):
     """A required configuration value is missing or invalid."""
+
+
+_REMOVED_OPTION = object()
+_REMOVED_CONTEXT_OPTIONS = (
+    "context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes",
+)
+
+
+def _removed_configuration(names: list[str]) -> ConfigurationError:
+    return ConfigurationError(
+        f"{', '.join(name.upper() for name in names)} 已移除。请删除旧配置；"
+        "摘要目标改用 SUMMARY_TARGET_PERCENT（默认 40），"
+        "上下文触发上限固定为 CONTEXT_BUDGET_TOKENS。"
+    )
 
 
 @dataclass(frozen=True)
@@ -30,13 +44,22 @@ class ModelSettings:
     max_output_tokens: int = 4096
     context_safety_margin_tokens: int = 1024
     opaque_fallback_tokens: int = 4096
-    context_trigger_percent: int = 90
     context_keep_recent_turns: int = 2
-    context_target_percent: int = 70
-    summary_max_output_tokens: int = 2048
-    summary_max_bytes: int = 8192
+    summary_target_percent: int = 40
+    # Accept obsolete keywords only to give a precise migration error. InitVars
+    # are not dataclass fields and never appear in asdict or saved configuration.
+    context_trigger_percent: InitVar[object] = _REMOVED_OPTION
+    context_target_percent: InitVar[object] = _REMOVED_OPTION
+    summary_max_output_tokens: InitVar[object] = _REMOVED_OPTION
+    summary_max_bytes: InitVar[object] = _REMOVED_OPTION
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, context_trigger_percent: object, context_target_percent: object,
+                      summary_max_output_tokens: object, summary_max_bytes: object) -> None:
+        removed = [name for name, value in zip(_REMOVED_CONTEXT_OPTIONS, (
+            context_trigger_percent, context_target_percent, summary_max_output_tokens, summary_max_bytes,
+        ), strict=True) if value is not _REMOVED_OPTION]
+        if removed:
+            raise _removed_configuration(removed)
         try:
             if not isinstance(self.base_url, str) or not self.base_url.strip():
                 raise ValueError
@@ -79,7 +102,7 @@ class ModelSettings:
             raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
         for name in (
             "context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens",
-            "context_keep_recent_turns", "summary_max_output_tokens", "summary_max_bytes",
+            "context_keep_recent_turns",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -87,20 +110,11 @@ class ModelSettings:
         if (type(self.context_safety_margin_tokens) is not int
                 or self.context_safety_margin_tokens < 0):
             raise ConfigurationError("CONTEXT_SAFETY_MARGIN_TOKENS 必须是非负整数。")
-        if (type(self.context_trigger_percent) is not int
-                or not 1 <= self.context_trigger_percent <= 100):
-            raise ConfigurationError("CONTEXT_TRIGGER_PERCENT 必须是 1 到 100 的整数。")
-        threshold = self.context_budget_tokens * self.context_trigger_percent // 100
-        if threshold <= self.max_output_tokens + self.context_safety_margin_tokens:
-            raise ConfigurationError("上下文触发阈值必须大于输出预留与安全余量之和。")
-        if (type(self.context_target_percent) is not int
-                or not 1 <= self.context_target_percent < self.context_trigger_percent):
-            raise ConfigurationError("CONTEXT_TARGET_PERCENT 必须是正整数且小于触发比例。")
-        target = self.context_budget_tokens * self.context_target_percent // 100
-        if target <= self.max_output_tokens + self.context_safety_margin_tokens:
-            raise ConfigurationError("上下文压缩目标必须大于业务输出预留与安全余量之和。")
-        if threshold <= self.summary_max_output_tokens + self.context_safety_margin_tokens:
-            raise ConfigurationError("上下文触发阈值必须大于摘要输出预留与安全余量之和。")
+        if self.context_budget_tokens <= self.max_output_tokens + self.context_safety_margin_tokens:
+            raise ConfigurationError("上下文额度必须大于业务输出预留与安全余量之和。")
+        if (type(self.summary_target_percent) is not int
+                or not 1 <= self.summary_target_percent <= 100):
+            raise ConfigurationError("SUMMARY_TARGET_PERCENT 必须是 1 到 100 的整数。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -126,6 +140,10 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise ConfigurationError("无法读取 .env 配置文件。") from exc
+
+    removed = [name for name in _REMOVED_CONTEXT_OPTIONS if name.upper() in os.environ]
+    if removed:
+        raise _removed_configuration(removed)
 
     base_url = os.environ.get("BASE_URL", "").strip()
     model_name = os.environ.get("MODEL_NAME", "").strip()
@@ -171,11 +189,8 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         ("MAX_OUTPUT_TOKENS", 4096),
         ("CONTEXT_SAFETY_MARGIN_TOKENS", 1024),
         ("OPAQUE_FALLBACK_TOKENS", 4096),
-        ("CONTEXT_TRIGGER_PERCENT", 90),
         ("CONTEXT_KEEP_RECENT_TURNS", 2),
-        ("CONTEXT_TARGET_PERCENT", 70),
-        ("SUMMARY_MAX_OUTPUT_TOKENS", 2048),
-        ("SUMMARY_MAX_BYTES", 8192),
+        ("SUMMARY_TARGET_PERCENT", 40),
     ):
         try:
             budget_values[name.lower()] = int(os.environ.get(name, str(default)))

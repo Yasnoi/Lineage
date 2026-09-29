@@ -52,15 +52,12 @@ async def check_configuration():
     defaults = {
         "context_budget_tokens": 32768, "max_output_tokens": 4096,
         "context_safety_margin_tokens": 1024, "opaque_fallback_tokens": 4096,
-        "context_trigger_percent": 90,
     }
     assert all(getattr(SETTINGS, key) == value for key, value in defaults.items())
     for field in defaults:
         invalid = [True, False, -1, 1.5, "2"]
         if field != "context_safety_margin_tokens":
             invalid.append(0)
-        if field == "context_trigger_percent":
-            invalid.append(101)
         for value in invalid:
             try:
                 replace(SETTINGS, **{field: value})
@@ -70,7 +67,7 @@ async def check_configuration():
                 raise AssertionError((field, value))
     replace(SETTINGS, context_safety_margin_tokens=0)
     try:
-        replace(SETTINGS, context_budget_tokens=5120, context_trigger_percent=100)
+        replace(SETTINGS, context_budget_tokens=5120)
     except ConfigurationError:
         pass
     else:
@@ -80,13 +77,13 @@ async def check_configuration():
             "BASE_URL": SETTINGS.base_url, "MODEL_NAME": SETTINGS.model_name,
             "CONTEXT_BUDGET_TOKENS": "123456", "MAX_OUTPUT_TOKENS": "5000",
             "CONTEXT_SAFETY_MARGIN_TOKENS": "0", "OPAQUE_FALLBACK_TOKENS": "9000",
-            "CONTEXT_TRIGGER_PERCENT": "80",
+            "SUMMARY_TARGET_PERCENT": "35",
         }
         with patch.dict(os.environ, env, clear=True):
             loaded = load_settings(Path(temporary) / "missing.env")
         assert loaded.context_budget_tokens == 123456 and loaded.max_output_tokens == 5000
         assert loaded.context_safety_margin_tokens == 0 and loaded.opaque_fallback_tokens == 9000
-        assert loaded.context_trigger_percent == 80
+        assert loaded.summary_target_percent == 35
     print(json.dumps({"scenario": "configuration_validation", "defaults": defaults}))
 
 async def check_transparent_request_and_boundary():
@@ -100,18 +97,16 @@ async def check_transparent_request_and_boundary():
     required = diagnostic["required_tokens"]
     assert required == compact_bytes(request) + SETTINGS.max_output_tokens + SETTINGS.context_safety_margin_tokens
     assert prompt == original
-    for delta, expected in ((1, "completed"), (0, "context_budget_exceeded"), (-1, "context_budget_exceeded")):
-        # This fixture isolates the exact business-request boundary. Compression
-        # is unavailable, but its target still needs room for the business reserve.
-        configured = replace(
-            SETTINGS, context_budget_tokens=required + delta,
-            context_trigger_percent=100, context_target_percent=99,
-        )
+    for delta, expected in ((1, "completed"), (0, "completed"), (-1, "context_budget_exceeded")):
+        # This fixture isolates the actual complete request's inclusive W boundary.
+        configured = replace(SETTINGS, context_budget_tokens=required + delta)
         state, actual, _ = await run([response(message())], prompt=prompt, settings=configured, scenario=f"boundary_{delta:+d}")
         assert state["stop_reason"] == expected
-        assert state["model_calls"] == (1 if delta == 1 else 0)
-        assert state["context_budget"]["request_sent"] is (delta == 1)
-        if delta != 1:
+        assert state["model_calls"] == (1 if delta >= 0 else 0)
+        assert state["context_budget"]["request_sent"] is (delta >= 0)
+        assert state["context_budget"]["trigger_percent"] == 100
+        assert state["context_budget"]["trigger_tokens"] == required + delta
+        if delta < 0:
             assert not actual.requests and state["history_end"] == 0
             assert state["usage_totals"] == {"input_tokens": None, "output_tokens": None, "total_tokens": None, "missing_usage_calls": 0}
     state, actual, checked = await run(
@@ -128,7 +123,7 @@ async def check_transparent_request_and_boundary():
     assert state["model_calls"] == 1
 
 async def check_stable_history_and_rejected_input():
-    settings = replace(SETTINGS, context_budget_tokens=11000, context_trigger_percent=100)
+    settings = replace(SETTINGS, context_budget_tokens=11000)
     manager = SessionManager()
     sid = manager.create_session(settings)
     source = [{"role": "user", "content": [{"type": "input_text", "text": "fact BLUE_19"}]}]
@@ -154,7 +149,7 @@ async def check_tool_result_limit_and_real_file():
         body = "REAL_BUDGET_BODY_" + "资料" * 2500
         (root / "budget source.txt").write_text(body, encoding="utf-8")
         original, cwd = snapshot(root), Path.cwd()
-        settings = replace(SETTINGS, context_budget_tokens=11000, context_trigger_percent=100)
+        settings = replace(SETTINGS, context_budget_tokens=11000)
         executor = create_filesystem_executor(root)
         manager = SessionManager()
         sid = manager.create_session(settings, tools=[TEXT_TOOL], execute_tool=executor)

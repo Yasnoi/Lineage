@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from benchmarks.core.files import utc_now
 from benchmarks.core.budgets import RequestBudget, append_durable
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.tools.types import ToolArgumentError, ToolExecutionError
 
 
@@ -58,7 +58,7 @@ class Observer:
                 original_create = client.responses.create
 
                 async def create(**kwargs):
-                    purpose = "summary" if kwargs.get("instructions") == SUMMARY_INSTRUCTIONS else "business"
+                    purpose = "summary" if is_summary_request(kwargs) else "business"
                     reserved = self.budget.reserve(self.turn, purpose)
                     # Retain full request only in this process for mechanism comparisons.
                     self.requests.setdefault(self.turn, []).append(deepcopy(kwargs))

@@ -10,7 +10,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Overwrite
 
 from lineage_agent.agent.state import AgentState, CompactionRequestOptions, CompactionState, UsageTotals
-from lineage_agent.agent.compaction import SummaryCall, build_compaction_nodes
+from lineage_agent.agent.compaction import MAX_COMPACT_PASSES, SummaryCall, build_compaction_nodes
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
 from lineage_agent.config.settings import ModelSettings
@@ -88,6 +88,33 @@ def build_graph(
         if tracer is not None:
             tracer.bind_active_context(state["active_context"])
         compaction: CompactionState | None = deepcopy(state["compaction"])
+        if compaction is not None and compaction["status"] == "retry_pending":
+            assert context_records is not None
+            checkpoint_id = context_records.confirmed()
+            saved = await context_records.saver.read_confirmed(context_records.session_id, checkpoint_id)
+            saved_attempt = saved.checkpoint["channel_values"].get("compaction", {})
+            if (saved.checkpoint["channel_values"].get("run_id") != state["run_id"]
+                    or saved_attempt.get("status") != "retry_pending"
+                    or saved_attempt.get("summary_id") != compaction["summary_id"]
+                    or saved_attempt.get("request_no") != compaction["request_no"]
+                    or saved_attempt.get("pass_no") != 1
+                    or not 1 <= compaction["pass_no"] < MAX_COMPACT_PASSES
+                    or compaction.get("request_no") != state["model_calls"] + 1):
+                raise CheckpointError("checkpoint_read_error")
+            # Preserve the first attempt in its own checkpoints. Replacing it
+            # only after this barrier also keeps its summary_result association
+            # intact if preparing or saving the second attempt fails.
+            second: CompactionState = {
+                "request_no": compaction["request_no"], "pass_no": compaction["pass_no"] + 1,
+                "summary_id": str(uuid4()), "status": "preparing", "reason": None,
+                "candidate_input": {"summary_id": compaction["summary_id"],
+                                    "checkpoint_id": compaction["summary_checkpoint_id"]},
+                **{key: deepcopy(compaction[key]) for key in (
+                    "request_options", "old_version_id", "sources", "removed_items", "removed_turns",
+                    "source_headers", "outcome_headers", "opaque_omissions",
+                )},
+            }
+            return finish(state, {"compaction": second}, "model", step_id)
         if compaction is not None and compaction["status"] == "pending_save":
             assert context_records is not None
             checkpoint_id = context_records.confirmed()
@@ -151,7 +178,7 @@ def build_graph(
                 compaction is None or compaction["request_no"] != state["model_calls"] + 1
             ):
                 compaction = {
-                    "request_no": state["model_calls"] + 1, "summary_id": str(uuid4()),
+                    "request_no": state["model_calls"] + 1, "pass_no": 1, "summary_id": str(uuid4()),
                     "status": "preparing", "reason": None,
                     "request_options": request_options,
                     "old_version_id": state["active_context"]["version_id"],

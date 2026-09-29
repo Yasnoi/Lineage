@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 from benchmarks.checks.support.compaction import (
     CHECK_DIR,
     Client,
@@ -40,12 +41,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 from io import StringIO
+from hashlib import sha256
 from lineage_agent.agent import compaction, context, graph, runtime
 from lineage_agent.agent.sessions import SessionError, SessionManager
 from lineage_agent.agent.state import CompactionStatus
-from lineage_agent.config.settings import ConfigurationError
+from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.entrypoints import cli
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS, minimum_summary_message_bytes
 from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
@@ -56,8 +58,7 @@ from unittest.mock import patch
 
 async def check_configuration():
     defaults = {
-        "context_keep_recent_turns": 2, "context_target_percent": 70,
-        "summary_max_output_tokens": 2048, "summary_max_bytes": 8192,
+        "context_keep_recent_turns": 2, "summary_target_percent": 40,
     }
     for field, expected in defaults.items():
         assert getattr(BASE_SETTINGS, field) == expected
@@ -68,13 +69,32 @@ async def check_configuration():
                 pass
             else:
                 raise AssertionError((field, value))
-    for target in (90, 100, 101):
+    for target in (101,):
         try:
-            replace(BASE_SETTINGS, context_target_percent=target)
+            replace(BASE_SETTINGS, summary_target_percent=target)
         except ConfigurationError:
             pass
         else:
-            raise AssertionError("target must stay below trigger")
+            raise AssertionError("summary target cannot exceed 100 percent")
+    for removed in ("context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"):
+        try:
+            replace(BASE_SETTINGS, **{removed: 40})
+        except ConfigurationError:
+            pass
+        else:
+            raise AssertionError(f"removed setting accepted: {removed}")
+        with TemporaryDirectory() as temporary:
+            environment = {"BASE_URL": BASE_SETTINGS.base_url, "MODEL_NAME": BASE_SETTINGS.model_name,
+                           removed.upper(): "40"}
+            with patch.dict(os.environ, environment, clear=True):
+                try:
+                    load_settings(Path(temporary) / "missing.env")
+                except ConfigurationError:
+                    pass
+                else:
+                    raise AssertionError(f"removed environment setting silently accepted: {removed}")
+    assert replace(BASE_SETTINGS, summary_target_percent=1).summary_target_percent == 1
+    assert replace(BASE_SETTINGS, summary_target_percent=100).summary_target_percent == 100
     print(json.dumps({"scenario": "configuration", "defaults": defaults}))
 
 async def check_stable_history_and_records():
@@ -245,8 +265,11 @@ async def check_request_options_through_compaction():
         original_select, original_create = context.ContextRecords.select, Client.create
 
         async def observed_select(records, state, settings, prepare_request, **options):
-            assert options == expected_options == state["compaction"]["request_options"]
-            selected_options.append(deepcopy(options))
+            assert set(options) == set(expected_options) | {"summary_id"}
+            assert options["summary_id"] == state["compaction"]["summary_id"]
+            actual_options = {key: options[key] for key in expected_options}
+            assert actual_options == expected_options == state["compaction"]["request_options"]
+            selected_options.append(deepcopy(actual_options))
             return await original_select(records, state, settings, prepare_request, **options)
 
         async def observed_create(client, **request):
@@ -278,7 +301,8 @@ async def check_request_options_through_compaction():
         assert selected_options == [expected_options]
         assert turn.state["model_calls"] == turn.state["summary_calls"] == 1
         summary_request, business = client.requests
-        assert summary_request["instructions"] == SUMMARY_INSTRUCTIONS
+        assert summary_request["instructions"].startswith(SUMMARY_INSTRUCTIONS)
+        assert summary_request["reasoning"] == {"effort": "none"}
         assert business["input"][-1] == {"role": "user", "content": prompt}
         assert business["input"][-5:-1] == old[-1].state["input"][-4:]
         assert business["tools"] == [TOOL]
@@ -337,7 +361,6 @@ async def check_summary_failure_cases():
         ("tool_request", lambda _: response(call("summary_must_not_execute")), "error"),
         ("refusal", lambda _: response({**message(), "content": [{"type": "refusal", "refusal": "no"}]}), "error"),
         ("incomplete", lambda req: response(message(json.dumps(summary_document(req))), status="incomplete"), "error"),
-        ("oversized", lambda req: summary_response(req, text="d" * 5000), "context_budget_exceeded"),
     )
     for name, make_summary, stop in cases:
         manager, sid, old = await seed(prefix=f"failure_{name}")
@@ -353,7 +376,7 @@ async def check_summary_failure_cases():
             assert turn.state["usage_totals"]["missing_usage_calls"] == 1
         else:
             assert turn.state["summary_result"] is not None
-            assert turn.state["usage_totals"]["total_tokens"] == (25 if name == "oversized" else 12)
+            assert turn.state["usage_totals"]["total_tokens"] == 12
 
 async def check_usage_missing():
     manager, sid, _ = await seed(prefix="usage")
@@ -374,8 +397,12 @@ async def check_usage_missing():
     assert next_turn.state["summary_usage_totals"]["missing_usage_calls"] == 0
 
 async def check_summary_and_candidate_budget_boundaries():
-    oversized_reserve = replace(SETTINGS, summary_max_output_tokens=19000)
-    manager, sid, old = await seed(settings=oversized_reserve, prefix="summary_request_budget")
+    # A long admitted old turn is valid for business calls, but serializing it
+    # into a source document plus the dynamic summary reserve can exceed W.
+    manager, sid, old = await seed(count=1, prefix="summary_request_budget", prompt_size=18000, answer_size=1000)
+    manager, sid, recent = await seed(manager=manager, sid=sid, count=2, prefix="summary_request_recent",
+                                    prompt_size=100, answer_size=100)
+    old.extend(recent)
     turn, actual = await run(manager, sid, TRIGGER, scenario="summary_input_budget_exceeded")
     assert turn.state["stop_reason"] == "context_budget_exceeded" and not actual.requests
     assert turn.state["compaction"]["reason"] == "summary_budget_exceeded"
@@ -392,27 +419,195 @@ async def check_summary_and_candidate_budget_boundaries():
     assert turn.state["summary_calls"] == 0 and turn.state["usage_totals"]["missing_usage_calls"] == 0
     assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
 
-    # Explicit measurement fault injection tests the final candidate guard. The
-    # correct upper-bound selection makes this rejection unreachable for static
-    # valid inputs; it must nevertheless never dispatch an unapproved candidate.
+    # Explicit measurement fault injection keeps both candidates outside W.
+    # The second failure must stop without any third summary or business call.
     manager, sid, old = await seed(prefix="candidate_growth")
     original = compaction.check_context_budget
 
     def candidate_growth(request, risks, settings, **kwargs):
         result = original(request, risks, settings, **kwargs)
         if not is_summary(request):
-            result["required_tokens"] = settings.context_budget_tokens
+            result["required_tokens"] = settings.context_budget_tokens + 1
             result["decision"] = "exceeded"
         return result
 
     with patch.object(compaction, "check_context_budget", side_effect=candidate_growth):
         turn, actual = await run(manager, sid, TRIGGER, scenario="candidate_budget_fault_injection")
     assert turn.state["stop_reason"] == "context_budget_exceeded"
-    assert turn.state["compaction"]["reason"] == "summary_not_effective"
-    assert turn.state["summary_calls"] == 1 and turn.state["model_calls"] == 0
-    assert len(actual.requests) == 1 and is_summary(actual.requests[0])
+    assert turn.state["compaction"]["reason"] == "recovery_exhausted"
+    assert turn.state["summary_calls"] == 2 and turn.state["model_calls"] == 0
+    assert len(actual.requests) == 2 and all(is_summary(request) for request in actual.requests)
     assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
-    assert turn.state["usage_totals"]["total_tokens"] == 25
+    assert turn.state["usage_totals"]["total_tokens"] == 50
+
+async def check_dynamic_summary_budgets():
+    """Measure all dynamic terms from requests actually used by the graph."""
+    observed = {}
+    for label, overrides, prompt_size in (
+        ("baseline", {}, 7000),
+        ("window", {"context_budget_tokens": 24500}, 7000),
+        ("output", {"max_output_tokens": 512}, 7000),
+        ("fixed", {"max_model_calls": 1}, 7000),
+        ("preserved", {}, 7200),
+    ):
+        settings = replace(SETTINGS, **overrides)
+        manager, sid, old = await seed(settings=settings, prefix=f"dynamic_{label}")
+        # The response deliberately exceeds the requested soft target. It is
+        # accepted only if the complete reconstructed business request fits W.
+        prompt = "CURRENT_QUESTION_MUST_REMAIN: " + "c" * prompt_size
+        turn, actual = await run(
+            manager, sid, prompt, [response(message("dynamic answer"))],
+            summary=lambda req: summary_response(req, text="s" * req["max_output_tokens"]),
+            scenario=f"dynamic_summary_{label}",
+        )
+        state = turn.state
+        assert state["stop_reason"] == "completed", state["compaction"]
+        assert state["summary_calls"] == state["model_calls"] == 1
+        summary, business = actual.requests
+        metadata = state["compaction"]
+        recovery = metadata["recovery_budget"]
+        # All requests in these fixtures are fully visible text. Use the actual
+        # wire serialization, not the production budget helper, as the oracle.
+        encode = lambda value: len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        fixed = {**business, "input": []}
+        retained = {**business, "input": business["input"][1:]}
+        input_budget = settings.context_budget_tokens - settings.max_output_tokens - settings.context_safety_margin_tokens
+        expected = {
+            "input_budget_tokens": input_budget,
+            "fixed_tokens": encode(fixed),
+            "preserved_tokens": encode(retained) - encode(fixed),
+            "available_tokens": input_budget - encode(retained),
+        }
+        expected["target_tokens"] = expected["available_tokens"] * settings.summary_target_percent // 100
+        assert recovery == expected, (label, recovery, expected)
+        target = recovery["target_tokens"]
+        assert summary["max_output_tokens"] == target and summary["reasoning"] == {"effort": "none"}
+        assert f"at most {target} UTF-8 bytes" in summary["instructions"]
+        assert metadata["summary_bytes"] > target, "soft target overflow must actually occur"
+        assert metadata["candidate_budget"]["required_tokens"] <= settings.context_budget_tokens
+        original = {**business, "input": old[-1].state["input"] + [{"role": "user", "content": prompt}]}
+        assert encode(business) < encode(original)
+        minimum = minimum_summary_message_bytes(metadata["summary_id"], set(metadata["allowed_source_ids"]))
+        assert target >= minimum + 1 and metadata["removed_turns"] == 1
+        observed[label] = recovery
+    assert observed["window"]["input_budget_tokens"] - observed["baseline"]["input_budget_tokens"] == 500
+    assert observed["output"]["input_budget_tokens"] - observed["baseline"]["input_budget_tokens"] == -256
+    assert observed["fixed"]["fixed_tokens"] > observed["baseline"]["fixed_tokens"]
+    assert observed["preserved"]["preserved_tokens"] - observed["baseline"]["preserved_tokens"] == 200
+    assert len({item["target_tokens"] for item in observed.values()}) == len(observed)
+
+def recovery_replies(*, both_large=False):
+    """First candidate exceeds available space without replacing any budget."""
+    documents = []
+
+    def reply(request):
+        text = "FIRST_CANDIDATE_ONLY_" + "z" * (request["max_output_tokens"] * 3)
+        if documents and not both_large:
+            text = "Second candidate keeps the confirmed fact."
+        result = summary_response(request, text=text)
+        documents.append(summary_document(request, text))
+        return result
+    return reply, documents
+
+async def check_bounded_recovery_passes():
+    for both_large in (False, True):
+        manager, sid, old = await seed(prefix=f"same_request_{both_large}")
+        reply, documents = recovery_replies(both_large=both_large)
+        turn, actual = await run(manager, sid, TRIGGER, [response(message("two-pass answer"))],
+                                 summary=reply, scenario=f"same_request_two_passes_{both_large}")
+        state = turn.state
+        assert state["summary_calls"] == 2
+        assert [is_summary(item) for item in actual.requests] == ([True, True] if both_large else [True, True, False])
+        assert state["model_calls"] == int(not both_large)
+        assert state["usage_totals"]["total_tokens"] == 50 + 12 * int(not both_large)
+        assert state["summary_usage_totals"]["total_tokens"] == 50
+        first, second = map(material_for, actual.requests[:2])
+        assert second["candidate_input"]["document"] == documents[0]
+        assert "previous_summary" not in second
+        assert all("payload" not in header for header in second["sources"])
+        cited = {source for section in documents[0].values() for item in section for source in item["source_ids"]}
+        assert set(source_ids(second)) == cited and cited < set(source_ids(first))
+        assert "OLD_SOURCE_0" not in json.dumps(second)
+        record = await manager.get_record(sid, state["run_id"])
+        summaries = record["summary_results"]
+        assert len(summaries) == 2 and [item["summary_call"] for item in summaries] == [1, 2]
+        assert [item["compaction"]["pass_no"] for item in summaries] == [1, 2]
+        assert {item["compaction"]["request_no"] for item in summaries} == {1}
+        first_meta, second_meta = [item["compaction"] for item in summaries]
+        assert first_meta["summary_id"] != second_meta["summary_id"]
+        assert {key: value for key, value in second["candidate_input"].items() if key != "document"} == second_meta["candidate_input"]
+        assert second_meta["candidate_input"]["summary_id"] == first_meta["summary_id"]
+        candidate_checkpoint = second_meta["candidate_input"]["checkpoint_id"]
+        saved = await manager._checkpointer.read_confirmed(sid, candidate_checkpoint)
+        stored = saved.checkpoint["channel_values"]["compaction"]
+        assert stored["status"] == "candidate" and stored["pass_no"] == 1
+        assert stored["document"] == documents[0]
+        for archived, request, document in zip(summaries, actual.requests[:2], documents, strict=True):
+            request_hash = sha256(json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+            assert archived["compaction"]["summary_request_sha256"] == request_hash
+            assert json.loads(archived["result"]["text"]) == document
+        if both_large:
+            assert state["stop_reason"] == "context_budget_exceeded" and state["compaction"]["reason"] == "recovery_exhausted"
+            assert state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+            assert state["input"] == old[-1].state["input"] + [{"role": "user", "content": TRIGGER}]
+            assert state["history_end"] == len(old[-1].state["input"])
+        else:
+            assert state["stop_reason"] == "completed" and state["compaction"]["status"] == "used"
+            assert state["active_context"]["summary"]["summary_id"] == second_meta["summary_id"]
+            assert "Second candidate keeps" in actual.requests[-1]["input"][0]["content"]
+            assert "FIRST_CANDIDATE_ONLY" not in json.dumps(actual.requests[-1])
+        await check_turn_slice(manager, turn)
+
+    # An independently measured second summary preflight failure keeps the
+    # first response/usage but cannot issue the second SDK request.
+    manager, sid, old = await seed(prefix="second_preflight")
+    reply, _ = recovery_replies()
+    original = compaction.check_context_budget
+    def fail_second_preflight(request, risks, settings, **kwargs):
+        result = original(request, risks, settings, **kwargs)
+        if is_summary(request) and "candidate_input" in material_for(request):
+            result.update(required_tokens=settings.context_budget_tokens + 1, decision="exceeded")
+        return result
+    with patch.object(compaction, "check_context_budget", side_effect=fail_second_preflight):
+        turn, actual = await run(manager, sid, TRIGGER, summary=reply, scenario="second_summary_preflight_blocked")
+    assert turn.state["summary_calls"] == 1 and turn.state["model_calls"] == 0 and len(actual.requests) == 1
+    assert turn.state["compaction"]["pass_no"] == 2 and turn.state["compaction"]["reason"] == "summary_budget_exceeded"
+    assert turn.state["usage_totals"]["total_tokens"] == 25 and turn.state["summary_result"] is not None
+    assert turn.state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+
+async def check_second_pass_checkpoint_boundaries():
+    for label, method, status, pass_no, calls in (
+        ("retry", "put", "retry_pending", 1, 1),
+        ("retry_writes", "put_writes", "retry_pending", 1, 1),
+        ("second_candidate", "put", "candidate", 2, 2),
+        ("second_candidate_writes", "put_writes", "candidate", 2, 2),
+        ("second_activation", "put", "pending_save", 2, 2),
+        ("second_activation_writes", "put_writes", "pending_save", 2, 2),
+    ):
+        manager, sid, old = await seed(prefix=f"save_{label}")
+        reply, _ = recovery_replies()
+        def predicate(value, *_):
+            values = value["channel_values"] if method == "put" else dict(value)
+            metadata = values.get("compaction") or {}
+            return metadata.get("status") == status and metadata.get("pass_no") == pass_no
+        with checkpoint_fault(manager, method, predicate) as observations:
+            turn, actual = await run(manager, sid, TRIGGER, summary=reply,
+                                     scenario=f"checkpoint_{label}", observations=observations)
+        state = turn.state
+        assert observations and not turn.checkpoint_complete and turn.checkpoint_error == "checkpoint_write_error"
+        assert state["summary_calls"] == calls and state["model_calls"] == 0
+        assert len(actual.requests) == calls and all(is_summary(item) for item in actual.requests)
+        assert state["summary_result"] is not None and state["usage_totals"]["total_tokens"] == calls * 25
+        assert state["summary_usage_totals"]["total_tokens"] == calls * 25
+        assert state["active_context"]["version_id"] == old[-1].state["active_context"]["version_id"]
+        assert state["input"] == old[-1].state["input"] + [{"role": "user", "content": TRIGGER}]
+        assert state["history_end"] == len(old[-1].state["input"])
+        try:
+            await manager.run_turn(sid, "must stay blocked after the saved attempt failed")
+        except SessionError as exc:
+            assert exc.code == "session_blocked"
+        else:
+            raise AssertionError("second-pass checkpoint failure unblocked the session")
 
 async def check_opaque_barriers_and_omissions():
     for kind, first_input in (
@@ -469,7 +664,7 @@ async def check_real_file_and_failure_source():
         assert actual_outputs == first_client.requests[-1]["input"][-2:]
         assert json.loads(json.loads(actual_outputs[0]["output"])["result"])["content"] == body
         manager, sid, _ = await seed(manager=manager, sid=sid, count=2, prefix="file_recent", prompt_size=1000, answer_size=1000)
-        prompt = "CURRENT_UNCHANGED_" + "x" * 10000
+        prompt = "CURRENT_UNCHANGED_" + "x" * 14000
         turn, captured = await run(manager, sid, prompt, [response(message("purple fact from note"))], scenario="real_file_compacted")
         assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
         material = material_for(captured.requests[0])
@@ -485,9 +680,9 @@ async def check_real_file_and_failure_source():
         assert snapshot(root) == before and Path.cwd() == cwd
 
 async def check_repeated_compaction():
-    settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=1)
+    settings = replace(SETTINGS, context_budget_tokens=30000, context_keep_recent_turns=1)
     # Use a real executor invocation producing enough new material for a second
-    # recovery in the same user request; each business request gets at most one.
+    # recovery in the same user turn, for two distinct pending business calls.
     # Leave headroom beyond the trigger without relying on quota prompt bytes.
     async def large_result(name, arguments):
         return "REAL_TOOL_RESULT_" + "z" * 6700
@@ -501,7 +696,7 @@ async def check_repeated_compaction():
         prefix="multi_bound", prompt_size=1400, answer_size=1400,
     )
     previous_version = seeds[-1].state["active_context"]["version_id"]
-    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 4200, [
+    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 8000, [
         response(call("fresh_big_result")), response(message("completed after two recoveries")),
     ], scenario="same_run_two_recoveries")
     assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
@@ -524,7 +719,7 @@ async def check_repeated_compaction():
     await check_turn_slice(manager, turn)
 
 async def check_unattempted_recovery_record():
-    settings = replace(SETTINGS, context_budget_tokens=30000, context_target_percent=80, context_keep_recent_turns=5)
+    settings = replace(SETTINGS, context_budget_tokens=30000, context_keep_recent_turns=5)
 
     async def large_result(name, arguments):
         return "z" * 6700
@@ -533,7 +728,7 @@ async def check_unattempted_recovery_record():
         settings=settings, count=8, tools=[TOOL], executor=large_result,
         prefix="unattempted_recovery", prompt_size=1400, answer_size=1400,
     )
-    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 4200, [response(call("preserved_big"))], scenario="second_recovery_without_attempt")
+    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 12000, [response(call("preserved_big"))], scenario="second_recovery_without_attempt")
     assert turn.state["stop_reason"] == "context_budget_exceeded"
     assert turn.state["summary_calls"] == turn.state["model_calls"] == turn.state["tool_calls"] == 1
     assert [is_summary(item) for item in client.requests] == [True, False]
@@ -793,6 +988,8 @@ async def main():
         check_refusal_boundaries,
         check_summary_failure_cases, check_usage_missing,
         check_summary_and_candidate_budget_boundaries,
+        check_dynamic_summary_budgets, check_bounded_recovery_passes,
+        check_second_pass_checkpoint_boundaries,
         check_opaque_barriers_and_omissions, check_real_file_and_failure_source,
         check_repeated_compaction, check_unattempted_recovery_record,
         check_session_isolation, check_runtime_tracing,

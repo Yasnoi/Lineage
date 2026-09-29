@@ -15,7 +15,7 @@ from openai import APIStatusError
 from benchmarks.core.budgets import BudgetRecordError, RequestBudget, WorkerAbort, read_ledger
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from benchmarks.core.executors import agent_worker as worker
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.types import ToolArgumentError
 
@@ -306,6 +306,12 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertEqual(saved["turns"][0]["execution_status"], "completed")
 
     def test_compaction_actual_requests_and_versions_without_semantic_score(self):
+        self._check_compaction_sample(False)
+
+    def test_second_compaction_pass_uses_confirmed_candidate_chain(self):
+        self._check_compaction_sample(True)
+
+    def _check_compaction_sample(self, second_pass):
         form = self.material / "code/miniprogram/domain/form.ts"
         form.parent.mkdir(parents=True)
         form.write_text("signature fact\n", encoding="utf-8")
@@ -315,14 +321,17 @@ class ResearchWorkerTests(unittest.TestCase):
         self.spec["case_id"] = "compaction-fixture"
         self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288}
         self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
-        self.spec["profile"].update(summary_max_output_tokens=8192, summary_max_bytes=4096)
+        self.spec["profile"].update(summary_target_percent=40)
         business_count = 0
+        summaries = []
         def respond(kwargs):
             nonlocal business_count
-            if kwargs.get("instructions") == SUMMARY_INSTRUCTIONS:
+            if is_summary_request(kwargs):
                 material = json.loads(kwargs["input"][0]["content"])
+                summaries.append(material)
                 document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
-                document["facts"] = [{"text": "signature fact", "source_ids": [material["sources"][0]["source_id"]]}]
+                text = "x" * 20000 if second_pass and len(summaries) == 1 else "signature fact"
+                document["facts"] = [{"text": text, "source_ids": [material["sources"][0]["source_id"]]}]
                 return message(json.dumps(document))
             business_count += 1
             if business_count == 1:
@@ -330,14 +339,36 @@ class ResearchWorkerTests(unittest.TestCase):
                 response["output"] += call("evaluation-fixtures/background.txt", "bg-call")["output"]
                 return response
             return message()
-        result, code, captured = self.execute(respond)
+        original_coverage = worker.compaction_coverage
+        with patch.object(worker, "compaction_coverage", wraps=original_coverage) as coverage_spy:
+            result, code, captured = self.execute(respond)
         self.assertEqual(code, 0, result["issues"])
         self.assertEqual(len(result["turns"]), 5)
         self.assertTrue(all(c["status"] == "verified" for c in result["coverage"]), result["coverage"])
         self.assertEqual(result["verdict"], "pending_review")
         self.assertEqual(result["metrics"]["sdk_requests"]["value"], len(captured))
-        self.assertEqual(result["metrics"]["summary_requests"]["value"], 1)
+        self.assertEqual(result["metrics"]["summary_requests"]["value"], 2 if second_pass else 1)
         self.assertEqual(result["metrics"]["total_tokens"]["value"], len(captured) * 12)
+        if second_pass:
+            self.assertEqual(summaries[1]["candidate_input"]["document"]["facts"][0]["text"], "x" * 20000)
+            self.assertNotIn("previous_summary", summaries[1])
+            self.assertTrue(all("payload" not in item for item in summaries[1]["sources"]))
+            args = list(coverage_spy.call_args.args)
+            original_record = deepcopy(args[-1])
+            for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("sources", {})):
+                with self.subTest(corrupted_binding=field):
+                    args[-1] = deepcopy(original_record)
+                    args[-1]["summary_results"][1]["compaction"][field] = value
+                    coverage = original_coverage(*args)
+                    self.assertEqual(next(item for item in coverage if item["name"] == "summary_saved_and_activated")["status"], "gap")
+
+    def test_retired_profile_fields_are_not_silently_filtered(self):
+        for name in ("context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"):
+            with self.subTest(name=name):
+                spec = deepcopy(self.spec)
+                spec["profile"][name] = 1
+                with self.assertRaisesRegex(ValueError, "SUMMARY_TARGET_PERCENT"):
+                    worker.make_settings(spec)
 
     def test_compaction_missing_mechanism_and_reread_cannot_pass(self):
         observer = Observer(RequestBudget(self.root / "ledger", "run", "case"), self.output, self.material)

@@ -191,8 +191,9 @@ def budget_measurement_error(
         "limit_tokens": settings.context_budget_tokens,
         "output_reserve_tokens": settings.max_output_tokens,
         "safety_margin_tokens": settings.context_safety_margin_tokens,
-        "trigger_percent": settings.context_trigger_percent,
-        "trigger_tokens": settings.context_budget_tokens * settings.context_trigger_percent // 100,
+        # Kept as diagnostic compatibility fields; policy now has one boundary W.
+        "trigger_percent": 100,
+        "trigger_tokens": settings.context_budget_tokens,
         "decision": "error",
         "request_sent": False,
         "error_code": "context_measurement_error",
@@ -257,7 +258,7 @@ def check_context_budget(
             projected, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8"))
         required = transparent + reserved + settings.max_output_tokens + settings.context_safety_margin_tokens
-        exceeded = required >= diagnostic["trigger_tokens"]
+        exceeded = required > diagnostic["limit_tokens"]
         diagnostic.update(
             transparent_tokens=transparent,
             opaque_items=opaque_items,

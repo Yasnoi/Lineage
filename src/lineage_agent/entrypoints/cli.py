@@ -17,7 +17,7 @@ from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
 _COMPACTION_STAGE_LABELS: dict[CompactionStatus, str] = {
     "preparing": "准备摘要", "summary_budget_rejected": "摘要预算拒绝",
-    "candidate": "候选已生成", "pending_save": "版本等待保存确认",
+    "candidate": "候选已生成", "retry_pending": "等待再次压缩", "pending_save": "版本等待保存确认",
     "confirmed": "版本保存已确认", "used": "新版本已用于业务请求",
     "stopped": "未切换并停止", "failed": "压缩失败",
 }

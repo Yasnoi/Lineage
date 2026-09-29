@@ -177,10 +177,10 @@ class V2RunnerTests(unittest.TestCase):
         units, _ = catalog.load_catalog()
         self.assertEqual(len(units), 15)
         groups = [g for unit in units.values() for g in unit["groups"]]
-        self.assertEqual(len(groups), 138)
-        self.assertEqual(len({g["group_id"] for g in groups}), 138)
-        self.assertEqual(sum(g["legacy_source"]["path"] == "scripts/check_trace_data.py" for g in groups), 2)
-        self.assertEqual(sum(g["legacy_source"]["path"] == "scripts/check_trace_usage.py" for g in groups), 4)
+        self.assertEqual(len(groups), 141)
+        self.assertEqual(len({g["group_id"] for g in groups}), 141)
+        self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_data.py" for g in groups), 2)
+        self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_usage.py" for g in groups), 4)
 
     def test_single_selection_does_not_run_unselected_units(self):
         result = self.run_fixture(["fixture-b-only"])

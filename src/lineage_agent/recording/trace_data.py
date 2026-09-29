@@ -587,7 +587,7 @@ class TraceSanitizer:
             identifier = cls._identifier(value.get(key))
             if identifier is not None:
                 result[key] = identifier
-        for key in ("request_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call"):
+        for key in ("request_no", "pass_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call"):
             number = value.get(key)
             if type(number) is int and 0 <= number <= 2**63 - 1:
                 result[key] = number
@@ -595,7 +595,7 @@ class TraceSanitizer:
         if type(step) is str and re.fullmatch(r"step-[0-9]{4,16}", step):
             result["step_id"] = step
         if value.get("status") in (
-            "preparing", "summary_budget_rejected", "candidate", "pending_save",
+            "preparing", "summary_budget_rejected", "candidate", "retry_pending", "pending_save",
             "confirmed", "used", "stopped", "failed",
         ):
             result["status"] = value["status"]
@@ -608,6 +608,15 @@ class TraceSanitizer:
         }:
             result["reason"] = reason
         sources = value.get("sources")
+        if isinstance(value.get("candidate_input"), dict):
+            result["candidate_input"] = cls._reference(value["candidate_input"])
+        recovery = value.get("recovery_budget")
+        if isinstance(recovery, dict):
+            result["recovery_budget"] = {
+                key: recovery[key] for key in (
+                    "input_budget_tokens", "fixed_tokens", "preserved_tokens", "available_tokens", "target_tokens",
+                ) if type(recovery.get(key)) is int and -(2**63) <= recovery[key] <= 2**63 - 1
+            }
         if isinstance(sources, dict):
             source_view: dict[str, Any] = {}
             previous = sources.get("previous_summary")

@@ -21,7 +21,7 @@ from lineage_agent.agent import compaction, context, graph, runtime
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.agent.state import CompactionStatus
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import is_summary_request
 from typing import get_args
 from unittest.mock import patch
 from uuid import uuid4
@@ -31,7 +31,7 @@ CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 SETTINGS = replace(
     BASE_SETTINGS, log_dir=CHECK_DIR, context_budget_tokens=24000,
     max_output_tokens=256, context_safety_margin_tokens=64,
-    summary_max_output_tokens=512, summary_max_bytes=1200,
+    summary_target_percent=40,
 )
 
 RUNS = []
@@ -41,7 +41,7 @@ PRIVATE = "COMPACTION_EXCEPTION_PRIVATE_01e3"
 KEYS = ("requirements", "facts", "proposals", "corrections", "open_items")
 
 def is_summary(request):
-    return request.get("instructions") == SUMMARY_INSTRUCTIONS
+    return is_summary_request(request)
 
 def material_for(request):
     assert is_summary(request)
@@ -151,12 +151,14 @@ def audit(turn, client, scenario, observations=None):
         assert compaction["status"] in get_args(CompactionStatus)
         assert {"request_no", "status", "reason"} <= compaction.keys()
         # Exercise the contract on actual graph states, not constructed examples.
-        if compaction["status"] in {"preparing", "candidate", "pending_save", "confirmed", "used"}:
-            assert {"summary_id", "request_options", "old_version_id"} <= compaction.keys()
-        if compaction["status"] in {"candidate", "pending_save", "confirmed", "used"}:
+        if compaction["status"] in {"preparing", "candidate", "retry_pending", "pending_save", "confirmed", "used"}:
+            assert {"summary_id", "request_options", "old_version_id", "pass_no"} <= compaction.keys()
+            assert compaction["pass_no"] in (1, 2)
+        if compaction["status"] in {"candidate", "retry_pending", "pending_save", "confirmed", "used"}:
             assert {"sources", "removed_items", "removed_turns", "document", "message",
-                    "candidate_version_id", "summary_bytes", "summary_call"} <= compaction.keys()
-        if compaction["status"] in {"pending_save", "confirmed", "used"}:
+                    "candidate_version_id", "summary_bytes", "summary_call", "recovery_budget",
+                    "summary_request_sha256"} <= compaction.keys()
+        if compaction["status"] in {"retry_pending", "pending_save", "confirmed", "used"}:
             assert {"summary_checkpoint_id", "candidate_budget"} <= compaction.keys()
         if compaction["status"] in {"confirmed", "used"}:
             assert compaction["confirmed_checkpoint_id"]
@@ -214,7 +216,7 @@ async def seed(*, settings=SETTINGS, manager=None, sid=None, count=4, tools=None
         turns.append(turn)
     return manager, sid, turns
 
-TRIGGER = "CURRENT_QUESTION_MUST_REMAIN: " + "c" * 5000
+TRIGGER = "CURRENT_QUESTION_MUST_REMAIN: " + "c" * 7000
 
 async def check_turn_slice(manager, turn):
     """Compare fixed-checkpoint selection with the unchanged public archive."""

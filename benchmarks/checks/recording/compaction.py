@@ -24,10 +24,17 @@ async def main():
         observe_harness("trace_projection")
         sanitizer = TraceSanitizer([], None)
         refs = [{"run_id": str(uuid4()), "checkpoint_id": str(uuid4()), "item_count": 3} for _ in range(300)]
-        metadata = {"sources": {"added_turns": refs}, "material": BODY, "message": DERIVED}
+        retry_ref = {"summary_id": str(uuid4()), "checkpoint_id": str(uuid4())}
+        recovery = {"input_budget_tokens": 9000, "fixed_tokens": 500,
+                    "preserved_tokens": 6500, "available_tokens": 2000, "target_tokens": 800}
+        metadata = {"sources": {"added_turns": refs}, "material": BODY, "message": DERIVED,
+                    "pass_no": 2, "candidate_input": {**retry_ref, "document": DERIVED},
+                    "recovery_budget": {**recovery, "private": BODY}}
         projected = sanitizer.compaction(metadata)
         assert len(projected["sources"]["added_turns"]) == 32
         assert projected["sources"]["turns_omitted"] == 268
+        assert projected["pass_no"] == 2 and projected["candidate_input"] == retry_ref
+        assert projected["recovery_budget"] == recovery
         assert BODY not in json.dumps(projected) and DERIVED not in json.dumps(projected)
         payload = sanitizer.cap_payload({"inputs": {"metadata": projected}, "outputs": {"content_omitted": True}})
         assert len(json.dumps(payload).encode()) < 65536 and len(refs) == 300

@@ -9,6 +9,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 import json
 from pathlib import Path
 import sys
@@ -22,14 +23,14 @@ from lineage_agent.agent.sessions import SessionError, SessionManager
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
 
 def summary_request(request):
-    return request.get("instructions") == SUMMARY_INSTRUCTIONS
+    return is_summary_request(request)
 
 
 def report(turn, scenario, requests):
@@ -64,22 +65,15 @@ async def verify():
     configured = load_settings(Path(__file__).resolve().parents[1] / ".env")
     settings = replace(
         configured, context_budget_tokens=32768, max_output_tokens=1024,
-        context_safety_margin_tokens=256, context_trigger_percent=90,
-        context_target_percent=70, context_keep_recent_turns=2,
-        # Real verification needs room for reasoning plus the five-section
-        # response. This explicit scenario limit does not change app defaults
-        # or retry an incomplete response automatically.
-        summary_max_output_tokens=8192, summary_max_bytes=4096,
+        context_safety_margin_tokens=256, context_keep_recent_turns=2,
+        summary_target_percent=40,
         max_model_calls=max(5, configured.max_model_calls),
     )
     print(json.dumps({
         "scenario": "validation_limits", "context_budget_tokens": settings.context_budget_tokens,
-        "context_trigger_percent": settings.context_trigger_percent,
-        "context_target_percent": settings.context_target_percent,
+        "summary_target_percent": settings.summary_target_percent,
         "context_keep_recent_turns": settings.context_keep_recent_turns,
         "max_output_tokens": settings.max_output_tokens,
-        "summary_max_output_tokens": settings.summary_max_output_tokens,
-        "summary_max_bytes": settings.summary_max_bytes,
         "context_safety_margin_tokens": settings.context_safety_margin_tokens,
     }))
     actual_requests = {}
@@ -160,12 +154,13 @@ async def verify():
             risks = before.state["context_risks"][:before.state["history_end"]] + [None]
             measured = check_context_budget(prepared, risks, settings)
             assert measured["decision"] != "error"
-            padding = max(1, measured["trigger_tokens"] - measured["required_tokens"] + 512)
+            padding = max(1, measured["limit_tokens"] - measured["required_tokens"] + 512)
             pressure_question = base_question + "p" * padding
             current = 4
             compacted = await manager.run_turn(sid, pressure_question)
             events = report(compacted, "real_compaction", actual_requests.get(4, []))
-            assert compacted.state["summary_calls"] == 1
+            assert 1 <= compacted.state["summary_calls"] <= 2
+            compacted_record = await manager.get_record(sid, compacted.state["run_id"])
             assert compacted.state["compaction"]["status"] == "used"
             assert compacted.state["active_context"]["version_id"] != before.state["active_context"]["version_id"]
             assert await manager.get_record(sid, turns[0].state["run_id"]) == old_record
@@ -185,7 +180,22 @@ async def verify():
         assert cwd == Path.cwd()
     summary_calls = [item for item in actual_requests[4] if summary_request(item)]
     business_calls = [item for item in actual_requests[4] if not summary_request(item)]
-    assert len(summary_calls) == 1 and business_calls
+    archived = compacted_record["summary_results"]
+    assert len(summary_calls) == len(archived) == compacted.state["summary_calls"] and business_calls
+    for index, (request, saved) in enumerate(zip(summary_calls, archived, strict=True)):
+        attempt = saved["compaction"]
+        assert attempt["pass_no"] == index + 1
+        assert attempt["request_no"] == compacted.state["compaction"]["request_no"]
+        assert attempt["summary_request_sha256"] == sha256(json.dumps(
+            request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        if index:
+            first = archived[index - 1]
+            assert attempt["candidate_input"] == {
+                "summary_id": first["compaction"]["summary_id"], "checkpoint_id": first["checkpoint_id"],
+            }
+            assert attempt["sources"] == first["compaction"]["sources"]
+    assert archived[-1]["compaction"]["summary_id"] == compacted.state["active_context"]["summary"]["summary_id"]
     summary_input = json.loads(summary_calls[0]["input"][0]["content"])
     assert fact in json.dumps(summary_input, ensure_ascii=False)
     assert pressure_question not in json.dumps(summary_input, ensure_ascii=False)

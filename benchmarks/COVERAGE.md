@@ -1,6 +1,6 @@
 # 工程约定与迁移覆盖
 
-本文面向维护确定性检查的开发者。唯一可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 15 条隔离行为链包含原 138 个行为组；实际是否执行及结果以运行报告为准。
+本文面向维护确定性检查的开发者。唯一可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 15 条隔离行为链包含 141 个行为组（原 138 组及动态摘要恢复新增 3 组）；实际是否执行及结果以运行报告为准。
 
 ## 模块与判断依据
 
@@ -9,7 +9,7 @@
 | `execution` | 19 | 输入/响应协议、批次继续、结果关联、调用额度和终态统计；直接比较实际请求、工具返回和 State。 |
 | `filesystem` | 22 | 目录与文本路径边界、读取额度、真实 I/O 及未修改性；核对实际文件和累计预算。 |
 | `sessions` | 25 | 历史准入、隔离、重置、并发拒绝、保存和关闭；核对原生检查点及后续请求。 |
-| `context` | 33 | 请求预算、风险计量、摘要选择、保存屏障和活动版本；对照真实请求参数与记录。 |
+| `context` | 36 | 请求预算、风险计量、摘要选择、保存屏障和活动版本；对照真实请求参数与记录。 |
 | `recording` | 39 | JSONL、过滤、usage 投影、序列化、上传异常和有限收尾；对照实际 SDK 载荷与故障观察。 |
 
 一次跨模块场景保留完整执行链，只按主要模块计一次；标签不作为根因结论。响应耗时、真实 token 与缓存字段由真实任务轨迹另外观测，替身 token 不算成本。没有统一总分。
@@ -18,7 +18,7 @@
 
 来源基线为 `c97467ed41bcd3a0232033f9160d15199b30069b`。14 个原 `scripts/check_*.py` 已移除，其检查函数和实际公共替身归入 Benchmark。ReAct 的执行检查与记录检查分开；Review 的输入协议、文件系统预算、追踪投影按职责分开，未拆断单个故障链。Session 两处异步入口后的 CLI 检查、fixture 收尾和五次摘要 Tracing exercise 均保留。data/usage 组经 recording.transport 调用，不另建隔离单元或重复计数。
 
-基线 1,444 条 assert 中，1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担，组内原断言全部保留。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。断言数量仅是迁移核对依据，不代表覆盖率；基线与新入口均执行全量 138 组，对照事件、特殊入口、状态与故障证据。
+此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖 138 组；断言数量不是覆盖率。动态 Compact 改造保留这些行为组，调整已被替代的比例阈值及固定摘要上限断言，并增加下表中的三个恢复行为组；当前结果以 141 组的实际事件、请求、状态及故障证据为准。
 
 框架回归保留选择拒绝、状态分离、回执一致性、事件有效前缀、资源收尾、保存故障、会话/材料隔离、预算与评分绑定。旧 v1 worker 和 control-* 别名专用执行测试随接口撤销，其仍适用的断言/启动/源码/优化保护/保存等边界由组 worker 与通用框架测试承接；旧结果读取测试独立保留。新增第二个项目注册、构造材料、LLM 建议绑定与离线网络边界测试。
 
@@ -125,6 +125,9 @@
 | `context.compaction.summary_failure_cases` | context | 摘要服务、协议、来源及大小失败停止业务请求；context, execution | `check_compaction.py:check_summary_failure_cases` | [check_summary_failure_cases](checks/context/compaction.py) |
 | `context.compaction.usage_missing` | context | 摘要与业务用量缺失分计及新轮重置；context, recording, sessions | `check_compaction.py:check_usage_missing` | [check_usage_missing](checks/context/compaction.py) |
 | `context.compaction.summary_and_candidate_budget_boundaries` | context | 摘要请求及候选预算和准备失败边界；context, execution | `check_compaction.py:check_summary_and_candidate_budget_boundaries` | [check_summary_and_candidate_budget_boundaries](checks/context/compaction.py) |
+| `context.compaction.dynamic_summary_budgets` | context | 实际请求的 W/O/F/P 动态目标及超过软目标的合法摘要；context, execution | 动态摘要恢复新增 | [check_dynamic_summary_budgets](checks/context/compaction.py) |
+| `context.compaction.bounded_recovery_passes` | context | 同请求最多两次摘要、候选来源与请求归档及二次预检；context, sessions, recording | 动态摘要恢复新增 | [check_bounded_recovery_passes](checks/context/compaction.py) |
+| `context.compaction.second_pass_checkpoint_boundaries` | context | 重试与第二候选保存故障保持旧上下文及已发生消耗；context, sessions, recording | 动态摘要恢复新增 | [check_second_pass_checkpoint_boundaries](checks/context/compaction.py) |
 | `context.compaction.opaque_barriers_and_omissions` | context | 受保护历史阻止压缩及加密内容省略；context, sessions | `check_compaction.py:check_opaque_barriers_and_omissions` | [check_opaque_barriers_and_omissions](checks/context/compaction.py) |
 | `context.compaction.real_file_and_failure_source` | context | 真实文件及工具失败事实进入摘要来源；context, filesystem, execution | `check_compaction.py:check_real_file_and_failure_source` | [check_real_file_and_failure_source](checks/context/compaction.py) |
 | `context.compaction.repeated_compaction` | context | 同轮两次恢复的来源去重和工具结果保留；context, sessions, execution | `check_compaction.py:check_repeated_compaction` | [check_repeated_compaction](checks/context/compaction.py) |

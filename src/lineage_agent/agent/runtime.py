@@ -215,7 +215,7 @@ async def _run_agent(
             assert checkpointer is not None
             checkpointer.bind_run(session_id, recorder)
             tracer.bind_session(session_id)
-        config: dict[str, Any] = {"recursion_limit": 5 * settings.max_model_calls + 1}
+        config: dict[str, Any] = {"recursion_limit": 8 * settings.max_model_calls + 1}
         if session_id is not None:
             config["configurable"] = {"thread_id": session_id}
             if checkpoint_id is not None:
@@ -245,6 +245,12 @@ async def _run_agent(
 
         def observe_state(observed: AgentState, node: str, step_id: str | None) -> None:
             nonlocal state, last_node, last_step_id
+            if node == "activate_context" and (observed["compaction"] or {}).get("status") == "pending_save":
+                # LangGraph still saves the full activation update. This local
+                # failure fallback cannot claim it is active before that save
+                # is confirmed by the next model node. Retain paid-call facts.
+                for field in ("input", "context_risks", "active_context", "history_end"):
+                    observed[field] = deepcopy(state[field])
             state = observed
             last_node, last_step_id = node, step_id
 

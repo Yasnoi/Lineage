@@ -2056,6 +2056,50 @@
           }
         },
         {
+          "group_id": "context.compaction.dynamic_summary_budgets",
+          "description": "实际请求的 W/O/F/P 动态目标及超过软目标的合法摘要",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_dynamic_summary_budgets"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.bounded_recovery_passes",
+          "description": "同请求最多两次摘要、候选来源与请求归档及二次预检",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_bounded_recovery_passes"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.second_pass_checkpoint_boundaries",
+          "description": "重试与第二候选保存故障保持旧上下文及已发生消耗",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_second_pass_checkpoint_boundaries"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
           "group_id": "context.compaction.opaque_barriers_and_omissions",
           "description": "受保护历史阻止压缩及加密内容省略",
           "source": {

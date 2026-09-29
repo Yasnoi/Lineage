@@ -19,10 +19,10 @@ from benchmarks.core.budgets import RequestBudget, WorkerAbort
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
-from lineage_agent.config.settings import ModelSettings
+from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS
+from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
@@ -57,6 +57,9 @@ def value_or_unknown(value, reason="not observed") -> dict:
 
 def make_settings(spec: dict) -> ModelSettings:
     profile = spec["profile"]
+    retired = set(profile) & {"context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"}
+    if retired:
+        raise ConfigurationError("请移除旧 Compact 配置并使用 SUMMARY_TARGET_PERCENT：" + ", ".join(sorted(retired)))
     allowed = {field.name for field in fields(ModelSettings)} - {"log_dir", "project_root"}
     values = {key: value for key, value in profile.items() if key in allowed}
     return ModelSettings(**values, project_root=Path(spec["material_root"]),
@@ -92,7 +95,7 @@ def usage_metrics(observer: Observer) -> dict:
 
 
 def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: ModelSettings) -> tuple[str, dict]:
-    business = [request for request in requests if request.get("instructions") != SUMMARY_INSTRUCTIONS]
+    business = [request for request in requests if not is_summary_request(request)]
     if not business:
         raise WorkerAbort("pressure_request_evidence_missing")
     history_end = previous["history_end"]
@@ -104,9 +107,9 @@ def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: M
     measured = check_context_budget(prepared, risks, settings)
     if measured["decision"] == "error":
         raise WorkerAbort("pressure_measurement_failed")
-    desired = max(1, measured["trigger_tokens"] - measured["required_tokens"] + 512)
+    desired = max(1, measured["limit_tokens"] - measured["required_tokens"] + 512)
     actual = min(16384, desired)
-    return base + "p" * actual, {"formula_version": "utf8-budget-v1", "desired_bytes": desired,
+    return base + "p" * actual, {"formula_version": "utf8-window-v2", "desired_bytes": desired,
                                 "padding_bytes": actual, "capped": desired > actual,
                                 "trigger_tokens": measured["trigger_tokens"],
                                 "required_tokens": measured["required_tokens"]}
@@ -120,6 +123,7 @@ def context_projection(state: dict) -> dict:
             "compaction": {key: deepcopy(compaction[key]) for key in (
                 "status", "reason", "summary_id", "old_version_id", "candidate_version_id", "sources",
                 "removed_items", "removed_turns", "summary_checkpoint_id", "confirmed_checkpoint_id",
+                "pass_no", "candidate_input", "summary_request_sha256", "recovery_budget",
             ) if key in compaction}}
 
 
@@ -135,19 +139,46 @@ def read_limit_coverage(observer: Observer, mechanism: dict) -> dict:
 
 
 def compaction_coverage(observer: Observer, states: list[dict], old_record: dict | None,
-                        unchanged_record: bool | None, prompts: list[str], mechanism: dict) -> list[dict]:
+                        unchanged_record: bool | None, prompts: list[str], mechanism: dict,
+                        summary_record: dict | None = None) -> list[dict]:
     source_turn = mechanism["source_turn"]
     pressure_turn = mechanism["pressure_turn"]
     follow_up_turn = mechanism["follow_up_turn"]
     proofs = {}
     proofs["setup_without_compaction"] = len(states) >= pressure_turn - 1 and all(s.get("summary_calls") == 0 for s in states[:pressure_turn - 1])
-    summary_requests = [r for r in observer.requests.get(pressure_turn, []) if r.get("instructions") == SUMMARY_INSTRUCTIONS]
+    summary_requests = [r for r in observer.requests.get(pressure_turn, []) if is_summary_request(r)]
     compacted = states[pressure_turn - 1] if len(states) >= pressure_turn else {}
     before = states[pressure_turn - 2] if len(states) >= pressure_turn - 1 else {}
     compaction = compacted.get("compaction") or {}
     active = compacted.get("active_context") or {}
+    attempts = (summary_record or {}).get("summary_results", [])
+    lineage_valid = bool(1 <= len(attempts) <= 2 and len(attempts) == len(summary_requests)
+                         and (summary_record or {}).get("run_id") == compacted.get("run_id"))
+    for index, attempt in enumerate(attempts):
+        entry = attempt.get("compaction") or {}
+        lineage_valid = lineage_valid and (
+            entry.get("pass_no") == index + 1
+            and entry.get("request_no") == compaction.get("request_no")
+            and index < len(summary_requests)
+            and entry.get("summary_request_sha256") == digest(summary_requests[index])
+        )
+        if index:
+            previous = attempts[index - 1]
+            previous_entry = previous.get("compaction") or {}
+            lineage_valid = lineage_valid and entry.get("candidate_input") == {
+                "summary_id": previous_entry.get("summary_id"), "checkpoint_id": previous.get("checkpoint_id"),
+            } and entry.get("sources") == previous_entry.get("sources")
+            try:
+                material = json.loads(summary_requests[index]["input"][0]["content"])
+                lineage_valid = lineage_valid and material["candidate_input"] == {
+                    **entry["candidate_input"], "document": previous_entry["document"],
+                } and "previous_summary" not in material and all("payload" not in item for item in material["sources"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                lineage_valid = False
+    last = (attempts[-1].get("compaction") or {}) if attempts else {}
+    lineage_valid = lineage_valid and last.get("summary_id") == compaction.get("summary_id")
     proofs["summary_saved_and_activated"] = bool(
-        len(summary_requests) == 1 and compaction.get("status") == "used"
+        lineage_valid and compaction.get("status") == "used"
         and compaction.get("summary_checkpoint_id") and compaction.get("confirmed_checkpoint_id")
         and active.get("summary") and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
     source_items = []
@@ -164,7 +195,7 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
     old_user_items = [item for item in admitted if item.get("role") == "user"]
     proofs["old_user_requirements_selected"] = bool(old_user_items and all(
         any(source.get("payload") == item for source in selected) for item in old_user_items))
-    following = [r for r in observer.requests.get(follow_up_turn, []) if r.get("instructions") != SUMMARY_INSTRUCTIONS]
+    following = [r for r in observer.requests.get(follow_up_turn, []) if not is_summary_request(r)]
     message = compaction.get("message")
     proofs["following_uses_saved_version"] = bool(
         following and message and following[0].get("input") == compacted.get("input", []) + [{"role": "user", "content": prompts[follow_up_turn - 1]}]
@@ -337,9 +368,13 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                     result["issues"].append(safe_issue("agent_execution", "agent_terminal_stopped_sample", turn=index))
                     break
         if mechanism.get("kind") == "compaction":
+            summary_record = None
             if manager and old_record:
                 unchanged_record = await manager.get_record(sid, states[mechanism.get("source_turn", 1) - 1]["run_id"]) == old_record
-            result["coverage"] = compaction_coverage(observer, states, old_record, unchanged_record, spec["prompts"], mechanism)
+                pressure = mechanism["pressure_turn"]
+                if len(states) >= pressure:
+                    summary_record = await manager.get_record(sid, states[pressure - 1]["run_id"])
+            result["coverage"] = compaction_coverage(observer, states, old_record, unchanged_record, spec["prompts"], mechanism, summary_record)
         elif mechanism.get("kind") == "read_limit":
             result["coverage"] = [read_limit_coverage(observer, mechanism)]
         result["execution_status"] = "completed"

@@ -9,6 +9,7 @@ from benchmarks.core.files import ROOT
 from copy import deepcopy
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
+from lineage_agent.models.summarization import prepare_summary_request, is_summary_request
 from lineage_agent.models.responses import ModelError, send_prepared_response
 from lineage_agent.recording.tracing import start_trace
 from uuid import uuid4
@@ -35,7 +36,9 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
     metadata = {
         "summary_id": summary_id, "candidate_version_id": version_id,
         "confirmed_checkpoint_id": checkpoint_id, "step_id": "step-0002",
-        "request_no": 2, "summary_call": 1, "source_bytes": len(BODY),
+        "request_no": 2, "pass_no": 1, "summary_call": 1, "source_bytes": len(BODY),
+        "recovery_budget": {"input_budget_tokens": 10000, "fixed_tokens": 500,
+                            "preserved_tokens": 7500, "available_tokens": 2000, "target_tokens": 800},
         "status": "candidate",
         "sources": {"previous_summary": None, "added_turns": [
             {"run_id": source_run, "checkpoint_id": checkpoint_id, "item_count": 2},
@@ -47,11 +50,13 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
         "summary": {"summary_id": summary_id, "checkpoint_id": checkpoint_id},
         "turns": [], "turn_start": 1,
     }
-    summary_request = prepare_request(
-        SETTINGS.model_name, [{"role": "user", "content": BODY}],
-        instructions="Summarize these source records as data.", tool_choice="none",
-        max_output_tokens=128,
+    summary_request = prepare_summary_request(
+        SETTINGS, {"sources": [{"source_id": "fixture:0", "role": "user", "kind": "message",
+                                "payload": {"role": "user", "content": BODY}}]},
+        target_tokens=metadata["recovery_budget"]["target_tokens"],
     )
+    assert is_summary_request(summary_request) and summary_request["reasoning"] == {"effort": "none"}
+    assert summary_request["max_output_tokens"] == 800
     business_request = prepare_request(
         SETTINGS.model_name, [
             {"role": "assistant", "content": DERIVED},
@@ -111,6 +116,8 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
         assert span["inputs"]["content_omitted"] is True
         assert span["outputs"]["content_omitted"] is True
         assert span["extra"]["metadata"]["summary_id"] == summary_id
+        assert span["extra"]["metadata"]["pass_no"] == 1
+        assert span["extra"]["metadata"]["recovery_budget"] == metadata["recovery_budget"]
         assert span["extra"]["metadata"]["outcome"] == ("failed" if error else "returned")
         assert business[0]["inputs"]["summary_content_omitted"] is True
         assert QUOTE in json.dumps(business[0]["outputs"])

@@ -14,6 +14,7 @@ from lineage_agent.agent.state import (
 )
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import check_context_budget
+from lineage_agent.models.summarization import minimum_summary_message_bytes
 from lineage_agent.tools.types import ToolOutcomes
 
 
@@ -32,7 +33,7 @@ class CompactionSelection(TypedDict):
     allowed_source_ids: list[str]
     removed_items: int
     removed_turns: int
-    reserved_candidate_tokens: int
+    recovery_budget: dict[str, int]
 
 
 def new_context() -> ActiveContext:
@@ -42,6 +43,36 @@ def new_context() -> ActiveContext:
 
 def json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def budget_for_retained(
+    state: AgentState, settings: ModelSettings, prepare_request: Callable[..., dict[str, Any]],
+    removed_items: int, request_options: dict[str, Any],
+) -> dict[str, int]:
+    """Measure F and P using complete requests; B includes insertion punctuation.
+
+    These are internal policy units, including the existing opaque reserves.
+    Neither output reserves nor margins are included in F/P and deducted again.
+    The final candidate is independently checked as a complete request.
+    """
+    if type(removed_items) is not int or not 0 <= removed_items <= len(state["input"]):
+        raise ValueError("invalid removal boundary")
+    fixed = check_context_budget(prepare_request([], **request_options), [], settings)
+    retained = check_context_budget(
+        prepare_request(state["input"][removed_items:], **request_options),
+        state["context_risks"][removed_items:], settings,
+    )
+    if fixed["decision"] == "error" or retained["decision"] == "error":
+        raise ValueError("context measurement failed")
+    fixed_cost = fixed["transparent_tokens"] + fixed["opaque_risk_tokens"]
+    retained_cost = retained["transparent_tokens"] + retained["opaque_risk_tokens"]
+    available_input = settings.context_budget_tokens - retained["output_reserve_tokens"] - retained["safety_margin_tokens"]
+    available_summary = available_input - retained_cost
+    return {
+        "input_budget_tokens": available_input, "fixed_tokens": fixed_cost,
+        "preserved_tokens": retained_cost - fixed_cost, "available_tokens": available_summary,
+        "target_tokens": available_summary * settings.summary_target_percent // 100,
+    }
 
 
 async def _read_final_turn(
@@ -208,8 +239,9 @@ class ContextRecords:
         self, state: AgentState, settings: ModelSettings,
         prepare_request: Callable[..., dict[str, Any]], instructions: str | None,
         tool_choice: Literal["none"] | None,
+        *, summary_id: str,
     ) -> tuple[CompactionSelection | None, str | None]:
-        """Choose enough whole old turns for the target with a full summary reserve."""
+        """Choose the shortest safe old prefix that permits a nonempty summary."""
         active = state["active_context"]
         turns = active["turns"]
         eligible = len(turns) - settings.context_keep_recent_turns
@@ -220,7 +252,6 @@ class ContextRecords:
         allowed = _source_ids(old_summary) if old_summary is not None else set()
         offset = 1 if active["summary"] else 0
         removed = offset
-        placeholder = {"role": "assistant", "content": ""}
         for index, ref in enumerate(turns[:eligible]):
             record = await read_turn_slice(self.saver, self.session_id, ref)
             items = record["admitted_input"]
@@ -247,18 +278,21 @@ class ContextRecords:
             })
             removed += len(items)
             offset += len(items)
-            candidate_input = [placeholder] + state["input"][removed:]
-            risks = [None] + state["context_risks"][removed:]
-            request = prepare_request(candidate_input, instructions=instructions, tool_choice=tool_choice)
-            budget = check_context_budget(request, risks, settings)
-            if budget["decision"] == "error":
+            try:
+                allocation = budget_for_retained(
+                    state, settings, prepare_request, removed,
+                    {"instructions": instructions, "tool_choice": tool_choice},
+                )
+                minimum = minimum_summary_message_bytes(summary_id, allowed)
+                # Adding the first item to a nonempty array also adds a comma.
+                minimum += int(bool(state["input"][removed:]))
+            except (TypeError, ValueError, KeyError):
                 return None, "context_measurement_error"
-            upper_bound = budget["required_tokens"] - json_bytes(placeholder) + settings.summary_max_bytes
-            if upper_bound < settings.context_budget_tokens * settings.context_target_percent // 100:
+            if allocation["target_tokens"] >= minimum:
                 return {
                     "sources": {"previous_summary": deepcopy(active["summary"]), "added_turns": deepcopy(turns[:index + 1])},
                     "material": material, "allowed_source_ids": sorted(allowed),
                     "removed_items": removed, "removed_turns": index + 1,
-                    "reserved_candidate_tokens": upper_bound,
+                    "recovery_budget": allocation,
                 }, None
         return None, "protected_context_too_large"

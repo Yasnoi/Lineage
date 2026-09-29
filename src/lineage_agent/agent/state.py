@@ -41,13 +41,13 @@ class CompactionSources(TypedDict):
 
 
 CompactionStatus = Literal[
-    "preparing", "summary_budget_rejected", "candidate", "pending_save",
+    "preparing", "summary_budget_rejected", "candidate", "retry_pending", "pending_save",
     "confirmed", "used", "stopped", "failed",
 ]
 
 
 class CompactionState(TypedDict):
-    """One recovery's cumulative evidence, including evidence retained on failure.
+    """One of at most two recoveries for a business request, with saved evidence.
 
     An early stop can precede creation of a summary ID. Later fields become
     available at the milestones below and survive a subsequent stop/failure.
@@ -59,17 +59,24 @@ class CompactionState(TypedDict):
     reason: str | None
 
     # Preparing an actual attempt.
+    pass_no: NotRequired[int]
     summary_id: NotRequired[str]
     old_version_id: NotRequired[str]
     request_options: NotRequired[CompactionRequestOptions]
     step_id: NotRequired[str | None]
     # Source selection and summary request checking.
     sources: NotRequired[CompactionSources]
+    # A second attempt derives only from this saved, never-activated candidate.
+    candidate_input: NotRequired[SummaryReference]
+    source_headers: NotRequired[list[dict[str, Any]]]
+    outcome_headers: NotRequired[list[dict[str, Any]]]
+    opaque_omissions: NotRequired[list[dict[str, Any]]]
     allowed_source_ids: NotRequired[list[str]]
     removed_items: NotRequired[int]
     removed_turns: NotRequired[int]
-    reserved_candidate_tokens: NotRequired[int]
+    recovery_budget: NotRequired[dict[str, int]]
     summary_budget: NotRequired[ContextBudget]
+    summary_request_sha256: NotRequired[str]
     summary_call: NotRequired[int]
     cause_code: NotRequired[str]
     # Validated candidate; the raw model response remains in summary_result.
