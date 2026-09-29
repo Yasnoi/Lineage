@@ -19,6 +19,52 @@ def _available(value: Any, label: str) -> None:
         raise ValueError(f"invalid missing Research {label}")
 
 
+def _trace_turn(unit: dict, turn: dict) -> None:
+    tracing = turn.get("tracing")
+    if tracing is None:  # Historical v3 records have no transport observation.
+        return
+    if not isinstance(tracing, dict) or type(tracing.get("requested")) is not bool or not isinstance(tracing.get("traces"), list):
+        raise ValueError("invalid tracing observation")
+    identities = set()
+    for trace in tracing["traces"]:
+        identifier = trace.get("agent_run_id")
+        if not isinstance(identifier, str) or not identifier or identifier in identities:
+            raise ValueError("invalid trace Agent identity")
+        identities.add(identifier)
+        if turn["run_id"]["availability"] == "known" and identifier != turn["run_id"]["value"]:
+            raise ValueError("trace belongs to another Agent run")
+        binding = trace.get("binding", {})
+        if (binding.get("case_id") != unit["case_id"] or binding.get("turn") != turn["turn"]
+                or unit.get("sample_run_id") and binding.get("sample_run_id") != unit["sample_run_id"]):
+            raise ValueError("trace belongs to another sample or turn")
+        if type(trace.get("enabled")) is not bool or trace["enabled"] and not tracing["requested"]:
+            raise ValueError("unrequested tracing")
+        if trace.get("trace_id") != (identifier if trace["enabled"] else None):
+            raise ValueError("trace root differs from Agent identity")
+        if trace.get("upload_state") not in {"disabled", "configuration_error", "pending", "submission_completed", "incomplete"}:
+            raise ValueError("invalid trace submission status")
+        spans, counts = trace.get("spans"), trace.get("counts")
+        if not isinstance(spans, list) or not isinstance(counts, dict):
+            raise ValueError("invalid trace counts")
+        flags = ("queued", "attempted", "submitted", "failed", "dropped")
+        if any(type(counts.get(key)) is not int or counts[key] < 0 for key in (*flags, "generated", "unconfirmed")):
+            raise ValueError("invalid trace count value")
+        span_ids = set()
+        for span in spans:
+            if (not span.get("span_id") or span["span_id"] in span_ids or span.get("trace_id") != identifier
+                    or any(type(span.get(key)) is not bool for key in flags)):
+                raise ValueError("invalid trace span")
+            span_ids.add(span["span_id"])
+        if counts["generated"] != len(spans) or any(counts[key] != sum(span[key] for span in spans) for key in flags):
+            raise ValueError("trace counts differ from observations")
+        if counts["unconfirmed"] != sum(not (s["submitted"] or s["failed"] or s["dropped"]) for s in spans):
+            raise ValueError("trace unconfirmed count differs")
+        if trace["upload_state"] == "submission_completed" and (
+                not trace.get("closed") or not trace.get("shutdown_confirmed") or trace.get("warning_codes")
+                or counts["submitted"] != counts["generated"]):
+            raise ValueError("false trace submission completion")
+
+
 def validate_research_result(result: dict) -> None:
     """Validate only real-model extensions; old contract examples stay valid.
 
@@ -60,6 +106,7 @@ review binding, not historical result parsing.
                 raise ValueError("unstarted Research turn cannot claim an Agent run")
             if turn["execution_status"] == "completed" and turn["run_id"]["availability"] != "known":
                 raise ValueError("completed Research turn requires an observed Agent run")
+            _trace_turn(unit, turn)
         coverage = unit.get("coverage", [])
         if not isinstance(coverage, list):
             raise ValueError("invalid Research coverage")

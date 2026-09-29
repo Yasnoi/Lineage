@@ -23,6 +23,7 @@ from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.recording.tracing import trace_scope
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
@@ -94,7 +95,10 @@ def usage_metrics(observer: Observer) -> dict:
     return metrics
 
 
-def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: ModelSettings) -> tuple[str, dict]:
+def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: ModelSettings,
+                    max_bytes: int = 16384) -> tuple[str, dict]:
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 32768:
+        raise WorkerAbort("pressure_limit_invalid")
     business = [request for request in requests if not is_summary_request(request)]
     if not business:
         raise WorkerAbort("pressure_request_evidence_missing")
@@ -108,8 +112,9 @@ def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: M
     if measured["decision"] == "error":
         raise WorkerAbort("pressure_measurement_failed")
     desired = max(1, measured["limit_tokens"] - measured["required_tokens"] + 512)
-    actual = min(16384, desired)
-    return base + "p" * actual, {"formula_version": "utf8-window-v2", "desired_bytes": desired,
+    actual = min(max_bytes, desired)
+    return base + "p" * actual, {"formula_version": "utf8-window-v3", "desired_bytes": desired,
+                                "max_padding_bytes": max_bytes,
                                 "padding_bytes": actual, "capped": desired > actual,
                                 "trigger_tokens": measured["trigger_tokens"],
                                 "required_tokens": measured["required_tokens"]}
@@ -261,6 +266,15 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
         return result, 2
     try:
         save()
+        tracing = spec.get("tracing", {"enabled": False})
+        if not isinstance(tracing, dict) or type(tracing.get("enabled")) is not bool:
+            raise WorkerAbort("tracing_configuration_invalid")
+        os.environ["LANGSMITH_TRACING"] = "true" if tracing["enabled"] else "false"
+        for name in ("LANGCHAIN_TRACING", "LANGCHAIN_TRACING_V2"):
+            os.environ[name] = "false"
+        if not tracing["enabled"]:
+            for name in ("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"):
+                os.environ.pop(name, None)
         if not spec.get("case_id") or not spec["prompts"] or any(not isinstance(p, str) or not p.strip() for p in spec["prompts"]):
             raise ValueError("invalid fixed research definition")
         if not __debug__:
@@ -278,7 +292,7 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
             result["execution_status"] = "blocked"
             raise WorkerAbort("research_profile_invalid") from exc
         budget = RequestBudget(Path(spec["ledger_path"]), spec["run_id"], spec["case_id"],
-                               max_requests=spec.get("max_requests", 400), remaining_seconds=spec.get("remaining_seconds", 300),
+                               max_requests=spec.get("max_requests", 400), remaining_seconds=spec.get("remaining_seconds", 1200),
                                batch_id=spec.get("batch_id", spec["run_id"]))
         observer = Observer(budget, output, Path(spec["material_root"]))
         executor = ObservedTools(create_filesystem_executor(
@@ -297,7 +311,8 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                 current["session_id"] = known(sid) if sid else not_applicable("independent single run")
                 prompt = original_prompt
                 if mechanism.get("kind") == "compaction" and index == mechanism["pressure_turn"]:
-                    prompt, padding = pressure_prompt(prompt, states[-1], observer.requests.get(index - 1, []), settings)
+                    prompt, padding = pressure_prompt(prompt, states[-1], observer.requests.get(index - 1, []), settings,
+                                                      mechanism.get("pressure_max_bytes", 16384))
                     current["pressure"] = padding
                 prompt_path = output / f"turn-{index:02d}-prompt.txt"
                 atomic_write_text(prompt_path, prompt)
@@ -308,17 +323,27 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                 request_start = len(observer.request_events)
                 turn_started = time.monotonic()
                 checkpoint_complete = None
-                if multiple:
-                    session_turn = await manager.run_turn(sid, prompt)
-                    state = session_turn.state
-                    checkpoint_complete = session_turn.checkpoint_complete
-                    current["checkpoint_complete"] = checkpoint_complete
-                    current["checkpoint_id"] = value_or_unknown(session_turn.checkpoint_id, "checkpoint not confirmed")
-                    if checkpoint_complete and index == mechanism.get("source_turn", 1):
-                        old_record = await manager.get_record(sid, state["run_id"])
-                else:
-                    state = await runtime.run_agent(prompt, settings, tools=TOOL_DEFINITIONS, execute_tool=executor)
-                    current["checkpoint_id"] = not_applicable("independent single run")
+                with trace_scope({"benchmark_batch_id": spec.get("batch_id", spec["run_id"]),
+                                  "sample_run_id": spec["run_id"], "case_id": spec["case_id"],
+                                  "turn": index}) as scope:
+                    try:
+                        if multiple:
+                            session_turn = await manager.run_turn(sid, prompt)
+                            state = session_turn.state
+                            checkpoint_complete = session_turn.checkpoint_complete
+                            current["checkpoint_complete"] = checkpoint_complete
+                            current["checkpoint_id"] = value_or_unknown(session_turn.checkpoint_id, "checkpoint not confirmed")
+                            if checkpoint_complete and index == mechanism.get("source_turn", 1):
+                                old_record = await manager.get_record(sid, state["run_id"])
+                        else:
+                            state = await runtime.run_agent(prompt, settings, tools=TOOL_DEFINITIONS, execute_tool=executor)
+                            current["checkpoint_id"] = not_applicable("independent single run")
+                    finally:
+                        current["tracing"] = {"requested": tracing["enabled"], "traces": scope.statuses(),
+                                              "remote_status": "not_checked"}
+                        trace_path = output / f"turn-{index:02d}-tracing.json"
+                        atomic_write_json(trace_path, current["tracing"])
+                        current["process_evidence"].append(evidence(trace_path, "tracing", "production trace status snapshot"))
                 states.append(deepcopy(state))
                 current["run_id"] = known(state["run_id"])
                 current["agent_outcome"] = value_or_unknown(state.get("stop_reason"))
@@ -416,8 +441,6 @@ def main(argv=None) -> int:
     try:
         raw = args.spec.read_bytes()
         spec = json.loads(raw)
-        for name in ("LANGSMITH_TRACING", "LANGCHAIN_TRACING", "LANGCHAIN_TRACING_V2"):
-            os.environ[name] = "false"
         _, code = asyncio.run(execute_sample(spec, hashlib.sha256(raw).hexdigest()))
         return code
     except KeyboardInterrupt:

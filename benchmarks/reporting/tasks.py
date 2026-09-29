@@ -96,4 +96,11 @@ def render_research_report(result: dict) -> str:
     for unit in research_units(result):
         lines.extend([f"### {unit['case_id']} / {unit.get('phase', 'samples')} / {unit['repeat']}", "",
                       "```json", json.dumps(unit.get("coverage", []), ensure_ascii=False, indent=2), "```", ""])
+        trace_states = [trace["upload_state"] for turn in unit["turns"] for trace in turn.get("tracing", {}).get("traces", [])]
+        if trace_states or unit.get("tracing"):
+            lines.extend(["追踪提交状态与远端核验分别记录，不作为回答质量判定：", "", "```json",
+                          json.dumps({"submission_states": trace_states, **unit.get("tracing", {})}, ensure_ascii=False, indent=2), "```", ""])
+    if result.get("unselected_units"):
+        lines.extend(["### 未选择范围", "", "以下实例未选择，不计为通过。", "", "```json",
+                      json.dumps(result["unselected_units"], ensure_ascii=False, indent=2), "```", ""])
     return "\n".join(lines)

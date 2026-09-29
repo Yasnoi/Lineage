@@ -513,22 +513,24 @@ uv run --locked python -m unittest discover -s benchmarks/tests -v
 
 无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、15 条隔离行为链、141 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
 
-`wechat-reporting` 是固定项目任务集，包含八类任务、九个实例、19 个计划轮次，沿需求覆盖、代码与需求的反向对应、缺陷/性能分析和改进方案组织，并覆盖多轮纠正、读取受限和摘要后继续研究。真实运行需另行核定模型与预算，使用通用配置：
+`wechat-reporting` 是固定项目任务集，包含八类任务、九个实例、19 个计划轮次，沿需求覆盖、代码与需求的反向对应、缺陷/性能分析和改进方案组织，并覆盖多轮纠正、读取受限和摘要后继续研究。真实运行使用显式启用的通用配置：
 
 ```powershell
 uv run --locked python -m benchmarks run wechat-reporting --config logs/run-config.json
 uv run --locked python -m benchmarks review logs/benchmarks/<运行ID> --file logs/review-filled.json
 ```
 
-配置样例默认禁用。仅运行工程集不会加载 `.env`、传递真实凭据、调用模型或外部追踪。研究材料取自固定 Git 对象，每个实例独立复制；评分资料不进入 Agent 可访问目录。共享入口与执行器不包含项目用例分支，新增项目只需定义材料、任务和 Rubric 并登记到固定目录表。
+配置样例默认禁用。运行配置 v2 的 `agent_source: "project_env"` 复用当前生产配置，优先级为任务覆盖 > `model_overrides` > 进程环境 > 项目根 `.env` > 默认值；v1 的显式模型与 `credential_env` 语义保持不变。v2 可用 `units` 指定任务顺序，用 `gate_first_sample` 核对首例可信完成、本地日志/检查点和回答产物后再继续；此门槛不评价回答质量。外部追踪默认关闭，仅对 `tracing.unit_ids` 指定且显式启用的实例上传经过过滤的数据。
+
+仅运行工程集不会加载 `.env`、传递真实凭据、调用模型或外部追踪。研究材料取自固定 Git 对象，每个实例独立复制；评分资料不进入 Agent 可访问目录。共享入口与执行器不包含项目用例分支，新增项目只需定义材料、任务和 Rubric 并登记到固定目录表。
 
 结果使用 v3，继续只读校验、渲染 v1/v2；执行状态、评测判定和 Agent 终态分别记录。JSON、Markdown、逐组事件、输出和回执存入独占的 `logs/benchmarks/<运行ID>/`；组、任务、Agent 运行和模型消耗分别统计，未知不补零，不合成总分。机械规则、检查项清单、人工 Rubric 与 LLM 建议适配分别组织；未经人工核对的模型建议保持待评审。
 
 退出优先级为 `2 > 1 > 3 > 0`：2 表示执行/证据/保存故障、阻塞或适用覆盖缺口，1 表示有效未通过，3 表示仍待评审，0 表示选定范围完整通过且成功保存。断言失败后保留组事实和依赖未执行项，其他独立行为链可继续；记录或收尾不确定时停止。标签与失败环节不自动证明根因。
 
-运行、配置、结构、扩展和评审方法见 [Benchmark 使用说明](benchmarks/README.md)，原检查去向见 [覆盖映射](benchmarks/COVERAGE.md)，项目事实与评分边界见 [WeChat Reporting 任务说明](benchmarks/suites/wechat_reporting/README.md)。本轮重构只验收离线实现，不宣称新任务的真实 Research 效果基线或 LLM 评分已完成。
+运行、配置、结构、扩展和评审方法见 [Benchmark 使用说明](benchmarks/README.md)，原检查去向见 [覆盖映射](benchmarks/COVERAGE.md)，项目事实与评分边界见 [WeChat Reporting 任务说明](benchmarks/suites/wechat_reporting/README.md)。语义评审完成前，真实运行结果保持待评审；执行和追踪完成均不能证明 Research 质量通过。
 
-生产预算与研究运行配置分别维护。[研究运行样例](benchmarks/entrypoints/run.example.json) 仍显式指定调用上限 8、请求超时 60 秒、窗口 32768、输出 4096；未填写的模型预算按现有配置加载逻辑继承生产默认值。真实试运行前须核定完整组合，避免混用新旧额度；读取受限和摘要触发任务保留必要的专用覆盖。还需协调样本与批次时限、请求总数及执行器校验上限（当前单样本 300 秒、累计 7200 秒、400 次请求），业务、摘要及失败请求均计数。上调生产默认值不会自动扩大这些外层限制，也不证明真实任务完成率或摘要质量提升。
+生产预算与批次上限分别管理。[研究运行样例](benchmarks/entrypoints/run.example.json) 不再固定旧的每轮 8 次调用、60 秒请求、32768 窗口和 4096 输出组合，未覆盖的值按 v2 配置优先级读取。读取受限例仍使用 4 KiB；摘要例 v2.3 使用 65536 窗口、6 KiB 背景和至多 32 KiB 压力，保留最近两轮、40% 动态摘要目标，其他任务沿用当前配置。执行器硬上限为 400 次实际请求、7200 秒累计、每实例 1200 秒；首轮计划九个实例各一次、19 轮，采用更低的 200 次请求、5400 秒累计和每实例 1200 秒。业务、摘要及失败请求均计数；费用无账单时为未知，单次观察不构成稳定性结论。
 
 ## 独立端点诊断
 

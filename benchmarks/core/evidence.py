@@ -11,6 +11,7 @@ from unittest.mock import patch
 from benchmarks.core.files import utc_now
 from benchmarks.core.budgets import RequestBudget, append_durable
 from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.recording.tracing import bind_request
 from lineage_agent.tools.types import ToolArgumentError, ToolExecutionError
 
 
@@ -60,10 +61,12 @@ class Observer:
                 async def create(**kwargs):
                     purpose = "summary" if is_summary_request(kwargs) else "business"
                     reserved = self.budget.reserve(self.turn, purpose)
+                    correlation = bind_request(reserved["request_id"], purpose)
                     # Retain full request only in this process for mechanism comparisons.
                     self.requests.setdefault(self.turn, []).append(deepcopy(kwargs))
                     started = self.record({"event": "request_started", "request_id": reserved["request_id"],
                                            "ledger_seq": reserved["seq"], "purpose": purpose,
+                                           "correlation": correlation,
                                            "request_sha256": digest(kwargs),
                                            "input_items": len(kwargs.get("input", []))})
                     self.request_events.append(started)

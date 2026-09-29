@@ -17,7 +17,10 @@ def run_benchmark(suite_id, *, config=None, root=ROOT, output_root=None, registr
     result = {"schema_version": "3", "run_id": run_id, "started_at": utc_now(), "ended_at": None,
               "selected_suites": [suite_id], "suite_version": suite["version"], "baseline": collect_baseline(root),
               "units": [executor.make_unit(item, root) for item in definitions],
-              "summary": {}, "framework_errors": [], "unselected_units": []}
+              "summary": {}, "framework_errors": [], "unselected_units": [
+                  task["unit_id"] for task in suite["units"]
+                  if task["unit_id"] not in {item.get("definition_unit_id", item["unit_id"]) for item in definitions}
+              ]}
     directory = Path(output_root or root / "logs/benchmarks") / run_id
     try:
         directory.mkdir(parents=True, exist_ok=False)

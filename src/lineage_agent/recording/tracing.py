@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -45,6 +49,77 @@ _STAGES = {
     "executor_configuration", "execution", "argument_validation", "result_generation",
 }
 _OUTCOMES = {"succeeded", "rejected", "failed", "skipped"}
+_BENCHMARK_FIELDS = {"benchmark_batch_id", "sample_run_id", "case_id", "turn"}
+_IDENTITY_FIELDS = {
+    "step_id", "model_call", "call_id", "request_index", "summary_id", "summary_call",
+}
+_scope: ContextVar["TraceScope | None"] = ContextVar("lineage_trace_scope", default=None)
+_current_trace: ContextVar["RunTrace | None"] = ContextVar("lineage_current_trace", default=None)
+
+
+class TraceScope:
+    """An opt-in observer exposing only safe identities and submission facts."""
+
+    def __init__(self, binding: dict[str, Any]) -> None:
+        if not isinstance(binding, dict) or set(binding) != _BENCHMARK_FIELDS:
+            raise ValueError("invalid trace scope binding")
+        if type(binding["turn"]) is not int or not 1 <= binding["turn"] <= 2**31 - 1:
+            raise ValueError("invalid trace scope turn")
+        for key in _BENCHMARK_FIELDS - {"turn"}:
+            if type(binding[key]) is not str or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", binding[key]) is None:
+                raise ValueError("invalid trace scope identifier")
+        self._binding = deepcopy(binding)
+        self._traces: list[RunTrace] = []
+
+    def _register(self, trace: "RunTrace", settings: ModelSettings) -> None:
+        # A disabled trace still needs a safe local Agent identity. Reuse the
+        # production text filter without constructing an uploader or client.
+        secrets = [os.environ.get(name, "") for name in ("API_KEY", "LANGSMITH_API_KEY")]
+        sanitizer = TraceSanitizer(secrets=secrets + [value.strip() for value in secrets],
+                                   project_root=settings.project_root)
+        trace._binding = {key: sanitizer.text(value) if isinstance(value, str) else value
+                          for key, value in self._binding.items()}
+        self._traces.append(trace)
+        _current_trace.set(trace)
+
+    def statuses(self) -> list[dict[str, Any]]:
+        """Return independent snapshots, including disabled and failed starts."""
+        return [trace.status() for trace in self._traces]
+
+
+@contextmanager
+def trace_scope(binding: dict[str, Any]):
+    """Associate one Benchmark turn without changing Agent State or requests."""
+    observer = TraceScope(binding)
+    scope_token = _scope.set(observer)
+    trace_token = _current_trace.set(None)
+    try:
+        yield observer
+    finally:
+        _current_trace.reset(trace_token)
+        _scope.reset(scope_token)
+
+
+def bind_request(request_id: str, purpose: str) -> dict[str, Any]:
+    """Bind an actually admitted SDK request to its current safe span identity."""
+    trace = _current_trace.get()
+    if trace is None or trace._closed:
+        return {}
+    if type(purpose) is not str or purpose not in {"business", "summary"} or type(request_id) is not str:
+        raise ValueError("invalid trace request binding")
+    try:
+        UUID(request_id)
+    except ValueError:
+        raise ValueError("invalid trace request identifier") from None
+    try:
+        return trace._bind_request(request_id, purpose)
+    except Exception:
+        # A caller's valid request must survive failures in optional observation.
+        # Keep only the already filtered scope identity, without claiming a span
+        # association that could have failed midway through recording.
+        trace._warn("recording")
+        return {"agent_run_id": trace.run_id, "request_id": request_id, "purpose": purpose,
+                **deepcopy(trace._binding)}
 
 
 def _warning(kind: str) -> None:
@@ -165,6 +240,76 @@ class RunTrace:
         self._active_context: dict[str, Any] = {}
         self._finished = False
         self._closed = False
+        self._binding: dict[str, Any] = {}
+        self._request_span: _Span | None = None
+        self._status_lock = threading.Lock()
+        self._span_statuses: dict[str, dict[str, Any]] = {}
+        self._final_status: dict[str, Any] | None = None
+
+    def _status_snapshot(self) -> dict[str, Any]:
+        spans = deepcopy(list(self._span_statuses.values()))
+        counts = {key: sum(span[key] for span in spans)
+                  for key in ("queued", "attempted", "submitted", "failed", "dropped")}
+        counts["generated"] = len(spans)
+        counts["unconfirmed"] = sum(not (span["submitted"] or span["failed"] or span["dropped"])
+                                    for span in spans)
+        with self._warning_lock:
+            warnings = sorted(self._warned)
+        stopped = self._worker is None or not self._worker.is_alive()
+        if "configuration" in warnings:
+            state = "configuration_error"
+        elif not self.enabled:
+            state = "disabled"
+        elif not self._closed:
+            state = "pending"
+        elif stopped and not warnings and counts["submitted"] == counts["generated"]:
+            state = "submission_completed"
+        else:
+            state = "incomplete"
+        return {
+            "agent_run_id": self.run_id, "trace_id": self.run_id if self.enabled else None,
+            "binding": deepcopy(self._binding), "session_id": self._session_id,
+            "enabled": self.enabled, "closed": self._closed,
+            "shutdown_confirmed": self._closed and stopped, "upload_state": state,
+            "warning_codes": warnings, "counts": counts, "spans": spans,
+        }
+
+    def status(self) -> dict[str, Any]:
+        """Safe submission facts, not proof that remote data can be retrieved."""
+        with self._status_lock:
+            return deepcopy(self._final_status) if self._final_status is not None else self._status_snapshot()
+
+    def _span_status(self, span_id: str, **changes: Any) -> None:
+        with self._status_lock:
+            if self._final_status is None:
+                self._span_statuses[span_id].update(changes)
+
+    def _bind_request(self, request_id: str, purpose: str) -> dict[str, Any]:
+        identity = {"agent_run_id": self.run_id, "trace_id": self.run_id if self.enabled else None,
+                    "request_id": request_id, "purpose": purpose, **deepcopy(self._binding)}
+        if self._session_id is not None:
+            identity["session_id"] = self._session_id
+        token = self._request_span
+        if self.enabled and token is not None and not token.ended:
+            metadata = token.payload["extra"]["metadata"]
+            actual_purpose = "summary" if metadata.get("purpose") == "summary" else "business"
+            if purpose != actual_purpose or "request_id" in metadata:
+                raise ValueError("trace request does not match the current span")
+            metadata["request_id"] = request_id
+            identity["span_id"] = token.payload["id"]
+            safe_metadata = self._identity_metadata(metadata)
+            identity.update({key: safe_metadata[key] for key in _IDENTITY_FIELDS if key in safe_metadata})
+            self._span_status(token.payload["id"], metadata=safe_metadata)
+        return identity
+
+    def _identity_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        allowed = _BENCHMARK_FIELDS | _IDENTITY_FIELDS | {
+            "run_id", "session_id", "purpose", "request_id", "outcome", "reason_code",
+            "skip_reason", "error_code", "stage", "checkpoint_id", "checkpoint_error", "checkpoint_saved",
+        }
+        return {key: self._sanitizer.text(value) if isinstance(value, str) else value
+                for key, value in metadata.items() if key in allowed
+                and (value is None or type(value) in {str, bool, int})}
 
     def _warn(self, kind: str) -> None:
         try:
@@ -201,7 +346,7 @@ class RunTrace:
             "name": name, "run_type": run_type, "inputs": inputs,
             "start_time": now.isoformat(),
             "project_name": self._settings.project,
-            "extra": {"metadata": {"run_id": self.run_id, **metadata}},
+            "extra": {"metadata": {"run_id": self.run_id, **self._binding, **metadata}},
         }
         if self._session_id is not None:
             payload["extra"]["metadata"]["session_id"] = self._session_id
@@ -209,6 +354,13 @@ class RunTrace:
             payload["parent_run_id"] = self.run_id
             order = self._root.payload["dotted_order"] + "." + order
         payload["dotted_order"] = order
+        with self._status_lock:
+            self._span_statuses[span_id] = {
+                "span_id": span_id, "trace_id": self.run_id,
+                "parent_run_id": payload.get("parent_run_id"), "run_type": run_type,
+                "metadata": self._identity_metadata(payload["extra"]["metadata"]), "usage": {},
+                **{key: False for key in ("queued", "attempted", "submitted", "failed", "dropped")},
+            }
         return _Span(payload, time.monotonic())
 
     @_safe
@@ -218,6 +370,7 @@ class RunTrace:
             return
         self._session_id = self._sanitizer.text(session_id)
         self._root.payload["extra"]["metadata"]["session_id"] = self._session_id
+        self._span_status(self.run_id, metadata=self._identity_metadata(self._root.payload["extra"]["metadata"]))
 
     @_safe
     def finish_checkpoint(self, checkpoint_id: str | None, checkpoint_error=None) -> None:
@@ -279,7 +432,7 @@ class RunTrace:
         if not self.enabled or self._closed or self._finished:
             return None
         projected = self._sanitizer.compaction(metadata)
-        return self._new_span(
+        token = self._new_span(
             "Context summary", "llm",
             {"model": self._sanitizer.text(model_name), "content_omitted": True},
             {"purpose": "summary", **projected,
@@ -287,11 +440,15 @@ class RunTrace:
              "ls_model_name": self._sanitizer.text(model_name),
              "ls_invocation_params": {"use_responses_api": True}},
         )
+        self._request_span = token
+        return token
 
     @_safe
     def summary_end(self, token, result=None, error_code=None, stage=None) -> None:
         if not self.enabled or not isinstance(token, _Span):
             return
+        if self._request_span is token:
+            self._request_span = None
         token.payload["outputs"] = self._sanitizer.summary_outputs(result)
         metadata = token.payload["extra"]["metadata"]
         # A model return is not evidence that the candidate was valid or saved.
@@ -316,9 +473,17 @@ class RunTrace:
         span.ended = True
         self._stamp_end(span)
         payload = self._sanitizer.cap_payload(span.payload)
+        output = payload.get("outputs", {})
+        usage = output.get("usage_metadata", {}) if isinstance(output, dict) else {}
+        self._span_status(span.payload["id"], metadata=self._identity_metadata(payload["extra"]["metadata"]),
+                          usage={key: value for key, value in usage.items()
+                                 if key in {"input_tokens", "output_tokens", "total_tokens"}
+                                 and type(value) is int and value >= 0} if isinstance(usage, dict) else {})
         try:
             self._queue.put_nowait(payload)
+            self._span_status(span.payload["id"], queued=True)
         except Full:
+            self._span_status(span.payload["id"], dropped=True)
             self._warn("overflow")
 
     def _upload(self) -> None:
@@ -336,9 +501,13 @@ class RunTrace:
                         break
                     continue
                 try:
+                    self._span_status(payload["id"], attempted=True)
                     client.create_run(**payload)
                 except Exception:
+                    self._span_status(payload["id"], failed=True)
                     self._warn("upload")
+                else:
+                    self._span_status(payload["id"], submitted=True)
                 finally:
                     self._queue.task_done()
         except Exception:
@@ -371,13 +540,13 @@ class RunTrace:
     def model_start(self, model_name, input, tools, *, instructions=None, tool_choice=None) -> _Span | None:
         if not self.enabled or self._closed or self._finished:
             return None
-        return self._new_span(
+        token = self._new_span(
             "OpenAI Responses", "llm",
             self._sanitizer.model_inputs(
                 model_name, input, tools, instructions=instructions,
                 tool_choice=tool_choice, active_context=self._active_context,
             ),
-            {"step_id": self._step_id, "model_call": self._model_call,
+            {"purpose": "business", "step_id": self._step_id, "model_call": self._model_call,
              "ls_provider": "openai", "ls_model_type": "chat",
              "ls_model_name": self._sanitizer.text(model_name),
              **getattr(self, "_allowances", {}),
@@ -386,11 +555,15 @@ class RunTrace:
              ),
              "ls_invocation_params": {"use_responses_api": True}},
         )
+        self._request_span = token
+        return token
 
     @_safe
     def model_end(self, token, result=None, error_code=None, stage=None) -> None:
         if not self.enabled or not isinstance(token, _Span):
             return
+        if self._request_span is token:
+            self._request_span = None
         self._stamp_end(token)
         token.payload["outputs"] = self._sanitizer.model_outputs(result)
         metadata = token.payload["extra"]["metadata"]
@@ -541,12 +714,18 @@ class RunTrace:
             self._warn("upload")
         finally:
             self._abort.set()
+            with self._status_lock:
+                if self._final_status is None:
+                    self._final_status = self._status_snapshot()
 
 
 def start_trace(run_id: str, settings: ModelSettings) -> RunTrace:
     """Read only this application's dotenv variables; no credential fallback."""
     trace = RunTrace(run_id)
     try:
+        observer = _scope.get()
+        if observer is not None:
+            observer._register(trace, settings)
         config = _read_settings()
         if config is not None:
             trace._start(config, settings)

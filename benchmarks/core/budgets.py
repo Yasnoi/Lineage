@@ -64,15 +64,15 @@ def append_durable(path: Path, event: dict) -> None:
 
 class RequestBudget:
     def __init__(self, path: Path, run_id: str, case_id: str, *, max_requests: int = 400,
-                 remaining_seconds: float = 300, batch_id: str | None = None):
+                 remaining_seconds: float = 1200, batch_id: str | None = None):
         if (type(max_requests) is not int or not 1 <= max_requests <= 400
                 or type(remaining_seconds) not in {int, float}
-                or not math.isfinite(remaining_seconds) or not 0 < remaining_seconds <= 7200):
+                or not math.isfinite(remaining_seconds) or not 0 < remaining_seconds <= 1200):
             raise ValueError("invalid research budget")
         self.path, self.run_id, self.case_id = Path(path), run_id, case_id
         self.batch_id = batch_id or run_id
         self.max_requests = max_requests
-        self.deadline = time.monotonic() + min(300, remaining_seconds)
+        self.deadline = time.monotonic() + remaining_seconds
         self._seen: list[dict] | None = None
 
     def reserve(self, turn: int, purpose: str) -> dict:

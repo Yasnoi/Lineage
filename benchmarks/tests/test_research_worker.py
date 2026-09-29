@@ -16,6 +16,7 @@ from benchmarks.core.budgets import BudgetRecordError, RequestBudget, WorkerAbor
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from benchmarks.core.executors import agent_worker as worker
 from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.recording import tracing
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.types import ToolArgumentError
 
@@ -246,6 +247,64 @@ class ResearchWorkerTests(unittest.TestCase):
         other, _, other_captured = self.execute(lambda _: message(), spec)
         self.assertNotEqual(other["turns"][0]["session_id"], first["session_id"])
         self.assertNotIn("saved-response", json.dumps(other_captured[0]))
+        for turn in result["turns"]:
+            snapshot = turn["tracing"]["traces"][0]
+            self.assertEqual(snapshot["agent_run_id"], turn["run_id"]["value"])
+            self.assertEqual(snapshot["upload_state"], "disabled")
+            self.assertEqual(snapshot["counts"]["generated"], 0)
+
+    def test_production_trace_binding_and_disabled_override(self):
+        uploaded = []
+        class Upload:
+            def create_run(self, **payload):
+                uploaded.append(deepcopy(payload))
+            def close(self, **kwargs):
+                pass
+        self.spec["tracing"] = {"enabled": True}
+        self.spec["prompts"] = ["first", "follow up"]
+        with patch.dict("os.environ", {"LANGSMITH_API_KEY": "trace-secret-marker",
+                                      "LANGSMITH_PROJECT": "offline-benchmark",
+                                      "LANGSMITH_ENDPOINT": "https://trace.invalid"}), \
+                patch.object(tracing, "_create_client", return_value=Upload()):
+            result, code, captured = self.execute(lambda _: message("answer"))
+        self.assertEqual(code, 0, result["issues"])
+        self.assertEqual(len(uploaded), 4)
+        observations = [json.loads(line) for line in (self.output / "observations.jsonl").read_text(encoding="utf-8").splitlines()]
+        for index, turn in enumerate(result["turns"], 1):
+            snapshot = turn["tracing"]["traces"][0]
+            self.assertEqual(snapshot["upload_state"], "submission_completed")
+            self.assertEqual(snapshot["binding"]["turn"], index)
+            admitted = next(event for event in observations if event["turn"] == index and event["event"] == "request_started")
+            self.assertEqual(admitted["correlation"]["agent_run_id"], turn["run_id"]["value"])
+            model = next(p for p in uploaded if p["id"] == admitted["correlation"]["span_id"])
+            self.assertEqual(model["extra"]["metadata"]["request_id"], admitted["request_id"])
+            self.assertEqual(model["extra"]["metadata"]["sample_run_id"], self.spec["run_id"])
+        self.assertNotIn("benchmark_batch_id", json.dumps(captured))
+        self.assertNotIn("trace-secret-marker", json.dumps(uploaded))
+        other = self.root / "disabled"
+        other.mkdir()
+        spec = {**self.spec, "output_dir": str(other), "tracing": {"enabled": False}}
+        with patch.dict("os.environ", {"API_KEY": "model-secret", "LANGSMITH_TRACING": "true",
+                                      "LANGSMITH_API_KEY": "trace-secret-marker"}), \
+                patch.object(tracing, "_create_client") as trace_client, \
+                patch.object(worker.runtime, "create_client", return_value=Client(lambda _: message(), [])):
+            disabled, code = asyncio.run(worker.execute_sample(spec, "disabled-spec"))
+        trace_client.assert_not_called()
+        self.assertEqual(code, 0)
+        self.assertEqual(disabled["turns"][0]["tracing"]["traces"][0]["upload_state"], "disabled")
+
+    def test_trace_snapshot_write_failure_stops_sample(self):
+        original = worker.atomic_write_json
+        def write(path, value):
+            if path.name.endswith("-tracing.json"):
+                raise OSError("injected local trace recording failure")
+            return original(path, value)
+        with patch.object(worker, "atomic_write_json", side_effect=write):
+            result, code, captured = self.execute(lambda _: message())
+        self.assertEqual(code, 2)
+        self.assertTrue(result["global_stop"])
+        self.assertEqual(len(captured), 1)
+        self.assertFalse((self.output / "turn-01-tracing.json").exists())
 
     def test_tools_binding_preserves_budget_and_actual_read_limit(self):
         target = self.material / "code/tests/collection-service.test.ts"
@@ -311,13 +370,17 @@ class ResearchWorkerTests(unittest.TestCase):
     def test_second_compaction_pass_uses_confirmed_candidate_chain(self):
         self._check_compaction_sample(True)
 
-    def _check_compaction_sample(self, second_pass):
+    def test_current_compaction_mechanism_budget_and_pressure(self):
+        self._check_compaction_sample(False, current_profile=True)
+
+    def _check_compaction_sample(self, second_pass, current_profile=False):
         form = self.material / "code/miniprogram/domain/form.ts"
         form.parent.mkdir(parents=True)
-        form.write_text("signature fact\n", encoding="utf-8")
+        form.write_text("signature fact\n" + (" " * 2741 if current_profile else ""), encoding="utf-8")
         background = self.material / "evaluation-fixtures/background.txt"
         background.parent.mkdir()
-        background.write_text("b" * 12288, encoding="utf-8")
+        background_bytes = 6144 if current_profile else 12288
+        background.write_text("b" * background_bytes, encoding="utf-8")
         self.spec["case_id"] = "compaction-fixture"
         self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288}
         self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
@@ -327,6 +390,10 @@ class ResearchWorkerTests(unittest.TestCase):
             context_budget_tokens=32768, max_output_tokens=4096,
             context_safety_margin_tokens=1024, summary_target_percent=40,
         )
+        if current_profile:
+            self.spec["profile"].update(context_budget_tokens=65536, max_output_tokens=16384,
+                                        context_safety_margin_tokens=8192)
+            self.spec["mechanism"].update(background_bytes=background_bytes, pressure_max_bytes=32768)
         business_count = 0
         summaries = []
         def respond(kwargs):
@@ -354,6 +421,11 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["sdk_requests"]["value"], len(captured))
         self.assertEqual(result["metrics"]["summary_requests"]["value"], 2 if second_pass else 1)
         self.assertEqual(result["metrics"]["total_tokens"]["value"], len(captured) * 12)
+        if current_profile:
+            pressure = result["turns"][3]["pressure"]
+            self.assertEqual(pressure["max_padding_bytes"], 32768)
+            self.assertGreater(pressure["padding_bytes"], 16384)
+            self.assertFalse(pressure["capped"])
         if second_pass:
             self.assertEqual(summaries[1]["candidate_input"]["document"]["facts"][0]["text"], "x" * 20000)
             self.assertNotIn("previous_summary", summaries[1])

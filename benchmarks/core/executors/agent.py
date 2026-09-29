@@ -13,13 +13,17 @@ from benchmarks.core.files import ROOT, atomic_write_json, sha256_file
 from benchmarks.core.contracts import known, unknown, summarize, validate_result
 from benchmarks.core.metadata import issue, _evidence
 from benchmarks.core.processes import safe_environment, _stop
-from benchmarks.core.configuration import checked_config, checked_model, load_connection
+from benchmarks.core.configuration import (
+    CONNECTION_KEYS, TRACE_ENV_KEYS, checked_config, checked_model, configuration_hash,
+    load_connection, resolve_run_config,
+)
 from benchmarks.core.materials import prepare_materials, instantiate_materials, verify_materials
 from benchmarks.core.budgets import read_ledger
 
 
 def research_environment(connection):
-    return {**safe_environment(dict(os.environ)), **connection}
+    return {**safe_environment(dict(os.environ)),
+            **{key: value for key, value in connection.items() if key in CONNECTION_KEYS | TRACE_ENV_KEYS}}
 
 
 def plan(suite, config):
@@ -27,10 +31,31 @@ def plan(suite, config):
     repeats = config.get("repeats", 1) if isinstance(config, dict) else 1
     if type(repeats) is not int or not 1 <= repeats <= 20:
         repeats = 1
+    selected = suite["units"]
+    if isinstance(config, dict) and config.get("schema_version") == "2":
+        names = config.get("units")
+        available = {task["unit_id"]: task for task in selected}
+        if (not isinstance(names, list) or not names or any(not isinstance(name, str) or name not in available for name in names)
+                or len(set(names)) != len(names)):
+            raise ValueError("unknown or duplicate research unit selection")
+        selected = [available[name] for name in names]
     return [{**deepcopy(task), "suite_id": suite["suite_id"], "repeat": repeat,
+             "definition_unit_id": task["unit_id"],
              "unit_id": f"{task['unit_id']}.r{repeat}", "sample_run_id": str(uuid4()),
              "rubric": deepcopy(suite["rubric"])}
-            for repeat in range(1, repeats + 1) for task in suite["units"]]
+            for repeat in range(1, repeats + 1) for task in selected]
+
+
+def tracing_for(config, task):
+    tracing = config.get("tracing", {})
+    if not tracing.get("enabled") or task["definition_unit_id"] not in tracing.get("unit_ids", []):
+        return {"enabled": False}
+    return {key: tracing[key] for key in ("enabled", "endpoint", "project", "workspace_id")}
+
+
+def connection_for(connection, tracing):
+    allowed = CONNECTION_KEYS | (TRACE_ENV_KEYS if tracing["enabled"] else set())
+    return {key: value for key, value in connection.items() if key in allowed}
 
 
 def make_unit(task, root=ROOT):
@@ -52,17 +77,44 @@ def make_unit(task, root=ROOT):
 def prepare(suite, config, directory, result, *, root=ROOT):
     stage = "configuration"
     try:
-        config = checked_config(config)
-        stage = "credentials"
-        connection = load_connection(config)
+        if isinstance(config, dict) and config.get("schema_version") == "2":
+            config, connection = resolve_run_config(config, root)
+        else:
+            config = checked_config(config)
+            stage = "credentials"
+            connection = load_connection(config)
         stage = "task_configuration"
         # Validate every task override before allowing the first request.
         for unit in result["units"]:
-            profile = model_profile(config["model"], unit["conditions"]["task"]["value"])
+            task = unit["conditions"]["task"]["value"]
+            profile = model_profile(config["model"], task)
             unit["conditions"]["model"] = known({"name": profile["model_name"], "endpoint": profile["base_url"],
                                                 "weights_version": unknown("服务端未提供固定权重版本。")})
-            unit["conditions"]["configuration"] = known({"settings": profile, "limits": config["limits"],
-                                                         "repeats": config["repeats"], "tracing": False, "retries": 0})
+            details = {"settings": profile, "limits": config["limits"], "repeats": config["repeats"],
+                       "tracing": tracing_for(config, task) if config["schema_version"] == "2" else False, "retries": 0}
+            if config["schema_version"] == "2":
+                overrides = deepcopy(task.get("settings_overrides", {}))
+                details["tracing"]["field_sources"] = deepcopy(
+                    config["tracing"]["field_sources"] if details["tracing"]["enabled"] else {"enabled": "benchmark"})
+                details.update(
+                    source_snapshot=config["source_snapshot"], source_snapshot_sha256=config["source_snapshot_sha256"],
+                    task_overrides=overrides,
+                    field_sources={key: "task_override" if key in overrides else source
+                                   for key, source in config["field_sources"].items()},
+                    effective_settings_sha256=configuration_hash(profile),
+                    paths={"project_root": "sample/materials/material", "log_dir": "sample/agent-logs", "source": "benchmark"},
+                )
+            unit["conditions"]["configuration"] = known(details)
+        if config["schema_version"] == "2":
+            stage = "configuration_recording"
+            path = directory / "resolved-configuration.json"
+            atomic_write_json(path, {"schema_version": "1", "run_id": result["run_id"],
+                                    "configuration": config, "units": [
+                                        {"unit_id": unit["unit_id"],
+                                         "configuration": unit["conditions"]["configuration"]["value"]}
+                                        for unit in result["units"]]})
+            for unit in result["units"]:
+                unit["evidence"].append(_evidence("resolved_configuration", path, "validated configuration before requests"))
         stage = "materials"
         prepared = root / "logs/benchmark-materials" / result["run_id"]
         manifest = prepare_materials(root, Path(config["source_repository"]), prepared, suite["materials"])
@@ -73,7 +125,7 @@ def prepare(suite, config, directory, result, *, root=ROOT):
                            "planned_turns": sum(len(u["turns"]) for u in result["units"]),
                            "execution_seconds": 0.0, "sdk_requests": known(0)}
         return {"config": config, "connection": connection, "prepared": prepared, "manifest": manifest,
-                "ledger": ledger, "snapshot": [], "result": result, "elapsed": 0.0}
+                "ledger": ledger, "snapshot": [], "result": result, "elapsed": 0.0, "started_samples": 0}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         for unit in result["units"]:
             unit.update(execution_status="blocked", assessment_basis="显式配置、凭据或固定材料前置条件未满足；未调用模型。")
@@ -98,15 +150,24 @@ def execute_unit(unit, task, run_id, directory, *, root=ROOT, context):
     manifest = instantiate_materials(context["prepared"], sample / "materials", task)
     unit["conditions"]["materials"] = known(manifest)
     timeout = min(limits["sample_seconds"], limits["execution_seconds"] - context["elapsed"])
+    tracing = tracing_for(config, task) if config["schema_version"] == "2" else {"enabled": False}
+    connection = connection_for(context["connection"], tracing)
     spec = {"schema_version": "1", "batch_id": run_id, "run_id": unit["sample_run_id"],
             "case_id": task["case_id"], "definition_version": task["version"], "prompts": task["turns"],
-            "mechanism": task.get("mechanism"), "profile": model_profile(config["model"], task),
+            "mechanism": task.get("mechanism"), "profile": model_profile(config["model"], task), "tracing": tracing,
             "material_root": manifest["material_root"], "output_dir": str(sample.absolute()),
             "ledger_path": str(context["ledger"].absolute()), "max_requests": limits["requests"], "remaining_seconds": timeout}
     started = time.monotonic()
+    first_sample = context["started_samples"] == 0
+    context["started_samples"] += 1
     result["batch"]["sdk_requests"] = unknown("本实例的请求记账尚未完成核验。")
     try:
-        stop = execute_sample(unit, spec, sample, context["connection"], root=root, timeout=timeout)
+        stop = execute_sample(unit, spec, sample, connection, root=root, timeout=timeout)
+        if tracing["enabled"] and any(turn.get("tracing") for turn in unit["turns"]):
+            from benchmarks.core.trace_evidence import verify_sample_traces
+            remaining = min(30.0, timeout - (time.monotonic() - started),
+                            limits["execution_seconds"] - context["elapsed"] - (time.monotonic() - started))
+            verify_sample_traces(unit, spec, sample, connection, timeout_seconds=max(0.0, remaining))
     finally:
         context["elapsed"] += time.monotonic() - started
         result["batch"]["execution_seconds"] = context["elapsed"]
@@ -121,7 +182,60 @@ def execute_unit(unit, task, run_id, directory, *, root=ROOT, context):
     result["batch"]["sdk_requests"] = known(len(events))
     from benchmarks.evaluators.rules import mechanism_assessment
     unit["assessments"].append(mechanism_assessment(unit))
+    if first_sample and config.get("gate_first_sample"):
+        passed = first_sample_completed(unit)
+        result["batch"]["first_sample_gate"] = {"unit_id": unit["unit_id"], "passed": passed,
+                                                  "basis": "technical completion, answer and confirmed local evidence; no quality score"}
+        if not passed:
+            unit["issues"].append(issue("gate", "first_sample_gate_failed", "首个样本未满足技术完成与本地证据门槛；停止后续样本。"))
+            stop = True
     return stop
+
+
+def first_sample_completed(unit):
+    """A technical gate only; semantic verdict and mechanism coverage are separate."""
+    if unit["execution_status"] != "completed":
+        return False
+    try:
+        for turn in unit["turns"]:
+            if (turn["execution_status"] != "completed" or turn["agent_outcome"] != known("completed")
+                    or turn.get("checkpoint_complete") is False):
+                return False
+            session = turn["session_id"]
+            if session["availability"] == "known":
+                if (turn.get("checkpoint_complete") is not True
+                        or turn["checkpoint_id"].get("availability") != "known"
+                        or not turn["checkpoint_id"].get("value")):
+                    return False
+            elif session["availability"] != "not_applicable":
+                return False
+            answer = turn["answer_evidence"]
+            if (not isinstance(answer, dict) or answer.get("availability") != "available"
+                    or not Path(answer["path"]).read_text(encoding="utf-8").strip()
+                    or sha256_file(Path(answer["path"])) != turn["answer_sha256"]):
+                return False
+            processes = [item for item in turn["process_evidence"] if item.get("kind") == "process"]
+            logs = [item for item in turn["process_evidence"] if item.get("kind") == "agent_log"]
+            if (not processes or not logs
+                    or any(item.get("availability") != "available" for item in processes + logs)):
+                return False
+            run_id = turn["run_id"]["value"]
+            for item in processes:
+                process = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
+                if process.get("run_id") != run_id or process.get("log_complete") is not True:
+                    return False
+                if session["availability"] == "known" and (
+                        process.get("session_id") != session["value"]
+                        or process.get("checkpoint_complete") is not True
+                        or process.get("checkpoint_id") != turn["checkpoint_id"]):
+                    return False
+            for item in logs:
+                events = [json.loads(line) for line in Path(item["path"]).read_text(encoding="utf-8").splitlines()]
+                if not events or events[-1].get("event") != "run.ended" or any(e.get("run_id") != run_id for e in events):
+                    return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
 
 
 def model_profile(profile: dict, case: dict) -> dict:
@@ -164,7 +278,16 @@ def _accept_receipt(unit: dict, data: dict, *, failed: bool) -> None:
     candidate = deepcopy(unit)
     for key in ("turns", "agent_outcome", "coverage", "issues", "metrics", "evidence"):
         if key in data:
-            candidate[key] = data[key]
+            if key == "evidence":
+                combined, seen = [], set()
+                for item in unit["evidence"] + data[key]:
+                    identity = tuple(item.get(name) for name in ("kind", "path", "source"))
+                    if identity not in seen:
+                        combined.append(item)
+                        seen.add(identity)
+                candidate[key] = combined
+            else:
+                candidate[key] = data[key]
     candidate["execution_status"] = "failed" if failed else data["execution_status"]
     envelope = {"schema_version": "3", "run_id": data["run_id"], "started_at": data.get("started_at"),
                 "ended_at": data.get("ended_at"), "selected_suites": [unit["suite_id"]], "baseline": {},
@@ -180,7 +303,7 @@ def _accept_receipt(unit: dict, data: dict, *, failed: bool) -> None:
 
 
 def execute_sample(unit: dict, spec: dict, directory: Path, connection: dict,
-                   *, root: Path = ROOT, timeout: float = 300) -> bool:
+                   *, root: Path = ROOT, timeout: float = 1200) -> bool:
     """Return a global stop only for unsafe bookkeeping/interruption/cleanup."""
     spec_path = directory / "spec.json"
     atomic_write_json(spec_path, spec)

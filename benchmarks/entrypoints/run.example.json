@@ -1,20 +1,19 @@
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "enabled": false,
+  "agent_source": "project_env",
   "source_repository": "C:/path/to/project",
-  "credential_env": "BENCHMARK_API_KEY",
-  "model": {
-    "base_url": "https://model.example.invalid",
-    "model_name": "choose-an-approved-model",
-    "max_model_calls": 8,
-    "timeout_seconds": 60,
-    "context_budget_tokens": 32768,
-    "max_output_tokens": 4096
-  },
+  "model_overrides": {},
+  "units": ["wechat-capabilities", "wechat-compaction"],
   "repeats": 1,
+  "gate_first_sample": true,
+  "tracing": {
+    "enabled": false,
+    "unit_ids": ["wechat-capabilities"]
+  },
   "limits": {
-    "requests": 100,
-    "execution_seconds": 1800,
-    "sample_seconds": 300
+    "requests": 200,
+    "execution_seconds": 5400,
+    "sample_seconds": 1200
   }
 }

@@ -1,7 +1,7 @@
 {
   "unit_id": "compaction-continuation",
   "case_id": "compaction-continuation",
-  "version": "2.2",
+  "version": "2.3",
   "title": "摘要后继续模块研究",
   "capabilities": [
     "FR-06",
@@ -16,6 +16,7 @@
     "继续完成这个模块的研究：字段值变化和未变化时，签名状态分别如何？笔迹检查证明什么？请据旧资料解释这些规则与内容确认要求的关系，给出来源及仍应遵守的交付要求；不要重新读取材料。"
   ],
   "settings_overrides": {
+    "context_budget_tokens": 65536,
     "context_keep_recent_turns": 2,
     "summary_target_percent": 40
   },
@@ -27,7 +28,8 @@
     "no_tools_from_turn": 2,
     "source_path": "code/miniprogram/domain/form.ts",
     "background_path": "evaluation-fixtures/background.txt",
-    "background_bytes": 6144
+    "background_bytes": 6144,
+    "pressure_max_bytes": 32768
   },
   "dimensions": [
     "facts_evidence",
