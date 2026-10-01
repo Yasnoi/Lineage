@@ -2,10 +2,16 @@
 
 from collections.abc import Awaitable, Callable
 from inspect import getattr_static
+import json
 from typing import Any, TypedDict
 
 
 type ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
+
+
+def serialize_tool_output(value: Any) -> str:
+    """Use the same JSON encoding for delivery and bounded result measurement."""
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
 TOOL_ARGUMENT_REASONS = {
@@ -24,6 +30,11 @@ TOOL_ARGUMENT_REASONS = {
     "file_too_large": "文件超过本次配置的字节上限，未返回正文。",
     "read_budget_exceeded": "文件超过本次运行剩余的成功读取额度，未返回正文；可尝试较小文件。",
     "non_text_content": "文件包含不支持的控制字符，未返回正文。",
+    "artifact_path_forbidden": "Artifact 保留目录不能通过项目文件工具访问。",
+    "invalid_artifact_arguments": "Artifact 工具参数字段或类型不符合要求。",
+    "invalid_artifact_ref": "Artifact 引用格式无效。",
+    "invalid_artifact_range": "字符范围必须是正文内的有效左闭右开范围。",
+    "invalid_artifact_keywords": "检索需要 1 至 8 个关键词，每个包含 1 至 128 个字符。",
 }
 
 
@@ -33,6 +44,9 @@ TOOL_EXECUTION_REASONS = {
     "file_not_found": "请求的文件、目录或中间路径不存在。",
     "permission_denied": "没有访问请求文件或目录所需的权限。",
     "io_error": "访问文件或目录时发生 I/O 错误，未返回部分结果。",
+    "artifact_not_found": "当前会话中不存在该 Artifact。",
+    "artifact_read_error": "Artifact 无法读取或快照完整性校验失败。",
+    "artifact_store_closed": "ArtifactStore 已关闭，引用不再可用。",
 }
 
 

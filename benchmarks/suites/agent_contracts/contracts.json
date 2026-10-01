@@ -997,6 +997,126 @@
       "module": "filesystem"
     },
     {
+      "unit_id": "filesystem.artifacts",
+      "entrypoint": "benchmarks.checks.filesystem.artifacts:execute",
+      "script": "benchmarks/checks/filesystem/artifacts.py",
+      "groups": [
+        {
+          "group_id": "filesystem.artifacts.saving",
+          "description": "原始字符串完整保存、已知正文解码与受控降级",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_saving"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.reading",
+          "description": "字符范围、有界序列化与超长单行连续读取",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_reading"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.searching",
+          "description": "区分大小写的字面 OR、重叠命中与有界分页",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_searching"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.isolation",
+          "description": "会话与 Store 隔离、非法引用及文件工具旁路拒绝",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_isolation"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.lifecycle",
+          "description": "显式关闭、幂等清理与其他 Store 保留",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_lifecycle"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "sessions"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.faults",
+          "description": "写入与读取故障、完整性失败和安全诊断",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_faults"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.integration",
+          "description": "同会话跨 Run 召回、显式工具注入与业务工具兼容",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_integration"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "sessions",
+            "execution"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        },
+        {
+          "group_id": "filesystem.artifacts.recording",
+          "description": "有界正文仅进模型上下文、日志及 Tracing 过滤",
+          "source": {
+            "path": "benchmarks/checks/filesystem/artifacts.py",
+            "symbol": "check_recording"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.artifacts"
+        }
+      ],
+      "module": "filesystem"
+    },
+    {
       "unit_id": "recording.runtime_projection",
       "entrypoint": "benchmarks.checks.recording.runtime_projection:execute",
       "script": "benchmarks/checks/recording/runtime_projection.py",

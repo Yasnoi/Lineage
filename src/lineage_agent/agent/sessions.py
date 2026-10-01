@@ -11,7 +11,9 @@ from lineage_agent.agent.runtime import (
     PreExecutionConfigurationError, _run_agent, normalize_input, validate_tools,
 )
 from lineage_agent.agent.state import AgentState
-from lineage_agent.config.settings import ModelSettings
+from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
+from lineage_agent.artifacts.tools import ARTIFACT_TOOLS, ArtifactExecutor
+from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.tools.types import ToolExecutor
 
@@ -21,6 +23,7 @@ _SESSION_ERRORS = {
     "session_busy": "该会话正在处理请求，本次提交未执行。",
     "session_blocked": "该会话的保存或执行完整性未确认，请新建会话；不会自动恢复或重试。",
     "unknown_record": "此会话中没有该运行的已确认记录。",
+    "artifacts_unavailable": "此会话未启用 ArtifactStore。",
 }
 
 
@@ -48,6 +51,7 @@ class _Session:
     settings: ModelSettings
     tools: list[ToolDefinition]
     execute_tool: ToolExecutor | None
+    artifacts: SessionArtifacts | None = None
     last_checkpoint_id: str | None = None
     blocked: bool = False
     lock: Lock = field(default_factory=Lock)
@@ -74,14 +78,34 @@ class SessionManager:
         *,
         tools: list[ToolDefinition] | None = None,
         execute_tool: ToolExecutor | None = None,
+        artifact_store: ArtifactStore | None = None,
     ) -> str:
         """Freeze the available capabilities; each request binds fresh budgets."""
         available_tools = validate_tools(tools, execute_tool)
+        if artifact_store is not None:
+            artifact_names = {tool["name"] for tool in ARTIFACT_TOOLS}
+            if any(tool["name"] in artifact_names for tool in available_tools):
+                raise ConfigurationError("已提供的工具名称与 Artifact 工具冲突。")
         session_id = str(uuid4())
+        artifacts = None
+        if artifact_store is not None:
+            artifacts = artifact_store.bind_session(session_id)
+            execute_tool = ArtifactExecutor(artifacts, execute_tool)
+            available_tools = validate_tools([*available_tools, *ARTIFACT_TOOLS], execute_tool)
         self._sessions[session_id] = _Session(
             deepcopy(settings), available_tools, execute_tool,
+            artifacts=artifacts,
         )
         return session_id
+
+    def artifacts(self, session_id: str) -> SessionArtifacts:
+        """Expose trusted storage access for this manager's enabled session."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise SessionError("unknown_session")
+        if session.artifacts is None:
+            raise SessionError("artifacts_unavailable")
+        return session.artifacts
 
     async def run_turn(self, session_id: str, input: ModelInput) -> SessionTurn:
         session = self._sessions.get(session_id)

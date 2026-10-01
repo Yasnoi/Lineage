@@ -351,7 +351,7 @@ state = asyncio.run(run_agent(
 
 ## 纯文本读取
 
-`read_text_file` 只接受 `{"path": "docs/说明.md"}` 形式的参数。路径必填且为字符串，不接受额外字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，不按扩展名限制；源码、配置、隐藏文件以及 Dockerfile、Makefile 等无扩展名文本均可读取。项目根目录就是文件访问授权边界，不额外设置敏感文件黑名单。根内 `.env`、凭据配置等也可能被读取并发送到模型；绑定根目录即授权其中符合访问和文本规则的文件。
+`read_text_file` 只接受 `{"path": "docs/说明.md"}` 形式的参数。路径必填且为字符串，不接受额外字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，不按扩展名限制；源码、配置、隐藏文件以及 Dockerfile、Makefile 等无扩展名文本均可读取。项目根目录就是业务文件访问授权边界，不额外设置敏感文件黑名单；应用专用的 Artifact 缓存目录除外，所有内置文件工具均禁止进入。根内 `.env`、凭据配置等也可能被读取并发送到模型；绑定根目录即授权其中符合访问和文本规则的文件。
 
 通过程序同时开放两个工具：
 
@@ -403,6 +403,39 @@ state = asyncio.run(run_agent(
 累计额度仅限制本次新返回的文件正文字节数，不保证整个模型上下文的 Token 或序列化字节数有界，也不限制历史输入、目录结果或任意自定义工具输出。文件 I/O 仍同步执行，慢磁盘可能占用事件循环。
 
 原因通过固定表进入模型错误结果、JSONL 和 Tracing，不携带原始异常或正文。正文只作为关联原 `call_id` 的工具结果发送给模型，不提升为 system/developer 指令；不自动跟随链接、读取引用文件或执行其中命令。模型之后请求其他工具仍受绑定根目录和参数检查限制。文件正文会发送给配置的模型端点，选择根目录和输入文件时应考虑这一点。
+
+## 工具结果 Artifact
+
+应用可以显式保存工具执行器返回的原始字符串，并通过 `artifact_read`、`artifact_search` 披露有限片段。`ArtifactStore` 不自动归档业务工具结果，也不生成 Preview；现有工具结果入模流程保持不变，ObservationManager 尚未接入。
+
+```python
+from lineage_agent.agent.sessions import SessionManager
+from lineage_agent.artifacts.store import ArtifactStore
+from lineage_agent.config.settings import load_settings
+
+with ArtifactStore() as store:
+    manager = SessionManager()
+    session_id = manager.create_session(load_settings(), artifact_store=store)
+    artifacts = manager.artifacts(session_id)
+    saved = artifacts.put('{"content":"第一行\\nERROR: sample"}', tool_name="read_text_file")
+    page = artifacts.read(saved["artifact_ref"], 0, None)
+    matches = artifacts.search(saved["artifact_ref"], ["ERROR"], start=0)
+    # 后续 manager.run_turn(session_id, ...) 中可使用两个召回工具。
+```
+
+仅显式注入 `artifact_store` 的会话增加召回工具，既有工具继续通过 `tools` 和 `execute_tool` 注入。保存接口仅供应用代码使用，不暴露为模型工具；`manager.artifacts(session_id)` 提供当前会话的保存与读取句柄。引用格式为 `artifact://tool/<32位小写十六进制ID>`，不会暴露本地路径。模型参数只包含引用、字符位置和关键词，不能切换会话。相同会话跨 Run 保留引用，运行实例重新绑定时只重置业务执行器的读取预算。
+
+保存结果含 `artifact_ref`、`tool_name`、`raw_bytes`、`view_kind` 和 `total_chars`。原始字符串以 UTF-8 完整保存，不归一化换行；同一引用是不可变快照，后续读取不重新执行原工具。仅已知 `read_text_file` 的合法字符串 `content` 使用解码后的正文位置，`view_kind="content"`；未知工具使用整个原始结果，`view_kind="raw_result"`。已知工具 JSON 无效、`content` 缺失或类型错误时，原文仍完整保存，读取明确降级为 `raw_result`，并附 `degradation_reason="invalid_text_result"`。不猜测其他工具的正文结构。
+
+读取工具参数为 `artifact_ref`、`start`、可空 `end`；检索参数为 `artifact_ref`、`keywords`、`start`。位置使用 Python 字符串索引，范围从 0 开始、左闭右开，`end=null` 表示正文末尾。负数、布尔值、反向或越界范围拒绝；合法空范围返回空文本。读取返回实际 `start/end/text`，请求范围尚未读完时用 `next_start` 继续，否则为 null。到达大小限制时优先在尾部有限窗口内取换行或标点边界，没有合适边界则直接截断。
+
+关键词为 1–8 个非空字符串，每个不超过 128 字符，按区分大小写的字面 OR 匹配，不做正则或语义检索。每页至多返回 10 个不同起点的命中，包含匹配位置及前后各至多 80 字符的片段；同起点的多关键词一并返回，保留重叠匹配。`has_more=true` 时以 `next_start` 继续同一组关键词，`has_more=false` 表示该起点之后搜索完成。空命中仅表示给定关键词没有匹配，不能证明材料不存在错误。
+
+读取和检索均将最终 `function_call_output.output` 的 UTF-8 大小限制为 8 KiB，包含元信息、成功包装及 JSON 双层序列化开销，不把字节数当作精确 token。每次召回沿用原引用，不保存新 Artifact；这个限制不保证整个 Agent 上下文有界。
+
+缓存位于系统临时目录的 `lineage-agent-artifacts` 下，每个 Store 独占随机子目录。内置目录与文件工具即使绑定更大的项目根，也不能进入该保留目录；这是现有稳定文件路径假设下的应用访问边界，不是抵御恶意本地进程的操作系统沙箱。只有当前 Store 的内存索引授予会话访问权限，不扫描或导入遗留文件。使用上下文管理器或显式 `close()` 释放该实例目录；清理失败时引用仍失效，调用方可重试关闭。异常退出可能遗留文件，不承诺跨进程恢复或自动清扫其他实例。
+
+保存写入、发布、读取与完整性校验失败使用固定 `ArtifactError.code`，工具入口映射为既有安全错误包装，不返回底层异常详情；写入完成后才发布引用。JSONL 与 Tracing 继续只记录过滤后的信息，不上传完整 Artifact 正文。文件 I/O 和检索同步执行，读取时加载保存的完整结果；首版没有磁盘配额、流式索引或后台清理。
 
 ## State
 
@@ -511,7 +544,7 @@ uv run --locked python -m benchmarks run agent-contracts
 uv run --locked python -m unittest discover -s benchmarks/tests -v
 ```
 
-无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、15 条隔离行为链、141 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
+无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、16 条隔离行为链、149 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
 
 `wechat-reporting` 是固定项目任务集，包含八类任务、九个实例、19 个计划轮次，沿需求覆盖、代码与需求的反向对应、缺陷/性能分析和改进方案组织，并覆盖多轮纠正、读取受限和摘要后继续研究。真实运行使用显式启用的通用配置：
 

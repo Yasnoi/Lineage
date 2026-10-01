@@ -1,13 +1,13 @@
 # 工程约定与迁移覆盖
 
-本文面向维护确定性检查的开发者。唯一可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 15 条隔离行为链包含 141 个行为组（原 138 组及动态摘要恢复新增 3 组）；实际是否执行及结果以运行报告为准。
+本文面向维护确定性检查的开发者。唯一可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 16 条隔离行为链包含 149 个行为组（原 138 组、动态摘要恢复新增 3 组及 Artifact 新增 8 组）；实际是否执行及结果以运行报告为准。
 
 ## 模块与判断依据
 
 | 模块 | 行为组 | 约定与指标 |
 | --- | ---: | --- |
 | `execution` | 19 | 输入/响应协议、批次继续、结果关联、调用额度和终态统计；直接比较实际请求、工具返回和 State。 |
-| `filesystem` | 22 | 目录与文本路径边界、读取额度、真实 I/O 及未修改性；核对实际文件和累计预算。 |
+| `filesystem` | 30 | 目录与文本路径边界、读取额度、真实 I/O，以及 Artifact 快照、有界召回与会话隔离；核对实际文件和累计预算。 |
 | `sessions` | 25 | 历史准入、隔离、重置、并发拒绝、保存和关闭；核对原生检查点及后续请求。 |
 | `context` | 36 | 请求预算、风险计量、摘要选择、保存屏障和活动版本；对照真实请求参数与记录。 |
 | `recording` | 39 | JSONL、过滤、usage 投影、序列化、上传异常和有限收尾；对照实际 SDK 载荷与故障观察。 |
@@ -18,7 +18,9 @@
 
 来源基线为 `c97467ed41bcd3a0232033f9160d15199b30069b`。14 个原 `scripts/check_*.py` 已移除，其检查函数和实际公共替身归入 Benchmark。ReAct 的执行检查与记录检查分开；Review 的输入协议、文件系统预算、追踪投影按职责分开，未拆断单个故障链。Session 两处异步入口后的 CLI 检查、fixture 收尾和五次摘要 Tracing exercise 均保留。data/usage 组经 recording.transport 调用，不另建隔离单元或重复计数。
 
-此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖 138 组；断言数量不是覆盖率。动态 Compact 改造保留这些行为组，调整已被替代的比例阈值及固定摘要上限断言，并增加下表中的三个恢复行为组；当前结果以 141 组的实际事件、请求、状态及故障证据为准。
+此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖 138 组；断言数量不是覆盖率。动态 Compact 改造保留这些行为组，调整已被替代的比例阈值及固定摘要上限断言，并增加下表中的三个恢复行为组。Artifact 的八组为新增约定，不属于旧脚本迁移；当前结果以 149 组的实际事件、请求、状态及故障证据为准。
+
+Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响应上限、关键词分页、会话及缓存路径隔离、关闭与故障行为，并用离线模型替身走通两轮工具调用及记录过滤。它不验证 ObservationManager、自动归档或真实 Benchmark 上下文占用下降。
 
 框架回归保留选择拒绝、状态分离、回执一致性、事件有效前缀、资源收尾、保存故障、会话/材料隔离、预算与评分绑定。旧 v1 worker 和 control-* 别名专用执行测试随接口撤销，其仍适用的断言/启动/源码/优化保护/保存等边界由组 worker 与通用框架测试承接；旧结果读取测试独立保留。新增第二个项目注册、构造材料、LLM 建议绑定与离线网络边界测试。
 
@@ -75,6 +77,14 @@
 | `filesystem.access_budget.pagination` | filesystem | 稳定排序分页、堆空间、真实结果回传及变化语义；filesystem, execution | `check_review_fixes.py:check_pagination` | [check_pagination](checks/filesystem/access_budget.py) |
 | `filesystem.access_budget.read_budgets` | filesystem | 跨轮读取累计额度、增长短读及成功后日志失败；filesystem, execution, recording | `check_review_fixes.py:check_read_budgets` | [check_read_budgets](checks/filesystem/access_budget.py) |
 | `filesystem.access_budget.budget_isolation` | filesystem | 复用执行器顺序与并发运行的读取额度隔离；filesystem, execution, recording | `check_review_fixes.py:check_budget_isolation` | [check_budget_isolation](checks/filesystem/access_budget.py) |
+| `filesystem.artifacts.saving` | filesystem | 原始字符串完整保存、已知正文解码与受控降级；filesystem | 新增约定 | [check_saving](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.reading` | filesystem | 字符范围、有界序列化与超长单行连续读取；filesystem, execution | 新增约定 | [check_reading](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.searching` | filesystem | 区分大小写的字面 OR、重叠命中与有界分页；filesystem, execution | 新增约定 | [check_searching](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.isolation` | filesystem | 会话与 Store 隔离、非法引用及文件工具旁路拒绝；filesystem, sessions | 新增约定 | [check_isolation](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.lifecycle` | filesystem | 显式关闭、幂等清理与其他 Store 保留；filesystem, sessions | 新增约定 | [check_lifecycle](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.faults` | filesystem | 写入与读取故障、完整性失败和安全诊断；filesystem, execution | 新增约定 | [check_faults](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.integration` | filesystem | 同会话跨 Run 召回、显式工具注入与业务工具兼容；filesystem, sessions, execution | 新增约定 | [check_integration](checks/filesystem/artifacts.py) |
+| `filesystem.artifacts.recording` | filesystem | 有界正文仅进模型上下文、日志及 Tracing 过滤；filesystem, recording | 新增约定 | [check_recording](checks/filesystem/artifacts.py) |
 | `recording.runtime_projection.review_tracing` | recording | 额度与游标追踪投影、上传失败等价及拒绝和收尾脱敏；recording, filesystem, execution | `check_review_fixes.py:check_review_tracing` | [check_review_tracing](checks/recording/runtime_projection.py) |
 | `sessions.history.history_and_copy_isolation` | sessions | 跨轮历史、返回值拷贝和检查点隔离；sessions | `check_sessions.py:check_history_and_copy_isolation` | [check_history_and_copy_isolation](checks/sessions/history.py) |
 | `sessions.history.file_history_and_budget` | sessions | 真实文件历史继承与每轮读取额度重置；sessions, filesystem, recording | `check_sessions.py:check_file_history_and_budget` | [check_file_history_and_budget](checks/sessions/history.py) |

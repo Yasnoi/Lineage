@@ -19,6 +19,7 @@ from lineage_agent.tools.types import (
     ToolOutcomes,
     safe_tool_argument_reason,
     safe_tool_execution_reason,
+    serialize_tool_output,
 )
 
 if TYPE_CHECKING:
@@ -194,7 +195,7 @@ async def execute_calls(
         item = {
             "type": "function_call_output",
             "call_id": call["call_id"],
-            "output": json.dumps(output, ensure_ascii=False, allow_nan=False),
+            "output": serialize_tool_output(output),
         }
         output_items.append(item)
         result_details = {

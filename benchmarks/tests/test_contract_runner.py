@@ -175,10 +175,10 @@ class V2RunnerTests(unittest.TestCase):
 
     def test_catalog_maps_indirect_groups_once(self):
         units, _ = catalog.load_catalog()
-        self.assertEqual(len(units), 15)
+        self.assertEqual(len(units), 16)
         groups = [g for unit in units.values() for g in unit["groups"]]
-        self.assertEqual(len(groups), 141)
-        self.assertEqual(len({g["group_id"] for g in groups}), 141)
+        self.assertEqual(len(groups), 149)
+        self.assertEqual(len({g["group_id"] for g in groups}), 149)
         self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_data.py" for g in groups), 2)
         self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_usage.py" for g in groups), 4)
 
