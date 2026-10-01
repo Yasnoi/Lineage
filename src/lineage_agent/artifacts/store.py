@@ -16,7 +16,7 @@ import shutil
 import stat
 import tempfile
 from threading import RLock
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from lineage_agent.tools.filesystem import paths
@@ -65,10 +65,14 @@ def _check_path(path: Path, *, directory: bool) -> None:
         raise OSError("unexpected storage entry type")
 
 
+def _reject_constant(value: str) -> NoReturn:
+    raise ValueError("Non-standard JSON constants are not supported.")
+
+
 def _content(raw: str, tool_name: str) -> tuple[str, str, str | None]:
     if tool_name == "read_text_file":
         try:
-            value = json.loads(raw)
+            value = json.loads(raw, parse_constant=_reject_constant)
             if isinstance(value, dict) and isinstance(value.get("content"), str):
                 # Escaped lone surrogates can occur in otherwise UTF-8 JSON.
                 # They cannot be disclosed as valid UTF-8 content.

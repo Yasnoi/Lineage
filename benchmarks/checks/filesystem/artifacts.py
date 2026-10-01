@@ -106,6 +106,43 @@ def check_saving():
             assert fallback["view_kind"] == "raw_result" and fallback["degradation_reason"]
             assert raw_path(store, fallback).read_bytes() == malformed.encode("utf-8")
             read_all(view, fallback, malformed)
+        # A valid content field does not make non-standard JSON constants valid,
+        # including constants nested in unrelated objects or arrays.
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            for template in ('{"content":"正文","other":CONSTANT}',
+                             '{"content":"正文","other":[{"value":CONSTANT}]}'):
+                malformed = template.replace("CONSTANT", constant)
+                fallback = view.put(malformed, tool_name="read_text_file")
+                assert fallback["view_kind"] == "raw_result", (constant, malformed)
+                assert fallback["degradation_reason"] == "invalid_text_result"
+                assert fallback["total_chars"] == len(malformed)
+                assert fallback["raw_bytes"] == len(malformed.encode("utf-8"))
+                assert raw_path(store, fallback).read_bytes() == malformed.encode("utf-8")
+                read_all(view, fallback, malformed)
+                page = view.read(fallback["artifact_ref"], 0)
+                assert page["degradation_reason"] == "invalid_text_result"
+                found = view.search(fallback["artifact_ref"], ["other"])
+                bounded(found)
+                assert found["view_kind"] == "raw_result"
+                assert found["total_chars"] == len(malformed)
+                assert found["degradation_reason"] == "invalid_text_result"
+                assert not found["has_more"] and found["next_start"] is None
+                assert len(found["hits"]) == 1
+                hit = found["hits"][0]
+                position = malformed.index("other")
+                assert hit["matches"] == [{"keyword_index": 0, "start": position, "end": position + 5}]
+                assert hit["text"] == malformed[hit["start"]:hit["end"]]
+            # The same words are ordinary text when quoted as JSON strings.
+            valid = json.dumps({"content": constant, "other": {"value": constant}}, allow_nan=False)
+            quoted = view.put(valid, tool_name="read_text_file")
+            assert quoted["view_kind"] == "content" and quoted["total_chars"] == len(constant)
+            assert "degradation_reason" not in quoted
+            read_all(view, quoted, constant)
+            page = view.read(quoted["artifact_ref"], 0)
+            assert "degradation_reason" not in page
+            found = view.search(quoted["artifact_ref"], [constant])
+            assert found["view_kind"] == "content" and "degradation_reason" not in found
+            assert found["hits"][0]["matches"] == [{"keyword_index": 0, "start": 0, "end": len(constant)}]
         empty = view.put('{"content":""}', tool_name="read_text_file")
         assert empty["view_kind"] == "content"
         read_all(view, empty, "")
