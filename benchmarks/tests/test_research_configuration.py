@@ -11,8 +11,10 @@ from benchmarks.core import configuration, runner
 from benchmarks.core.budgets import RequestBudget, WorkerAbort
 from benchmarks.core.contracts import known, not_applicable
 from benchmarks.core.executors import agent
-from benchmarks.core.files import sha256_file
-from benchmarks.tests.test_research_batch import CONFIG as V1, SUITE
+from benchmarks.core.files import ROOT, sha256_file
+from benchmarks.core.diagnostics import ConfigurationError
+from benchmarks.core.registry import load_suite
+from benchmarks.tests.test_research_batch import MODEL, SUITE
 
 
 V2 = {"schema_version": "2", "enabled": True, "agent_source": "project_env",
@@ -55,15 +57,77 @@ class ResearchConfigurationTests(unittest.TestCase):
         self.assertNotIn("LANGSMITH_API_KEY", connection)
         self.assertFalse(safe["tracing"]["enabled"])
 
-    def test_v1_and_judge_connection_do_not_load_project_environment(self):
+    def test_retired_run_configuration_is_rejected_and_judge_still_uses_environment(self):
         with patch.object(configuration, "load_settings", side_effect=AssertionError("must not load .env")):
-            safe, connection = configuration.resolve_run_config(V1, self.root, {"TEST_MODEL_KEY": "v1-secret"})
-            judge = configuration.load_connection({"model": safe["model"], "credential_env": "JUDGE_KEY"},
+            with self.assertRaises(ConfigurationError) as error:
+                configuration.resolve_run_config({**V2, "schema_version": "1"}, self.root, {})
+            judge = configuration.load_connection({"model": MODEL, "credential_env": "JUDGE_KEY"},
                                                   {"JUDGE_KEY": "judge-secret"})
-        self.assertEqual(connection["API_KEY"], "v1-secret")
+        self.assertEqual(error.exception.diagnostic["path"], "schema_version")
         self.assertEqual(judge["API_KEY"], "judge-secret")
-        self.assertEqual(safe["model"]["model_name"], "test-model")
-        self.assertNotIn("source_snapshot", safe)
+
+    def test_real_run_example_matches_registered_tasks_and_validates_without_connections(self):
+        example = json.loads((ROOT / "benchmarks/entrypoints/run.example.json").read_text(encoding="utf-8"))
+        suite = load_suite("wechat-reporting")
+        self.assertIs(example["enabled"], False)
+        self.assertIs(example["tracing"]["enabled"], False)
+        with patch.object(configuration, "load_settings", side_effect=AssertionError("no connection lookup")):
+            checked = configuration.checked_config({**example, "enabled": True})
+            planned = agent.plan(suite, checked)
+        self.assertEqual([task["definition_unit_id"] for task in planned], example["units"] * example["repeats"])
+        self.assertTrue(set(example["tracing"]["unit_ids"]) <= set(example["units"]))
+
+    def test_field_diagnostics_never_include_supplied_values_or_unknown_keys(self):
+        marker = "private-marker-DO-NOT-PRINT"
+        cases = [({**V2, "enabled": False}, "enabled"),
+                 ({**V2, "limits": {**V2["limits"], "requests": 0}}, "limits.requests"),
+                 ({**V2, "limits": {**V2["limits"], "requests": 10 ** 400}}, "limits.requests"),
+                 ({**V2, "repeats": True}, "repeats"),
+                 ({**V2, "units": [marker, marker]}, "units[1]"),
+                 ({**V2, "model_overrides": {marker: marker}}, "model_overrides"),
+                 ({**V2, "tracing": {"enabled": True, "unit_ids": [marker]}}, "tracing.unit_ids[0]")]
+        for config, field in cases:
+            with self.subTest(field=field), self.assertRaises(ConfigurationError) as error:
+                configuration.checked_config(config)
+            self.assertEqual(error.exception.diagnostic["path"], field)
+            self.assertEqual(set(error.exception.diagnostic), {"path", "code", "constraint", "hint"})
+            self.assertNotIn(marker, str(error.exception))
+        with self.assertRaises(ConfigurationError) as error:
+            agent.plan(SUITE, {**V2, "units": [marker]})
+        self.assertEqual(error.exception.diagnostic["code"], "unknown_unit_id")
+        self.assertNotIn(marker, str(error.exception))
+
+    def test_blocked_results_keep_actionable_diagnostics_without_network(self):
+        for changed, field in (({**V2, "enabled": False}, "enabled"),
+                               ({**V2, "limits": {**V2["limits"], "requests": 0}}, "limits.requests"),
+                               ({**V2, "schema_version": "1"}, "schema_version")):
+            with self.subTest(field=field), patch.object(runner, "collect_baseline", return_value={}), \
+                    patch.object(agent, "execute_sample") as execute:
+                result, _ = runner.run_benchmark("second-project", config=changed, root=self.root,
+                                                 registry={"second-project": lambda: SUITE})
+            execute.assert_not_called()
+            self.assertTrue(all(unit["execution_status"] == "blocked" for unit in result["units"]))
+            self.assertEqual(result["units"][0]["issues"][0]["diagnostic"]["path"], field)
+
+    def test_model_and_credential_diagnostics_identify_safe_fields(self):
+        marker = "private-model-value-do-not-print"
+        with self.assertRaises(ConfigurationError) as error:
+            configuration.checked_model({**MODEL, "timeout_seconds": marker}, path="model_overrides")
+        self.assertEqual(error.exception.diagnostic["path"], "model_overrides.timeout_seconds")
+        self.assertNotIn(marker, str(error.exception))
+        with self.assertRaises(ConfigurationError) as error:
+            configuration.checked_model({**MODEL, "base_url": f"https://{marker}@model.invalid"})
+        self.assertEqual(error.exception.diagnostic["path"], "model.base_url")
+        self.assertNotIn(marker, str(error.exception))
+        (self.root / ".env").write_text(self.env_text + f"TIMEOUT_SECONDS={marker}\n", encoding="utf-8")
+        with self.assertRaises(ConfigurationError) as error:
+            configuration.resolve_run_config(V2, self.root, {})
+        self.assertEqual(error.exception.diagnostic["path"], "project_env.timeout_seconds")
+        self.assertNotIn(marker, str(error.exception))
+        with self.assertRaises(ConfigurationError) as error:
+            configuration.load_connection({"model": MODEL, "credential_env": "JUDGE_KEY"}, {})
+        self.assertEqual(error.exception.diagnostic["path"], "credential_env")
+        self.assertIn("不会自动加载 .env", str(error.exception))
 
     def test_trace_requires_selected_opt_in_and_rejects_sdk_overrides(self):
         config = {**deepcopy(V2), "tracing": {"enabled": True, "unit_ids": ["fixture"]}}

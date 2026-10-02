@@ -152,7 +152,7 @@ def _render_packet(result: dict, template: dict, rubric: dict) -> str:
     dimensions = {item["id"]: item["description"] for item in rubric["dimensions"]}
     for unit in research_units(result):
         rule = rubric["cases"][unit["case_id"]]
-        lines.extend([f"## {unit['case_id']} / {unit.get('phase', 'samples')} / 重复 {unit['repeat']}", "",
+        lines.extend([f"## {unit['case_id']} / 重复 {unit['repeat']}", "",
                       f"执行：{unit['execution_status']}；质量：{unit['verdict']}。", "",
                       "### 评分条件", ""])
         for condition in rule["conditions"]:
@@ -184,20 +184,20 @@ def _render_packet(result: dict, template: dict, rubric: dict) -> str:
     return "\n".join(lines)
 
 
-def make_review_packet(result: dict, output_directory: Path, *, rubric: dict | None = None) -> list[Path]:
+def make_review_packet(result: dict, output_directory: Path, *, rubric: dict | None = None,
+                       result_path: Path | None = None) -> list[Path]:
     """Create a per-sample packet after result.json has been saved successfully."""
     output_directory = Path(output_directory)
-    rubric = _rubric(rubric, result)
-    if result.get("schema_version") != "3":
-        raise ValueError("historical v1/v2 records are read-only")
+    result_path = Path(result_path) if result_path is not None else output_directory / "result.json"
     validate_result(result)
     validate_research_result(result)
+    rubric = _rubric(rubric, result)
     if not research_units(result):
         raise ValueError("review packet requires real Research samples")
     paths = {"template": output_directory / "review-template.json", "packet": output_directory / "review.md"}
     if any(path.exists() for path in paths.values()):
         raise FileExistsError("review packet already exists; existing reviewer work is preserved")
-    template = _template(result, output_directory / "result.json", rubric)
+    template = _template(result, result_path, rubric)
     packet = _render_packet(result, template, rubric)
     saved = {}
     try:
@@ -208,6 +208,29 @@ def make_review_packet(result: dict, output_directory: Path, *, rubric: dict | N
     except (OSError, ValueError, TypeError) as exc:
         raise ReviewSaveError("人工评审包保存失败。", saved=saved, result=result) from exc
     return list(saved.values())
+
+
+def prepare_review_packet(directory: Path) -> dict:
+    """Generate a fresh packet without overwriting existing reviewer work."""
+    directory = Path(directory)
+    result_path = directory / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    validate_result(result)
+    validate_research_result(result)
+    units = research_units(result)
+    if not units or any(unit.get("review") for unit in units):
+        raise ValueError("review preparation requires original unreviewed Research execution")
+    revision = utc_now().replace(":", "").replace("+", "_") + "-" + uuid4().hex
+    output = directory / "review-packets" / revision
+    try:
+        output.mkdir(parents=True, exist_ok=False)
+        paths = make_review_packet(result, output, result_path=result_path)
+    except ReviewSaveError:
+        raise
+    except (Exception, KeyboardInterrupt) as exc:
+        raise ReviewSaveError("评审包未完整生成；现有模板保持原样，可重新执行 review --prepare。",
+                              saved={}, result=result) from exc
+    return {"saved": {path.name: path for path in paths}, "exit_code": 0}
 
 
 def _indexed(items: list, expected: list[dict], label: str) -> dict[str, dict]:
@@ -244,11 +267,9 @@ def _judgment(item: dict, references: dict) -> None:
 
 def apply_review(result: dict, review: dict, result_path: Path, *, rubric: dict | None = None) -> dict:
     """Validate human entries and derive a new result without mutating raw facts."""
-    rubric = _rubric(rubric, result)
-    if result.get("schema_version") != "3":
-        raise ValueError("historical v1/v2 records are read-only")
     validate_result(result)
     validate_research_result(result)
+    rubric = _rubric(rubric, result)
     units = research_units(result)
     if not units or any(unit.get("review") for unit in units):
         raise ValueError("review must bind to original, unreviewed Research execution")
@@ -379,6 +400,3 @@ def import_review(result_path: Path, review_path: Path, output_root: Path | None
             pass
         raise ReviewSaveError("人工评审修订保存失败；已保存产物仍保留。", saved=saved, result=derived) from exc
     return {"result": derived, "saved": saved, "exit_code": research_exit_code(derived)}
-
-
-create_review_packet = make_review_packet

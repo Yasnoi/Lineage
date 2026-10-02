@@ -8,8 +8,9 @@ infer them from a successful answer. No research executor or scorer lives here.
 
 from collections import Counter
 import json
-from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
+
+from benchmarks.core.diagnostics import ConfigurationError
 
 
 EXECUTION_STATUSES = ("completed", "failed", "blocked", "not_run")
@@ -92,12 +93,7 @@ def summarize(units: list[dict]) -> dict:
 
 
 def exit_code(result: dict) -> int:
-    if result.get("schema_version") in {"1", "2"}:
-        if any(unit.get("execution_mode") == "real_model" for unit in result["units"]):
-            from benchmarks.compatibility.research_v2 import research_exit_code
-            return research_exit_code(result)
-        from benchmarks.compatibility.v2 import exit_code as legacy_exit
-        return legacy_exit(result)
+    require_current_result(result)
     units = result["units"]
     if result["framework_errors"] or not units or any(
         unit["execution_status"] != "completed" for unit in units
@@ -120,11 +116,16 @@ def exit_code(result: dict) -> int:
     return 0 if all(unit["verdict"] == "passed" for unit in units) else 2
 
 
+def require_current_result(result: dict) -> None:
+    if not isinstance(result, dict) or result.get("schema_version") != "3":
+        raise ConfigurationError("result.schema_version", "unsupported_version",
+                                 '仅支持 schema_version="3"。',
+                                 "旧产物请直接查看已保存的 JSON 或 Markdown；新评审请使用当前运行结果。")
+
+
 def validate_result(result: dict) -> None:
-    if result.get("schema_version") in {"1", "2"}:
-        from benchmarks.compatibility.v2 import validate_result as validate_legacy
-        return validate_legacy(result)
     """Validate the small common contract before persisting or reporting it."""
+    require_current_result(result)
     required = {"schema_version", "run_id", "started_at", "ended_at", "selected_suites",
                 "baseline", "units", "summary", "framework_errors"}
     if not required <= result.keys() or result["schema_version"] != "3":

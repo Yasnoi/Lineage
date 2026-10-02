@@ -9,7 +9,10 @@ def load_rubric():
 
 def definition():
     index = json.loads((HERE / "task-index.json").read_text(encoding="utf-8"))
-    identifiers = index["tasks"] if isinstance(index, dict) else index
+    if (not isinstance(index, dict) or not index.get("version")
+            or not isinstance(index.get("tasks"), list)):
+        raise ValueError("task index requires a version and tasks list")
+    identifiers = index["tasks"]
     tasks = [json.loads((HERE / "tasks" / f"{name}.json").read_text(encoding="utf-8")) for name in identifiers]
     for task in tasks:
         if task.get("variant"):

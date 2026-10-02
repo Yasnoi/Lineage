@@ -40,8 +40,8 @@ class ReviewTest(unittest.TestCase):
         self.answer.write_text("明确标记的测试替身回答，不是真实 Research 结果。\n", encoding="utf-8")
         evidence = {"kind": "answer", "path": str(self.answer), "source": "test fixture", "availability": "available"}
         unit = {
-            "suite_id": "test-only", "unit_id": "formal-1-fixture", "case_id": "fixture",
-            "category": "research", "definition_version": "fixture-v1", "phase": "formal", "repeat": 1,
+            "suite_id": "test-only", "unit_id": "fixture.r1", "case_id": "fixture",
+            "category": "research", "definition_version": "fixture-v1", "repeat": 1,
             "granularity": "research_case", "execution_mode": "real_model",
             "conditions": {name: known({"version": "fixture-only"}) for name in ("model", "configuration", "materials", "rubric")},
             "execution_status": "completed", "verdict": "pending_review", "agent_outcome": known("completed"),
@@ -93,7 +93,7 @@ class ReviewTest(unittest.TestCase):
         derived = apply_review(self.result, review, self.path, rubric=RUBRIC)
         self.assertEqual(derived["units"][0]["verdict"], "passed")
         self.assertEqual(research_exit_code(derived), 0)
-        counts = summarize_research(derived["units"])["formal"]
+        counts = summarize_research(derived["units"])
         self.assertEqual(counts["planned_samples"], 1)
         self.assertEqual(counts["reviewed_samples"], 1)
         self.assertNotIn("constraints_history", counts["dimensions"])
@@ -284,7 +284,7 @@ class ReviewTest(unittest.TestCase):
         unit = self.result["units"][0]
         unit["metrics"].update(input_tokens=known(120), input_tokens_missing_requests=known(1),
                                summary_usage_totals=known({"input_tokens": 40}))
-        counts = summarize_research([unit])["formal"]["metrics"]
+        counts = summarize_research([unit])["metrics"]
         self.assertEqual(counts["input_tokens"]["observed_sum"]["value"], 120)
         self.assertEqual(counts["input_tokens"]["missing_request_fields"]["value"], 1)
         self.assertEqual(counts["output_tokens"]["observed_sum"]["availability"], "unknown")

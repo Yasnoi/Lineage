@@ -48,11 +48,16 @@ def run_benchmark(suite_id, *, config=None, root=ROOT, output_root=None, registr
     result["ended_at"] = utc_now()
     _, saved = persist_result(result, directory)
     if any(unit.get("turns") is not None for unit in result["units"]) and directory / "result.json" in saved:
+        from benchmarks.evaluators.review import make_review_packet, ReviewSaveError
         try:
-            from benchmarks.evaluators.review import make_review_packet
             saved.extend(make_review_packet(result, directory))
         except (Exception, KeyboardInterrupt) as exc:
-            result["framework_errors"].append(issue("saving", "review_packet_failed", "评审包保存失败。", exc))
-            _, files = persist_result(result, directory)
-            saved = list(dict.fromkeys(saved + files))
+            # The packet binds the saved result. Keep that result frozen even
+            # when only one packet artifact was written successfully.
+            confirmed = {path.name: path for path in saved}
+            confirmed.update(getattr(exc, "saved", {}))
+            raise ReviewSaveError(
+                "评审包未完整生成；已保存的执行结果和模板保留，可使用 review --prepare 重新生成。",
+                saved=confirmed, result=result,
+            ) from exc
     return result, saved

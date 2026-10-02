@@ -14,3 +14,4 @@ AGENTS.md
 .idea/
 
 logs/
+/benchmarks/local/

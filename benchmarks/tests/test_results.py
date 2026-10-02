@@ -1,4 +1,4 @@
-"""Evidence-oriented checks for status separation and Research compatibility."""
+"""Evidence-oriented checks for the current result contract and status separation."""
 
 import json
 import unittest
@@ -38,13 +38,13 @@ class ResultContractTests(unittest.TestCase):
         self.assertEqual(counts["verdict"]["pending_review"], 3)
         self.assertEqual(exit_code(result), 3)
 
-    def test_v2_research_contract_examples_do_not_require_invented_control_groups(self):
+    def test_unsupported_result_versions_are_rejected_by_all_public_readers(self):
         result = example_result()
-        result["schema_version"] = "2"
-        validate_result(result)
-        self.assertEqual(exit_code(result), 3)
-        self.assertTrue(all("groups" not in unit for unit in result["units"]))
-        self.assertIn(EXAMPLE_NOTICE, render_report(result))
+        for version in ("1", "2", "4", None):
+            result["schema_version"] = version
+            for reader in (validate_result, exit_code, render_report):
+                with self.subTest(version=version, reader=reader.__name__), self.assertRaises(ValueError):
+                    reader(result)
 
     def test_expected_agent_error_does_not_fail_control_assertions(self):
         unit = research_examples()[0]
@@ -64,6 +64,8 @@ class ResultContractTests(unittest.TestCase):
     def test_mixed_outcomes_keep_each_count_and_exit_precedence(self):
         units = research_examples()
         units[0].update(category="control", verdict="passed")
+        for dimension in units[0]["dimensions"]:
+            dimension["verdict"] = "passed"
         units[1].update(category="control", verdict="failed")
         result = example_result(units)
         self.assertEqual(exit_code(result), 1)

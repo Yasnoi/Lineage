@@ -82,15 +82,12 @@ class ArchitectureTests(unittest.TestCase):
             control_worker._execute_entry(definition)
         fake.execute.assert_not_called()
 
-    def test_v2_real_model_report_reads_without_inventing_groups(self):
+    def test_current_real_model_report_does_not_invent_control_groups(self):
         from benchmarks.tests.test_research_review import ReviewTest
-        from benchmarks.compatibility.v2 import summarize
         fixture = ReviewTest()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         result = deepcopy(fixture.result)
-        result['schema_version'] = '2'
-        result['summary'] = summarize(result['units'])
         validate_result(result)
         rendered = render_report(result)
         self.assertIn('pending_review', rendered)

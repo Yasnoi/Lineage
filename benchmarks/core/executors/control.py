@@ -32,13 +32,10 @@ def make_unit(definition: dict, root: Path) -> dict:
         "metrics": {"duration_seconds": unknown("检查尚未启动。"),
                     "usage": not_applicable("替身 usage 用于断言，不是实际模型消耗。")},
     }
-    if "groups" in definition:
-        unit.update(groups=planned_groups(definition))
-        unit["conditions"]["definition"] = known({"version": "3", "plan_digest": plan_digest(definition["groups"])})
-        unit["conditions"]["check_sources"] = known({
-            str(p.relative_to(root)): _digest(p) for p in sorted((root / "benchmarks/checks").rglob("*.py"))})
-        unit["module"] = definition["module"]
-        unit["assessments"] = []
+    unit.update(groups=planned_groups(definition))
+    unit["conditions"]["definition"] = known({"version": "3", "plan_digest": plan_digest(definition["groups"])})
+    unit["module"] = definition["module"]
+    unit["assessments"] = []
     return unit
 
 def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
@@ -99,10 +96,9 @@ def execute_unit(unit: dict, definition: dict, run_id: str, directory: Path,
         unit["evidence"].extend([
             _evidence("stdout", stdout_path, "worker process"),
             _evidence("stderr", stderr_path, "worker process"),
-            _evidence("receipt", receipt_path, "control adapter v3" if "groups" in definition else "ReAct adapter v1"),
+            _evidence("receipt", receipt_path, "control adapter v3"),
         ])
-    if "groups" in definition:
-        return finish_control_unit(unit, definition, run_id, root, unit_dir, process, failure, interruption)
+    return finish_control_unit(unit, definition, run_id, root, unit_dir, process, failure, interruption)
 
 def finish_control_unit(unit, definition, run_id, root, directory, process, failure, interruption):
     events = directory / "groups.jsonl"

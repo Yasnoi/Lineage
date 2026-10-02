@@ -21,7 +21,7 @@ def _available(value: Any, label: str) -> None:
 
 def _trace_turn(unit: dict, turn: dict) -> None:
     tracing = turn.get("tracing")
-    if tracing is None:  # Historical v3 records have no transport observation.
+    if tracing is None:  # Unstarted or preflight-failed turns have no trace observation.
         return
     if not isinstance(tracing, dict) or type(tracing.get("requested")) is not bool or not isinstance(tracing.get("traces"), list):
         raise ValueError("invalid tracing observation")
@@ -66,11 +66,11 @@ def _trace_turn(unit: dict, turn: dict) -> None:
 
 
 def validate_research_result(result: dict) -> None:
-    """Validate only real-model extensions; old contract examples stay valid.
+    """Validate real-model extensions; synthetic examples use the common contract.
 
 The common validator may call this function, so it deliberately does not call
 the common validator itself. File existence belongs to evidence collection or
-review binding, not historical result parsing.
+review binding, not structural validation.
 """
     for unit in research_units(result):
         if result.get("schema_version") != "3" or unit.get("category") != "research":

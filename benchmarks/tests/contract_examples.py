@@ -21,6 +21,7 @@ def _turn(case: str, number: int, session: str | None) -> dict:
     prefix = f"examples-only/{case}/turn-{number}"
     return {
         "turn": number,
+        "execution_status": "completed",
         "run_id": known(f"example-{case}-turn-{number}"),
         "session_id": (
             known(session)
@@ -80,7 +81,7 @@ def research_examples() -> list[dict]:
             "assessment_basis": f"{EXAMPLE_NOTICE} 执行完成，等待人工评分。",
             "dimensions": [
                 {
-                    "name": dimension,
+                    "id": dimension,
                     "verdict": "pending_review",
                     "reason": "尚未人工评分。",
                     "score": unknown("无实际评分。"),
@@ -131,17 +132,17 @@ def research_examples() -> list[dict]:
 def example_result(units: list[dict] | None = None) -> dict:
     selected = research_examples() if units is None else deepcopy(units)
     return {
-        "schema_version": "1",
+        "schema_version": "3",
         "run_id": "contract-example-only",
         "started_at": "2026-01-01T00:00:00+00:00",
         "ended_at": "2026-01-01T00:00:00+00:00",
         "selected_suites": list(dict.fromkeys(unit["suite_id"] for unit in selected)),
         "baseline": {
             "agent_commit": unknown("契约样例没有被测 Git 基线。"),
-            "workspace_dirty": unknown("契约样例不检查工作区。"),
-            "python": unknown("契约样例不记录执行环境。"),
-            "dependencies": unknown("契约样例不记录实际依赖版本。"),
-            "lockfile_sha256": unknown("契约样例不采集锁文件。"),
+            "working_tree_dirty": unknown("契约样例不检查工作区。"),
+            "python_version": unknown("契约样例不记录执行环境。"),
+            "dependencies": {},
+            "lock_sha256": unknown("契约样例不采集锁文件。"),
         },
         "units": selected,
         "summary": summarize(selected),

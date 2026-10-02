@@ -12,10 +12,11 @@ from uuid import uuid4
 from benchmarks.core.files import ROOT, atomic_write_json, sha256_file
 from benchmarks.core.contracts import known, unknown, summarize, validate_result
 from benchmarks.core.metadata import issue, _evidence
+from benchmarks.core.diagnostics import ConfigurationError
 from benchmarks.core.processes import safe_environment, _stop
 from benchmarks.core.configuration import (
-    CONNECTION_KEYS, TRACE_ENV_KEYS, checked_config, checked_model, configuration_hash,
-    load_connection, resolve_run_config,
+    CONNECTION_KEYS, TRACE_ENV_KEYS, checked_model, configuration_hash,
+    resolve_run_config, selected_units,
 )
 from benchmarks.core.materials import prepare_materials, instantiate_materials, verify_materials
 from benchmarks.core.budgets import read_ledger
@@ -33,11 +34,8 @@ def plan(suite, config):
         repeats = 1
     selected = suite["units"]
     if isinstance(config, dict) and config.get("schema_version") == "2":
-        names = config.get("units")
         available = {task["unit_id"]: task for task in selected}
-        if (not isinstance(names, list) or not names or any(not isinstance(name, str) or name not in available for name in names)
-                or len(set(names)) != len(names)):
-            raise ValueError("unknown or duplicate research unit selection")
+        names = selected_units(config, available)
         selected = [available[name] for name in names]
     return [{**deepcopy(task), "suite_id": suite["suite_id"], "repeat": repeat,
              "definition_unit_id": task["unit_id"],
@@ -77,12 +75,7 @@ def make_unit(task, root=ROOT):
 def prepare(suite, config, directory, result, *, root=ROOT):
     stage = "configuration"
     try:
-        if isinstance(config, dict) and config.get("schema_version") == "2":
-            config, connection = resolve_run_config(config, root)
-        else:
-            config = checked_config(config)
-            stage = "credentials"
-            connection = load_connection(config)
+        config, connection = resolve_run_config(config, root)
         stage = "task_configuration"
         # Validate every task override before allowing the first request.
         for unit in result["units"]:
@@ -91,30 +84,28 @@ def prepare(suite, config, directory, result, *, root=ROOT):
             unit["conditions"]["model"] = known({"name": profile["model_name"], "endpoint": profile["base_url"],
                                                 "weights_version": unknown("服务端未提供固定权重版本。")})
             details = {"settings": profile, "limits": config["limits"], "repeats": config["repeats"],
-                       "tracing": tracing_for(config, task) if config["schema_version"] == "2" else False, "retries": 0}
-            if config["schema_version"] == "2":
-                overrides = deepcopy(task.get("settings_overrides", {}))
-                details["tracing"]["field_sources"] = deepcopy(
-                    config["tracing"]["field_sources"] if details["tracing"]["enabled"] else {"enabled": "benchmark"})
-                details.update(
-                    source_snapshot=config["source_snapshot"], source_snapshot_sha256=config["source_snapshot_sha256"],
-                    task_overrides=overrides,
-                    field_sources={key: "task_override" if key in overrides else source
-                                   for key, source in config["field_sources"].items()},
-                    effective_settings_sha256=configuration_hash(profile),
-                    paths={"project_root": "sample/materials/material", "log_dir": "sample/agent-logs", "source": "benchmark"},
-                )
+                       "tracing": tracing_for(config, task), "retries": 0}
+            overrides = deepcopy(task.get("settings_overrides", {}))
+            details["tracing"]["field_sources"] = deepcopy(
+                config["tracing"]["field_sources"] if details["tracing"]["enabled"] else {"enabled": "benchmark"})
+            details.update(
+                source_snapshot=config["source_snapshot"], source_snapshot_sha256=config["source_snapshot_sha256"],
+                task_overrides=overrides,
+                field_sources={key: "task_override" if key in overrides else source
+                               for key, source in config["field_sources"].items()},
+                effective_settings_sha256=configuration_hash(profile),
+                paths={"project_root": "sample/materials/material", "log_dir": "sample/agent-logs", "source": "benchmark"},
+            )
             unit["conditions"]["configuration"] = known(details)
-        if config["schema_version"] == "2":
-            stage = "configuration_recording"
-            path = directory / "resolved-configuration.json"
-            atomic_write_json(path, {"schema_version": "1", "run_id": result["run_id"],
-                                    "configuration": config, "units": [
-                                        {"unit_id": unit["unit_id"],
-                                         "configuration": unit["conditions"]["configuration"]["value"]}
-                                        for unit in result["units"]]})
-            for unit in result["units"]:
-                unit["evidence"].append(_evidence("resolved_configuration", path, "validated configuration before requests"))
+        stage = "configuration_recording"
+        path = directory / "resolved-configuration.json"
+        atomic_write_json(path, {"schema_version": "1", "run_id": result["run_id"],
+                                "configuration": config, "units": [
+                                    {"unit_id": unit["unit_id"],
+                                     "configuration": unit["conditions"]["configuration"]["value"]}
+                                    for unit in result["units"]]})
+        for unit in result["units"]:
+            unit["evidence"].append(_evidence("resolved_configuration", path, "validated configuration before requests"))
         stage = "materials"
         prepared = root / "logs/benchmark-materials" / result["run_id"]
         manifest = prepare_materials(root, Path(config["source_repository"]), prepared, suite["materials"])
@@ -127,9 +118,14 @@ def prepare(suite, config, directory, result, *, root=ROOT):
         return {"config": config, "connection": connection, "prepared": prepared, "manifest": manifest,
                 "ledger": ledger, "snapshot": [], "result": result, "elapsed": 0.0, "started_samples": 0}
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        problem = (exc.as_issue() if isinstance(exc, ConfigurationError) else
+                   issue("preflight", stage + "_unavailable", "前置条件未满足；没有替换模型或回退替身。", exc))
+        if stage == "materials" and not isinstance(exc, ConfigurationError):
+            problem = ConfigurationError("source_repository", "materials_unavailable", "必须能读取评测定义指定的固定材料。",
+                                         "检查本地仓库路径、所需提交及材料文件是否存在。提交和文件要求见评测集说明。").as_issue()
         for unit in result["units"]:
             unit.update(execution_status="blocked", assessment_basis="显式配置、凭据或固定材料前置条件未满足；未调用模型。")
-            unit["issues"].append(issue("preflight", stage + "_unavailable", "前置条件未满足；没有替换模型或回退替身。", exc))
+            unit["issues"].append(deepcopy(problem))
         return None
 
 
@@ -150,7 +146,7 @@ def execute_unit(unit, task, run_id, directory, *, root=ROOT, context):
     manifest = instantiate_materials(context["prepared"], sample / "materials", task)
     unit["conditions"]["materials"] = known(manifest)
     timeout = min(limits["sample_seconds"], limits["execution_seconds"] - context["elapsed"])
-    tracing = tracing_for(config, task) if config["schema_version"] == "2" else {"enabled": False}
+    tracing = tracing_for(config, task)
     connection = connection_for(context["connection"], tracing)
     spec = {"schema_version": "1", "batch_id": run_id, "run_id": unit["sample_run_id"],
             "case_id": task["case_id"], "definition_version": task["version"], "prompts": task["turns"],
@@ -245,7 +241,7 @@ def model_profile(profile: dict, case: dict) -> dict:
     values = {key: value for key, value in profile.items() if key in allowed}
     values.update(case.get("settings_overrides", {}))
     # Persist all resolved numeric defaults; credentials are never ModelSettings fields.
-    return checked_model(values)
+    return checked_model(values, path="task.settings_overrides")
 
 
 def _receipt(path: Path, spec: dict, spec_path: Path, *, final: bool, returncode: int | None) -> dict:

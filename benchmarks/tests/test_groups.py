@@ -308,9 +308,9 @@ class GroupObservationTests(unittest.TestCase):
         self.assertEqual(harness["kind"], "serializer_fixture")
         self.assertEqual(groups[0]["evidence"][0]["availability"], "missing")
 
-    def test_old_schema_one_contract_remains_readable_without_group_details(self):
+    def test_current_contract_examples_do_not_invent_group_details(self):
         old = example_result()
-        self.assertEqual(old["schema_version"], "1")
+        self.assertEqual(old["schema_version"], "3")
         self.assertTrue(all("groups" not in unit for unit in old["units"]))
         restored = json.loads(json.dumps(old))
         validate_result(restored)
