@@ -4,12 +4,12 @@
   "agent_source": "project_env",
   "source_repository": "C:/path/to/project",
   "model_overrides": {},
-  "units": ["wechat-capabilities", "wechat-compaction"],
+  "units": ["defect-reference", "compaction-continuation"],
   "repeats": 1,
   "gate_first_sample": true,
   "tracing": {
     "enabled": false,
-    "unit_ids": ["wechat-capabilities"]
+    "unit_ids": ["defect-reference"]
   },
   "limits": {
     "requests": 200,
