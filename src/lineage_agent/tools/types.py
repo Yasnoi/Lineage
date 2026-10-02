@@ -9,9 +9,25 @@ from typing import Any, TypedDict
 type ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
 
 
+MAX_OBSERVATION_BYTES = 4096
+MAX_RECALL_BYTES = 8192
+
+
 def serialize_tool_output(value: Any) -> str:
     """Use the same JSON encoding for delivery and bounded result measurement."""
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def inline_tool_output(raw_result: str) -> dict[str, Any]:
+    """Keep execution success separate from model-visible observation status."""
+    return {"ok": True, "observation": {
+        "status": "available", "mode": "inline", "raw_result": raw_result,
+    }}
+
+
+def tool_output_bytes(output: dict[str, Any]) -> int:
+    """Measure the exact UTF-8 output envelope used by the tool protocol."""
+    return len(serialize_tool_output(output).encode("utf-8"))
 
 
 TOOL_ARGUMENT_REASONS = {

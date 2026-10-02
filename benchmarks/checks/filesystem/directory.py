@@ -4,6 +4,7 @@
 import asyncio
 import io
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 import os
 import subprocess
 import sys
@@ -43,7 +44,7 @@ async def check_listing(root):
         [response(directory_call("fs_root")), response(directory_call("fs_child", "child private")), response(message())],
     )
     counts(state, 3, 2, 2)
-    first, second = [json.loads(item["result"]) for item in decoded_results(state)]
+    first, second = [json.loads(inline_raw(item)) for item in decoded_results(state)]
     expected = {
         "文件 private.txt": "file", "child private": "directory", "空目录 private": "directory",
         ".hidden private": "file", ".git": "directory", ".gitignore": "file",
@@ -56,7 +57,7 @@ async def check_listing(root):
         "path": "child private", "entries": [{"name": "nested.txt", "path": "child private/nested.txt", "type": "file"}],
         "limit": 100, "truncated": False, "after": None, "next_after": None,
     }
-    assert client.requests[0]["tools"] == [DIRECTORY_TOOL]
+    assert_tools(client.requests[0]["tools"], [DIRECTORY_TOOL])
     assert len(observed) == 2 and snapshot(root) == before
     for scenario, path in (
         ("empty_directory", "空目录 private"),
@@ -64,7 +65,7 @@ async def check_listing(root):
         ("backslash_separator", "child private\\."),
     ):
         state, _, _ = await run_case(scenario, root, [response(directory_call("fs_path", path)), response(message())])
-        result = json.loads(decoded_results(state)[0]["result"])
+        result = json.loads(inline_raw(decoded_results(state)[0]))
         assert result["truncated"] is False
         assert result["entries"] == ([] if path == "空目录 private" else second["entries"])
 
@@ -74,6 +75,8 @@ async def check_limits(root):
         probes = []
 
         def scanned(path):
+            if not isinstance(path, (str, os.PathLike)) or Path(path) != root:
+                return real_scandir(path)
             result = ScanProbe(real_scandir(path))
             probes.append(result)
             return result
@@ -82,7 +85,7 @@ async def check_limits(root):
             state, _, _ = await run_case(
                 f"entry_limit_{limit}", root, [response(directory_call("fs_limit")), response(message())], max_entries=limit,
             )
-        result = json.loads(decoded_results(state)[0]["result"])
+        result = json.loads(inline_raw(decoded_results(state)[0]))
         assert len(probes) == 1 and probes[0].closed
         assert len(probes[0].yielded) == 6
         assert result["limit"] == limit and result["truncated"] is expected_truncation
@@ -93,12 +96,13 @@ async def check_limits(root):
         for name in reversed(names):
             (expanded / name).write_bytes(b"")
         original = snapshot(expanded)
-        state, client, _ = await run_case(
+        state, client, observed = await run_case(
             "production_directory_budget_beyond_old_limit", expanded,
             [response(directory_call("default_directory")), response(message())],
             executor=create_directory_executor(expanded),
         )
-        result = json.loads(decoded_results(state)[0]["result"])
+        assert decoded_results(state)[0]["observation"]["mode"] == "artifact"
+        result = json.loads(observed[0]["result"])
         assert result["limit"] == SETTINGS.directory_max_entries == 1000
         assert [entry["name"] for entry in result["entries"]] == names
         assert result["truncated"] is False and result["next_after"] is None
@@ -174,6 +178,8 @@ async def check_io_failures(root):
         calls = []
 
         def faulting_scan(path):
+            if not isinstance(path, (str, os.PathLike)) or Path(path) != root:
+                return real_scandir(path)
             calls.append(Path(path))
             if len(calls) == 1:
                 if scenario == "permission_injection":
@@ -235,7 +241,7 @@ async def check_links(root, sibling):
     try:
         if created:
             state, _, _ = await run_case("link_entries_without_targets", root, [response(directory_call("fs_links")), response(message())])
-            result = json.loads(decoded_results(state)[0]["result"])
+            result = json.loads(inline_raw(decoded_results(state)[0]))
             entries = {entry["name"]: entry for entry in result["entries"]}
             for index, (link, kind, is_dir) in enumerate(created):
                 assert entries[link.name] == {"name": link.name, "path": link.name, "type": kind}
@@ -320,7 +326,7 @@ async def check_isolation(root, sibling):
         counts(state, 2, 1, 1)
         assert clients[index].closed
         audit_recording(state, clients[index], scenario=f"interleaved_root_{index}")
-        actual = [json.loads(item["output"])["result"] for item in outputs(state)]
+        actual = [inline_raw(json.loads(item["output"])) for item in outputs(state)]
         assert actual == seen[index]
         assert outputs(state) == [item for item in clients[index].requests[1]["input"] if item.get("type") == "function_call_output"]
         expected = {path.name for path in roots[index].iterdir()}
@@ -392,9 +398,9 @@ async def check_configuration_and_cli(root, base):
             assert captured[0]["run_id"] in stderr and captured[0]["log_path"] in stderr
             audit_recording(captured[0], client, scenario=scenario)
             if project_root is None:
-                assert not client.requests[0].get("tools") and len(client.requests) == 1
+                assert assert_tools(client.requests[0]["tools"]) and len(client.requests) == 1
             else:
-                assert client.requests[0]["tools"] == [DIRECTORY_TOOL, TEXT_TOOL] and len(client.requests) == 2
+                assert assert_tools(client.requests[0]["tools"], [DIRECTORY_TOOL, TEXT_TOOL]) and len(client.requests) == 2
 
 async def main():
     with TemporaryDirectory(prefix="lineage-filesystem-check-") as temporary:

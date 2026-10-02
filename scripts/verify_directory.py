@@ -15,6 +15,11 @@ from lineage_agent.agent.runtime import run_agent
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 
+if __package__:
+    from .verification_observations import inline_result
+else:
+    from verification_observations import inline_result
+
 
 async def verify():
     settings = load_settings(Path(__file__).resolve().parents[1] / ".env")
@@ -86,8 +91,10 @@ async def verify():
     assert state["log_complete"], "真实运行的日志不完整。"
     assert state["tool_outcomes"]["succeeded"] >= 2, "未成功列举根目录和子目录。"
     outputs = [item for item in state["input"] if item.get("type") == "function_call_output"]
-    successful = [item for item in outputs if json.loads(item["output"])["ok"]]
-    assert [json.loads(item["output"])["result"] for item in successful] == actual_results, (
+    calls = {item["call_id"]: item for item in state["input"] if item.get("type") == "function_call"}
+    successful = [item for item in outputs if json.loads(item["output"])["ok"]
+                  and calls[item["call_id"]]["name"] == "list_directory"]
+    assert [inline_result(item) for item in successful] == actual_results, (
         "上下文中的成功结果与实际目录执行器返回值不同。"
     )
     listings = [json.loads(result) for result in actual_results]
@@ -113,8 +120,8 @@ async def verify():
         assert returned == [by_id[call_id] for call_id in requested_ids], (
             "实际 SDK 请求未按原顺序携带完整工具结果。"
         )
-    root_result = next(item for item in successful if json.loads(json.loads(item["output"])["result"])["path"] == ".")
-    child_result = next(item for item in successful if json.loads(json.loads(item["output"])["result"])["path"] == child_name)
+    root_result = next(item for item in successful if json.loads(inline_result(item))["path"] == ".")
+    child_result = next(item for item in successful if json.loads(inline_result(item))["path"] == child_name)
     child_first_seen = next(index for index, items in enumerate(actual_inputs) if child_result in items)
     assert child_first_seen > 0 and root_result in actual_inputs[child_first_seen - 1], (
         "子目录请求不是在模型实际收到根目录结果后产生的。"

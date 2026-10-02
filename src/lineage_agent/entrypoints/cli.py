@@ -5,9 +5,12 @@ import asyncio
 import sys
 
 from lineage_agent.agent.checkpointing import CheckpointError
-from lineage_agent.agent.runtime import CLIENT_CLOSE_MESSAGE, PreExecutionConfigurationError, run_agent
+from lineage_agent.agent.runtime import (
+    ARTIFACT_CLOSE_MESSAGE, CLIENT_CLOSE_MESSAGE, PreExecutionConfigurationError, run_agent,
+)
 from lineage_agent.agent.sessions import SessionError, SessionManager, SessionTurn
 from lineage_agent.agent.state import AgentState, CompactionStatus
+from lineage_agent.artifacts.store import ArtifactError
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
 from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.tools.filesystem import directory
@@ -86,8 +89,10 @@ def display_run(state: AgentState, settings: ModelSettings) -> int:
 
     if (state.get("cleanup_error") or {}).get("previous_stop_reason") == "completed" and state["result"] is not None:
         print(state["result"]["text"])
-    if state.get("cleanup_error") and state.get("error_code") != "client_close_error":
-        print(f"收尾失败：{CLIENT_CLOSE_MESSAGE}", file=sys.stderr)
+    cleanup_code = (state.get("cleanup_error") or {}).get("code")
+    if cleanup_code and state.get("error_code") != cleanup_code:
+        message = ARTIFACT_CLOSE_MESSAGE if cleanup_code == "artifact_cleanup_error" else CLIENT_CLOSE_MESSAGE
+        print(f"收尾失败：{message}", file=sys.stderr)
     print(f"运行失败：{state['error'] or '未获得最终回答。'}", file=sys.stderr)
     return 1
 
@@ -121,6 +126,21 @@ def _tool_dependencies(settings: ModelSettings) -> dict:
 async def interactive(settings: ModelSettings, dependencies: dict) -> int:
     """Handle terminal interaction; session state belongs to SessionManager."""
     sessions = SessionManager()
+    try:
+        with sessions:
+            return await _interactive_loop(settings, dependencies, sessions)
+    except BaseException as exc:
+        # A primary interruption keeps propagating, while its suppressed cleanup
+        # failure still gets a safe report. A standalone cleanup error is shown
+        # by main(), so reporting it here would duplicate the same failure.
+        if sessions.cleanup_error and not (
+            isinstance(exc, ArtifactError) and exc.code == sessions.cleanup_error
+        ):
+            print(f"收尾失败：{ARTIFACT_CLOSE_MESSAGE}", file=sys.stderr)
+        raise
+
+
+async def _interactive_loop(settings: ModelSettings, dependencies: dict, sessions: SessionManager) -> int:
     current = sessions.create_session(settings, **dependencies)
     known_sessions = {current}
     print(
@@ -191,7 +211,7 @@ def main() -> int:
     except ConfigurationError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2
-    except (SessionError, CheckpointError) as exc:
+    except (SessionError, CheckpointError, ArtifactError) as exc:
         print(f"会话错误（{exc.code}）：{exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

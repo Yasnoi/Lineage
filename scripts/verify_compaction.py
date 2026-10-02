@@ -28,6 +28,11 @@ from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
+if __package__:
+    from .verification_observations import runtime_tools
+else:
+    from verification_observations import runtime_tools
+
 
 def summary_request(request):
     return is_summary_request(request)
@@ -93,7 +98,7 @@ async def verify():
                 yield client
 
     cwd = Path.cwd()
-    with TemporaryDirectory(prefix="lineage-compaction-verify-") as temporary:
+    with TemporaryDirectory(prefix="lineage-compaction-verify-") as temporary, SessionManager() as manager:
         root = Path(temporary)
         filename = f"观察来源 {uuid4().hex}.md"
         fact = f"COMPACTION_FACT_{uuid4().hex}"
@@ -109,7 +114,6 @@ async def verify():
         source.write_bytes(original_bytes)
         if min(settings.text_max_bytes, settings.text_total_max_bytes) < len(original_bytes):
             raise ConfigurationError("当前读取额度小于非敏感压缩验证样例。")
-        manager = SessionManager()
         tools = [DIRECTORY_TOOL, TEXT_TOOL]
         sid = manager.create_session(
             replace(settings, project_root=root), tools=tools,
@@ -147,7 +151,7 @@ async def verify():
             previous_request = actual_requests[3][-1]
             base_input = history + [{"role": "user", "content": base_question}]
             prepared = prepare_request(
-                settings.model_name, base_input, tools=tools,
+                settings.model_name, base_input, tools=runtime_tools(tools),
                 instructions=previous_request.get("instructions"),
                 max_output_tokens=settings.max_output_tokens,
             )

@@ -4,6 +4,7 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import replace
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -52,7 +53,7 @@ def error(code):
 
 def wrapped(value):
     result = json.dumps(value, ensure_ascii=False, allow_nan=False)
-    return json.dumps({"ok": True, "result": result}, ensure_ascii=False, allow_nan=False)
+    return json.dumps({"ok": True, "observation": {"status": "available", "mode": "inline", "raw_result": result}}, ensure_ascii=False, allow_nan=False)
 
 
 def bounded(value):
@@ -394,10 +395,10 @@ async def check_integration():
         assert first.state["tool_outcomes"]["succeeded"] == 2
         first_outputs = outputs(first.state)
         assert [item["call_id"] for item in first_outputs] == ["artifact_first", "ordinary"]
-        recalled = json.loads(json.loads(first_outputs[0]["output"])["result"])
+        recalled = json.loads(inline_raw(json.loads(first_outputs[0]["output"])))
         assert content.startswith(recalled["text"]) and recalled["next_start"] > 0
         assert len(first_outputs[0]["output"].encode("utf-8")) <= MAX_BYTES
-        ordinary = json.loads(json.loads(first_outputs[1]["output"])["result"])
+        ordinary = json.loads(inline_raw(json.loads(first_outputs[1]["output"])))
         assert ordinary["content"] == "ordinary text" and ordinary["complete"] is True
         second_calls = [artifact_call("artifact_second", "artifact_read", ref, start=recalled["next_start"], end=None),
                         artifact_call("artifact_search", "artifact_search", ref, keywords=["tail"], start=0),
@@ -407,8 +408,8 @@ async def check_integration():
         assert second.state["tool_outcomes"]["succeeded"] == 3
         for item in outputs(second.state)[-3:-1]:
             assert len(item["output"].encode("utf-8")) <= MAX_BYTES
-            assert json.loads(json.loads(item["output"])["result"])["artifact_ref"] == ref
-        assert json.loads(json.loads(outputs(second.state)[-1]["output"])["result"])["content"] == "ordinary text"
+            assert json.loads(inline_raw(json.loads(item["output"])))["artifact_ref"] == ref
+        assert json.loads(inline_raw(json.loads(outputs(second.state)[-1]["output"])))["content"] == "ordinary text"
         assert outputs(first.state) == [item for item in next_client.requests[0]["input"] if item.get("type") == "function_call_output"]
         assert len(list(store._directory.glob("*.raw"))) == 1, "recall recursively archived new artifacts"
         outsider = manager.create_session(SETTINGS, artifact_store=store)
@@ -417,11 +418,11 @@ async def check_integration():
                     artifact_call("extra", "artifact_read", ref, start=0, end=None, session_id=sid)]
         rejected, _, _ = await run_turn(manager, outsider, [response(*attempts), response(message())], "artifact_foreign_run")
         envelopes = [json.loads(item["output"]) for item in outputs(rejected.state)]
-        assert all(not item["ok"] and "result" not in item for item in envelopes)
+        assert all(not item["ok"] and "observation" not in item for item in envelopes)
         assert envelopes[0]["error"]["reason_code"] == "artifact_not_found"
         plain = manager.create_session(SETTINGS)
-        untouched, plain_client, _ = await run_turn(manager, plain, [response(message())], "artifact_opt_in_only")
-        assert plain_client.requests[0].get("tools") is None
+        untouched, plain_client, _ = await run_turn(manager, plain, [response(message())], "artifact_default_tools")
+        assert_tools(plain_client.requests[0]["tools"])
 
 
 async def check_recording():

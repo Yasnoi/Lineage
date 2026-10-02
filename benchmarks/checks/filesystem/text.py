@@ -4,6 +4,7 @@
 import asyncio
 import io
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 import os
 import stat
 import subprocess
@@ -57,7 +58,7 @@ async def check_reading(root):
              response(message("sources received"))],
         )
     counts(state, 3, 3, 3)
-    listed, md, bom = [json.loads(item["result"]) for item in result_envelopes(state)]
+    listed, md, bom = [json.loads(inline_raw(item)) for item in result_envelopes(state)]
     assert "说明 PRIVATE.md" in {item["name"] for item in listed["entries"]}
     for value, relative, encoding in (
         (md, "说明 PRIVATE.md", "utf-8"), (bom, "docs private/mixed space.TXT", "utf-8-sig"),
@@ -72,7 +73,7 @@ async def check_reading(root):
     for scenario, path in (("empty_text", "empty.txt"), ("bom_only", "bom_only.txt"), ("uppercase_extension", "case.MD")):
         with monitor_reads(root):
             state, _, _ = await run_case(scenario, root, [response(text_call("text_one", path)), response(message())])
-        value = json.loads(result_envelopes(state)[0]["result"])
+        value = json.loads(inline_raw(result_envelopes(state)[0]))
         assert value["content"] == (root / path).read_bytes().decode("utf-8-sig")
         assert value["complete"] is True
         counts(state, 2, 1, 1)
@@ -81,12 +82,13 @@ async def check_reading(root):
         "explicit_text_only", root, [response(text_call("text_only")), response(message())],
         executor=standalone, tools=[TEXT_TOOL],
     )
-    assert client.requests[0]["tools"] == [TEXT_TOOL]
+    assert_tools(client.requests[0]["tools"], [TEXT_TOOL])
 
 async def check_limits(root):
     with monitor_reads(root) as (_, probes):
-        state, _, _ = await run_case("byte_limit_exact", root, [response(text_call("text_limit", "equal.txt")), response(message())])
-    result = json.loads(result_envelopes(state)[0]["result"])
+        state, _, observed = await run_case("byte_limit_exact", root, [response(text_call("text_limit", "equal.txt")), response(message())])
+    assert result_envelopes(state)[0]["observation"]["mode"] == "artifact"
+    result = json.loads(observed[0]["result"])
     assert result["content"] == "a" * 65536 and result["bytes_read"] == 65536
     assert sum(count for _, count in probes[0].reads) == 65536
     assert probes[0].reads[0][0] <= 65537
@@ -97,7 +99,7 @@ async def check_limits(root):
             state, _, _ = await run_case(
                 scenario, root, [response(text_call("text_short", "short.txt")), response(message())], max_bytes=64,
             )
-        value = json.loads(result_envelopes(state)[0]["result"])
+        value = json.loads(inline_raw(result_envelopes(state)[0]))
         assert value["content"].encode() == (root / "short.txt").read_bytes()
         total = 0
         for requested, returned in probes[0].reads:
@@ -119,7 +121,7 @@ async def check_limits(root):
         assert requested <= 65 - total
         total += returned
     assert total == 65
-    assert "result" not in result_envelopes(state)[0]
+    assert "observation" not in result_envelopes(state)[0]
     print(json.dumps({"scenario": "growth_size_metadata_injection", "fault_source": "lstat/fstat size injection; real FileIO reads", "bytes_read": total, "run_id": state["run_id"]}))
     with metadata_override(root / "short.txt", size=65537, before_open=False), monitor_reads(root) as (opened, probes):
         state, _, _ = await run_case(
@@ -138,14 +140,15 @@ async def check_limits(root):
         original = snapshot(expanded)
         for factory in (create_text_executor, create_filesystem_executor):
             with monitor_reads(expanded) as (opened, probes):
-                state, client, _ = await run_case(
+                state, client, observed = await run_case(
                     f"production_text_budget_{factory.__name__}", expanded,
                     [response(text_call("default_exact", "exact.txt")),
                      response(text_call("default_over", "over.txt")), response(message())],
                     executor=factory(expanded), tools=[TEXT_TOOL],
                 )
             exact, rejected = result_envelopes(state)
-            value = json.loads(exact["result"])
+            assert exact["observation"]["mode"] == "artifact"
+            value = json.loads(observed[0]["result"])
             assert value["content"] == "x" * 131072 and value["bytes_read"] == 131072
             assert value["complete"] is True and rejected["error"]["reason_code"] == "file_too_large"
             assert opened == [expanded / "exact.txt"] and len(probes) == 1
@@ -225,7 +228,7 @@ async def check_io_and_logging_failures(root):
         assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 0, "failed": 1, "skipped": 0}
         first, second = result_envelopes(state)
         assert first["error"]["reason_code"] == reason and first["error"]["code"] == "execution_error"
-        assert "result" not in first and second["ok"] is True
+        assert "observation" not in first and second["ok"] is True
         assert opened == [root / "short.txt", root / "plain private.txt"]
         print(json.dumps({"scenario": scenario, "fault_source": "file open/read injection", "run_id": state["run_id"]}))
     for event, first_path, outcome, reason in (
@@ -310,11 +313,11 @@ async def check_untrusted_content(root, sibling):
     counts(state, 3, 3, 2)
     assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 2, "failed": 0, "skipped": 0}
     first = result_envelopes(state)[0]
-    assert json.loads(first["result"])["content"] == (root / "pseudo.md").read_text(encoding="utf-8")
+    assert json.loads(inline_raw(first))["content"] == (root / "pseudo.md").read_text(encoding="utf-8")
     assert BODY_MARKER in client.requests[1]["input"][-1]["output"]
     for request in client.requests:
         assert not any(item.get("role") in {"system", "developer"} for item in request["input"])
-        assert request["tools"] == TOOLS
+        assert_tools(request["tools"], TOOLS)
     assert result_envelopes(state)[2]["error"]["code"] == "unknown_tool"
 
 async def check_isolation(root, sibling):
@@ -353,7 +356,7 @@ async def check_isolation(root, sibling):
         assert state["usage_totals"]["total_tokens"] == 24
         item = outputs(state)[0]
         assert clients[index].requests[-1]["input"][-1] == item
-        assert json.loads(json.loads(item["output"])["result"])["content"] == (roots[index] / paths[index]).read_text(encoding="utf-8")
+        assert json.loads(inline_raw(json.loads(item["output"])))["content"] == (roots[index] / paths[index]).read_text(encoding="utf-8")
         audit_recording(state, clients[index], scenario=f"text_interleaved_root_{index}")
         RUNS.append(state["run_id"])
     states[0]["input"][0]["metadata"]["nested"].append("mutated")
@@ -408,10 +411,10 @@ async def check_configuration_and_cli(root, base):
         assert code == 0 and client.closed and stdout.strip() == "done"
         assert captured[0]["run_id"] in stderr and captured[0]["log_path"] in stderr
         if enabled:
-            assert client.requests[0]["tools"] == TOOLS
-            assert json.loads(json.loads(outputs(captured[0])[-1]["output"])["result"])["content"] == (root / "plain private.txt").read_text(encoding="utf-8")
+            assert_tools(client.requests[0]["tools"], TOOLS)
+            assert json.loads(inline_raw(json.loads(outputs(captured[0])[-1]["output"])))["content"] == (root / "plain private.txt").read_text(encoding="utf-8")
         else:
-            assert not client.requests[0].get("tools")
+            assert_tools(client.requests[0]["tools"])
         audit_recording(captured[0], client, scenario=scenario)
         RUNS.append(captured[0]["run_id"])
 

@@ -4,6 +4,7 @@
 import asyncio
 import heapq
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 from benchmarks.checks.support.access import RUNS, envelopes, file_call, run_case
 from benchmarks.checks.support.events import check_group, observe_state
 from benchmarks.checks.support.runtime import (
@@ -34,7 +35,7 @@ async def check_file_scope(root):
     state, client, events = await run_case("source_and_config_scope", [response(*requests), response(message())], tools=[TEXT_TOOL], executor=executor)
     assert state["tool_outcomes"]["succeeded"] == len(paths)
     for path, envelope in zip(paths, envelopes(state)):
-        assert json.loads(envelope["result"])["content"] == (root / path).read_text(encoding="utf-8")
+        assert json.loads(inline_raw(envelope))["content"] == (root / path).read_text(encoding="utf-8")
     assert snapshot(root) == before and read_budget_snapshot(executor)["used_bytes"] == 0
     assert events[-1]["read_budget"]["used_bytes"] == sum((root / path).stat().st_size for path in paths)
 
@@ -75,7 +76,7 @@ async def check_pagination(root):
     # Actual graph replay of the first two pages, compared to actual filesystem.
     requests = [file_call("page1", "pages", name="list_directory"), file_call("page2", "pages", name="list_directory", after=ordered[2])]
     state, _, _ = await run_case("pagination_actual_results", [response(requests[0]), response(requests[1]), response(message())], tools=[DIRECTORY_TOOL], executor=executor)
-    results = [json.loads(item["result"]) for item in envelopes(state)]
+    results = [json.loads(inline_raw(item)) for item in envelopes(state)]
     assert [entry["name"] for result in results for entry in result["entries"]] == ordered[:6]
     assert (await executor("list_directory", {"path": "pages"})) == (await executor("list_directory", {"path": "pages", "after": None}))
     for cursor in ("", 1, False, [], "a/b", "a\\b"):
@@ -104,21 +105,26 @@ async def check_read_budgets(root):
     assert len(opened) == 4 and sum(sum(length for _, length in p.reads) for p in probes) == 262144
     assert events[-1]["read_budget"] == {"limit_bytes": 262144, "used_bytes": 262144, "remaining_bytes": 0}
     assert all(item["error"]["reason_code"] == "read_budget_exceeded" for item in envelopes(state)[4:])
-    # A larger tool allowance still cannot bypass the complete-request budget.
+    # A larger tool allowance is now disclosed through bounded artifacts. The
+    # real disk-read quota remains unchanged and independent of context size.
     expanded = create_text_executor(root)
     production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
     with monitor_reads(root) as (opened, probes), patch("benchmarks.checks.support.access.SETTINGS", production):
         state, client, events = await run_case(
-            "production_total_read_budget_preserves_oversized_current_turn",
-            [response(*calls)], tools=[TEXT_TOOL], executor=expanded,
+            "production_total_read_budget_archives_large_results",
+            [response(*calls), response(message())], tools=[TEXT_TOOL], executor=expanded,
         )
     assert state["tool_outcomes"] == {"succeeded": 16, "rejected": 4, "failed": 0, "skipped": 0}
     assert len(opened) == 16 and sum(sum(length for _, length in p.reads) for p in probes) == 1048576
     assert events[-1]["read_budget"] == {"limit_bytes": 1048576, "used_bytes": 1048576, "remaining_bytes": 0}
     assert all(item["error"]["reason_code"] == "read_budget_exceeded" for item in envelopes(state)[16:])
-    assert [json.loads(item["result"])["content"] for item in envelopes(state)[:16]] == ["x" * 65536] * 16
-    assert state["stop_reason"] == "context_budget_exceeded" and state["model_calls"] == len(client.requests) == 1
-    assert state["summary_calls"] == 0 and state["context_budget"]["request_sent"] is False
+    for item in envelopes(state)[:16]:
+        observation = item["observation"]
+        assert observation["mode"] == "artifact" and observation["total_chars"] == 65536
+        assert all(segment["text"] == "x" * (segment["end"] - segment["start"]) for segment in observation["segments"])
+        assert len(json.dumps(item, ensure_ascii=False).encode("utf-8")) <= 4096
+    assert state["stop_reason"] == "completed" and state["model_calls"] == len(client.requests) == 2
+    assert state["summary_calls"] == 0 and state["context_budget"]["request_sent"] is True
     assert state["context_budget"]["limit_tokens"] == 250000
     bounded = create_text_executor(root, max_bytes=8, max_total_bytes=6)
     state, client, events = await run_case(
@@ -132,8 +138,8 @@ async def check_read_budgets(root):
     started = [event for event in events if event["event"] == "model.started"]
     assert [event["read_budget"]["remaining_bytes"] for event in started] == [6, 2, 0]
     assert all("instructions" not in request for request in client.requests)
-    assert all(request["tools"] == [TEXT_TOOL] for request in client.requests)
-    assert [json.loads(item["result"])["content"] for item in envelopes(state) if item["ok"]] == ["1234", "12", ""]
+    assert all(assert_tools(request["tools"], [TEXT_TOOL]) for request in client.requests)
+    assert [json.loads(inline_raw(item))["content"] for item in envelopes(state) if item["ok"]] == ["1234", "12", ""]
     for value in (True, 0, -1, 1.5):
         for factory in (create_text_executor, create_filesystem_executor):
             try:

@@ -2,6 +2,7 @@
 
 
 import json
+from benchmarks.checks.support.observations import assert_observed
 from benchmarks.checks.support.events import observe_state
 from benchmarks.checks.support.runtime import LocalClient, audit_recording, call, outputs
 from benchmarks.checks.support.tracing import capture
@@ -65,7 +66,10 @@ async def run_case(root, replies, *, scenario, mode="ok", enabled=True, executor
     for request in client.requests:
         actual = [item for item in request["input"] if item.get("type") == "function_call_output"]
         assert actual == generated[:len(actual)]
-    assert [json.loads(item["output"])["result"] for item in generated if json.loads(item["output"])["ok"]] == [item[2] for item in observed]
+    successful = [json.loads(item["output"]) for item in generated if json.loads(item["output"])["ok"]]
+    assert len(successful) == len(observed)
+    for envelope, (name, _, raw) in zip(successful, observed, strict=True):
+        assert_observed(envelope, raw, name)
     assert "TEXT_TOOL_BODY_PRIVATE_59af" not in Path(state["log_path"]).read_text(encoding="utf-8")
     assert str(root) not in json.dumps(events)
     if enabled and mode == "ok":

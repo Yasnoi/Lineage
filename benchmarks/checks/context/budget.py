@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 import os
 from benchmarks.checks.support.budget import (
     CHECK_DIR,
@@ -35,6 +36,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 from io import StringIO
+from lineage_agent.artifacts.tools import ARTIFACT_TOOLS
 from lineage_agent.agent import graph, runtime
 from lineage_agent.agent.sessions import SessionError, SessionManager
 from lineage_agent.config.settings import ConfigurationError, ModelSettings, load_settings
@@ -129,7 +131,7 @@ async def check_transparent_request_and_boundary():
     # requests; retain the original small-window cases above independently.
     production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
     padded = [{"role": "user", "content": ""}]
-    prepared = prepare_request(production.model_name, padded)
+    prepared = prepare_request(production.model_name, padded, tools=ARTIFACT_TOOLS)
     assert prepared["max_output_tokens"] == production.max_output_tokens == 16384
     padded[0]["content"] = "p" * (225424 - compact_bytes(prepared))
     for extra in (0, 1):
@@ -181,7 +183,10 @@ async def check_tool_result_limit_and_real_file():
         assert state["stop_reason"] == "context_budget_exceeded" and state["model_calls"] == state["tool_calls"] == 1
         assert state["tool_outcomes"]["succeeded"] == 1 and len(measured) == 2
         result = outputs(state)[0]
-        assert json.loads(json.loads(result["output"])["result"])["content"] == body
+        observation = json.loads(result["output"])["observation"]
+        assert observation["mode"] == "artifact" and observation["total_chars"] == len(body)
+        assert all(part["text"] == body[part["start"]:part["end"]] for part in observation["segments"])
+        assert len(result["output"].encode("utf-8")) <= 4096
         assert result not in client.requests[0]["input"] and measured[1]["request"]["input"][-1] == result
         assert state["history_end"] == len(state["input"]) and first.checkpoint_complete
         assert state["usage_totals"] == {"input_tokens": 25, "output_tokens": 4, "total_tokens": 29, "missing_usage_calls": 0}
@@ -191,11 +196,13 @@ async def check_tool_result_limit_and_real_file():
         assert outputs(again.state) == [result]
         assert again.state["history_end"] == state["history_end"]
         assert snapshot(root) == original and Path.cwd() == cwd
-        # A generous budget proves the same genuine output reaches the SDK unchanged.
+        # A generous budget admits the bounded observation unchanged; it does
+        # not restore the full archived body into the actual SDK request.
         roomy = replace(SETTINGS, context_budget_tokens=100000)
         ok, actual, checked = await run([response(request), response(message("used body"))], settings=roomy, tools=[TEXT_TOOL], executor=executor, scenario="real_file_result_dispatched")
         assert actual.requests[1]["input"][-1] == outputs(ok)[0] and len(checked) == 2
-        assert body in json.loads(outputs(ok)[0]["output"])["result"]
+        assert json.loads(outputs(ok)[0]["output"])["observation"]["mode"] == "artifact"
+        assert body not in json.dumps(actual.requests, ensure_ascii=False)
         assert body not in Path(ok["log_path"]).read_text(encoding="utf-8")
 
 async def check_opaque_counting():
@@ -279,11 +286,11 @@ async def check_file_sessions_isolation():
             turn, actual, _ = await run([response(request), response(message(f"FACT_{name}_BODY"))], manager=manager, sid=sid, scenario=f"root_{name}_first")
             assert turn.state["context_budget"]["limit_tokens"] == settings.context_budget_tokens
             historical[name] = deepcopy(turn.state)
-            assert json.loads(json.loads(outputs(turn.state)[0]["output"])["result"])["content"] == f"FACT_{name}_BODY"
+            assert json.loads(inline_raw(json.loads(outputs(turn.state)[0]["output"])))["content"] == f"FACT_{name}_BODY"
             assert actual.requests[1]["input"][-1] == outputs(turn.state)[0]
             starts = [event for event in read_events(turn.state) if event["event"] == "model.started"]
             assert [event["read_budget"]["remaining_bytes"] for event in starts] == [11, 0]
-            assert all("instructions" not in request and request["tools"] == [TEXT_TOOL] for request in actual.requests)
+            assert all("instructions" not in request and assert_tools(request["tools"], [TEXT_TOOL]) for request in actual.requests)
         for name, sid, _, settings in reversed(cases):
             turn, actual, _ = await run([response(message(f"FACT_{name}_BODY"))], manager=manager, sid=sid, prompt="Recall the source", scenario=f"root_{name}_followup")
             assert actual.requests[0]["input"] == historical[name]["input"] + [{"role": "user", "content": "Recall the source"}]
@@ -293,7 +300,7 @@ async def check_file_sessions_isolation():
             started = next(event for event in read_events(turn.state) if event["event"] == "model.started")
             assert started["read_budget"] == {"limit_bytes": 11, "used_bytes": 0, "remaining_bytes": 11}
             assert started["remaining_model_calls"] == settings.max_model_calls
-            assert "instructions" not in actual.requests[0] and actual.requests[0]["tools"] == [TEXT_TOOL]
+            assert "instructions" not in actual.requests[0] and assert_tools(actual.requests[0]["tools"], [TEXT_TOOL])
         assert snapshot(base) == before and Path.cwd() == cwd
 
 async def check_every_call_and_usage():
@@ -418,10 +425,12 @@ async def check_budget_recording_failures():
         stream = FailSecondBudget(original_open(recorder), faults)
         streams.append(stream)
         return stream
+    # The tool result is archived; the model's own current-turn output still
+    # exercises the complete-request budget gate after tool execution.
     async def huge_result(name, arguments):
         return "TOOL_FACT_PRESERVED_" + "x" * 40000
     with patch.object(RunRecorder, "_open", open_file):
-        state, client, _ = await run([response(call("before_budget_log_failure"), usage=(22, 3, 25))], tools=[TOOL], executor=huge_result, scenario="tool_result_budget_recording_failure", faults=faults)
+        state, client, _ = await run([response(call("before_budget_log_failure"), message("CURRENT_MODEL_CONTEXT_" + "z" * 40000), usage=(22, 3, 25))], tools=[TOOL], executor=huge_result, scenario="tool_result_budget_recording_failure", faults=faults)
     assert faults and all(stream.stream.closed for stream in streams)
     assert state["context_budget"]["decision"] == "exceeded" and state["error_code"] == "logging_error"
     assert state["model_calls"] == state["tool_calls"] == 1 and len(client.requests) == 1
@@ -449,11 +458,13 @@ async def check_budget_checkpoint_failures():
         assert turn.state["error_code"] == "context_budget_exceeded"
         assert turn.state["usage_totals"]["missing_usage_calls"] == 0
     manager = SessionManager()
+    # The tool result is archived; the model's own current-turn output still
+    # exercises the complete-request budget gate after tool execution.
     async def huge_result(name, arguments):
         return "TOOL_FACT_PRESERVED_" + "x" * 40000
     sid = manager.create_session(SETTINGS, tools=[TOOL], execute_tool=huge_result)
     with checkpoint_fault(manager, "put", lambda cp, meta, *_: meta["source"] == "update") as faults:
-        turn, client, _ = await run([response(call("before_budget_save_failure"), usage=(22, 3, 25))], manager=manager, sid=sid, scenario="tool_result_budget_final_save_failure", faults=faults)
+        turn, client, _ = await run([response(call("before_budget_save_failure"), message("CURRENT_MODEL_CONTEXT_" + "z" * 40000), usage=(22, 3, 25))], manager=manager, sid=sid, scenario="tool_result_budget_final_save_failure", faults=faults)
     assert faults and turn.state["context_budget"]["decision"] == "exceeded"
     assert turn.state["model_calls"] == turn.state["tool_calls"] == 1 and len(client.requests) == 1
     assert turn.state["usage_totals"]["total_tokens"] == 25 and len(outputs(turn.state)) == 1

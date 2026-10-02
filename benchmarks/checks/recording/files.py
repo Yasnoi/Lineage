@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import inline_raw
 from benchmarks.checks.support.events import check_group
 from benchmarks.checks.support.file_traces import BODY, CHECK_DIR, TOOLS, run_case, spans_by_call, text_call
 from benchmarks.checks.support.projection import readable
@@ -26,11 +27,11 @@ async def check_real_read_and_equivalence(root):
         state, client, spans = await run_case(root, replies, scenario=f"text_trace_{mode}", mode=mode)
         assert stable(state) == stable(baseline) and client.requests == actual.requests
         assert state["tool_outcomes"] == {"succeeded": 1, "failed": 0, "rejected": 0, "skipped": 0}
-        result = json.loads(json.loads(outputs(state)[0]["output"])["result"])
+        result = json.loads(inline_raw(json.loads(outputs(state)[0]["output"])))
         assert result["content"] == BODY and result["bytes_read"] == len(BODY.encode("utf-8"))
         assert "TEXT_TOOL_BODY_PRIVATE_59af" not in json.dumps(spans)
         if mode == "ok":
-            safe = spans_by_call(spans)["read"]["outputs"]["result"]
+            safe = spans_by_call(spans)["read"]["outputs"]["observation"]["raw_result"]
             assert safe == {
                 "path": "中文 文件.md", "encoding": "utf-8", "bytes_read": len(BODY.encode("utf-8")),
                 "complete": True, "content_omitted": True,
@@ -48,8 +49,8 @@ async def check_listing_and_model_quotation(root):
     )
     tool_span = spans_by_call(spans)["read_bom"]
     assert "TEXT_TOOL_BODY_PRIVATE_59af" not in json.dumps(tool_span)
-    assert tool_span["outputs"]["result"]["encoding"] == "utf-8-sig"
-    assert tool_span["outputs"]["result"]["bytes_read"] == len(BODY.encode("utf-8-sig"))
+    assert tool_span["outputs"]["observation"]["raw_result"]["encoding"] == "utf-8-sig"
+    assert tool_span["outputs"]["observation"]["raw_result"]["bytes_read"] == len(BODY.encode("utf-8-sig"))
     for span in spans:
         if span["run_type"] == "llm":
             assert "TEXT_TOOL_BODY_PRIVATE_59af" not in json.dumps(span["inputs"])
@@ -58,7 +59,7 @@ async def check_listing_and_model_quotation(root):
     root_span = next(span for span in spans if span["run_type"] == "chain")
     assert BODY in root_span["outputs"]["text"]
     assert state["model_calls"] == 3 and state["tool_calls"] == 2
-    assert BODY in json.loads(json.loads(client.requests[-1]["input"][-1]["output"])["result"])["content"]
+    assert BODY in json.loads(inline_raw(json.loads(client.requests[-1]["input"][-1]["output"])))["content"]
 
 async def check_failure_reasons(root):
     requests = [

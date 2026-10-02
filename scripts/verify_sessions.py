@@ -19,6 +19,11 @@ from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
+if __package__:
+    from .verification_observations import business_arguments, inline_result
+else:
+    from verification_observations import business_arguments, inline_result
+
 
 def events_for(turn):
     path = Path(turn.state["log_path"])
@@ -89,7 +94,7 @@ async def verify():
             return result
 
     cwd = Path.cwd()
-    with TemporaryDirectory(prefix="lineage-session-verify-") as temporary:
+    with TemporaryDirectory(prefix="lineage-session-verify-") as temporary, SessionManager() as sessions:
         root = Path(temporary)
         filename = f"观察记录 {uuid4().hex}.md"
         fact = f"SESSION_OBSERVATION_{uuid4().hex}"
@@ -103,7 +108,6 @@ async def verify():
             root, max_entries=settings.directory_max_entries,
             max_bytes=settings.text_max_bytes, max_total_bytes=settings.text_total_max_bytes,
         ))
-        sessions = SessionManager()
         session_id = sessions.create_session(
             replace(settings, project_root=root),
             tools=[DIRECTORY_TOOL, TEXT_TOOL], execute_tool=executor,
@@ -146,23 +150,24 @@ async def verify():
         item["call_id"]: item for item in first_history if item.get("type") == "function_call"
     }
     first_outputs = [item for item in first_history if item.get("type") == "function_call_output"]
-    successful = [item for item in first_outputs if json.loads(item["output"])["ok"]]
+    successful = [item for item in first_outputs if json.loads(item["output"])["ok"]
+                  and first_calls[item["call_id"]]["name"] in {"list_directory", "read_text_file"}]
     assert [
         {"name": first_calls[item["call_id"]]["name"],
-         "arguments": json.loads(first_calls[item["call_id"]]["arguments"]),
-         "result": json.loads(item["output"])["result"]}
+         "arguments": business_arguments(first_calls[item["call_id"]]),
+         "result": inline_result(item)}
         for item in successful
     ] == actual_results[1], "已保存工具结果与实际执行器返回值不一致。"
     reads = [
         item for item in successful if first_calls[item["call_id"]]["name"] == TEXT_TOOL["name"]
-        and json.loads(json.loads(item["output"])["result"])["path"] == filename
+        and json.loads(inline_result(item))["path"] == filename
     ]
     directories = [
         item for item in successful if first_calls[item["call_id"]]["name"] == DIRECTORY_TOOL["name"]
-        and json.loads(json.loads(item["output"])["result"])["path"] == "."
+        and json.loads(inline_result(item))["path"] == "."
     ]
     assert reads and directories, "第一轮未实际列举并读取随机文件。"
-    assert json.loads(json.loads(reads[0]["output"])["result"])["content"] == body
+    assert json.loads(inline_result(reads[0]))["content"] == body
     assert reads[0] in actual_inputs[1][-1] and reads[0] in actual_inputs[2][0]
     first_read_seen = next(index for index, items in enumerate(actual_inputs[1]) if reads[0] in items)
     assert first_read_seen > 0 and directories[0] in actual_inputs[1][first_read_seen - 1], (
@@ -173,7 +178,8 @@ async def verify():
         events = events_for(turn)
         assert state["log_complete"] and turn.checkpoint_complete
         assert state["model_calls"] == len(actual_inputs[number]), "模型计数不是本轮独立计量。"
-        assert state["tool_outcomes"]["succeeded"] == len(actual_results[number])
+        assert sum(event["event"] == "tool.succeeded" and event.get("tool_name") in {"list_directory", "read_text_file"}
+                   for event in events) == len(actual_results[number])
         assert all(event["session_id"] == session_id for event in events)
         started = [event for event in events if event["event"] == "model.started"]
         assert len(started) == len(actual_inputs[number])

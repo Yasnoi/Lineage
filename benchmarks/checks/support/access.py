@@ -2,6 +2,7 @@
 
 
 import json
+from benchmarks.checks.support.observations import assert_tools
 from benchmarks.checks.support.events import observe_state
 from benchmarks.checks.support.runtime import LocalClient, SETTINGS, audit_recording, call, outputs
 from benchmarks.core.files import ROOT
@@ -39,7 +40,7 @@ async def run_case(scenario, replies, *, executor=None, tools=None, limit=5, cli
         else:
             assert "instructions" not in request and "tool_choice" not in request
         assert request["input"] == state["input"][:len(request["input"])], "management metadata changed actual input"
-        assert request.get("tools") == (tools or None), "tool definitions changed with remaining allowance"
+        assert_tools(request["tools"], tools or [])
         assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
         if index:
             previous = client.requests[index - 1]["input"]

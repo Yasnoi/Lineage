@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import assert_observed, assert_tools
 import os
 from benchmarks.checks.support.compaction import (
     CHECK_DIR,
@@ -305,7 +306,7 @@ async def check_request_options_through_compaction():
         assert summary_request["reasoning"] == {"effort": "none"}
         assert business["input"][-1] == {"role": "user", "content": prompt}
         assert business["input"][-5:-1] == old[-1].state["input"][-4:]
-        assert business["tools"] == [TOOL]
+        assert_tools(business["tools"], [TOOL])
         options_sent = {key: value for key, value in expected_options.items() if value is not None}
         assert {key: business[key] for key in expected_options if key in business} == options_sent
         selection = [item for item in measured if item["purpose"] == "selection"]
@@ -669,16 +670,19 @@ async def check_real_file_and_failure_source():
         assert first.state["tool_outcomes"]["succeeded"] == first.state["tool_outcomes"]["failed"] == 1
         actual_outputs = outputs(first.state)
         assert actual_outputs == first_client.requests[-1]["input"][-2:]
-        assert json.loads(json.loads(actual_outputs[0]["output"])["result"])["content"] == body
+        stored_observation = json.loads(actual_outputs[0]["output"])["observation"]
+        assert stored_observation["mode"] == "artifact" and stored_observation["total_chars"] == len(body)
+        assert all(part["text"] == body[part["start"]:part["end"]] for part in stored_observation["segments"])
         manager, sid, _ = await seed(manager=manager, sid=sid, count=2, prefix="file_recent", prompt_size=1000, answer_size=1000)
         prompt = "CURRENT_UNCHANGED_" + "x" * 14000
         turn, captured = await run(manager, sid, prompt, [response(message("purple fact from note"))], scenario="real_file_compacted")
         assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
         material = material_for(captured.requests[0])
         text = json.dumps(material, ensure_ascii=False)
-        assert body in [json.loads(json.loads(item["payload"]["output"])["result"])["content"]
-                        for item in material["sources"] if item["payload"].get("type") == "function_call_output"
-                        and json.loads(item["payload"]["output"])["ok"]]
+        assert stored_observation in [json.loads(item["payload"]["output"])["observation"]
+                                      for item in material["sources"] if item["payload"].get("type") == "function_call_output"
+                                      and json.loads(item["payload"]["output"])["ok"]]
+        assert body not in text, "compaction must not silently hydrate archived raw results"
         assert "execution_error" in text and '"failed": 1' in text
         assert "missing_read" in text and "real_read" in text
         assert turn.state["tool_calls"] == 0, "compaction must not rerun old tools"
@@ -688,8 +692,8 @@ async def check_real_file_and_failure_source():
 
 async def check_repeated_compaction():
     settings = replace(SETTINGS, context_budget_tokens=30000, context_keep_recent_turns=1)
-    # Use a real executor invocation producing enough new material for a second
-    # recovery in the same user turn, for two distinct pending business calls.
+    # Combine a real archived tool result with the model's own current-turn
+    # output to trigger a second recovery for another pending business call.
     # Leave headroom beyond the trigger without relying on quota prompt bytes.
     async def large_result(name, arguments):
         return "REAL_TOOL_RESULT_" + "z" * 6700
@@ -704,7 +708,7 @@ async def check_repeated_compaction():
     )
     previous_version = seeds[-1].state["active_context"]["version_id"]
     turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 8000, [
-        response(call("fresh_big_result")), response(message("completed after two recoveries")),
+        response(call("fresh_big_result"), message("CURRENT_MODEL_CONTEXT_" + "z" * 3600)), response(message("completed after two recoveries")),
     ], scenario="same_run_two_recoveries")
     assert turn.state["stop_reason"] == "completed", turn.state["compaction"]
     assert turn.state["summary_calls"] == 2 and turn.state["model_calls"] == 2
@@ -735,7 +739,7 @@ async def check_unattempted_recovery_record():
         settings=settings, count=8, tools=[TOOL], executor=large_result,
         prefix="unattempted_recovery", prompt_size=1400, answer_size=1400,
     )
-    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 12000, [response(call("preserved_big"))], scenario="second_recovery_without_attempt")
+    turn, client = await run(manager, sid, "CURRENT_MULTI_" + "c" * 12000, [response(call("preserved_big"), message("CURRENT_MODEL_CONTEXT_" + "z" * 3600))], scenario="second_recovery_without_attempt")
     assert turn.state["stop_reason"] == "context_budget_exceeded"
     assert turn.state["summary_calls"] == turn.state["model_calls"] == turn.state["tool_calls"] == 1
     assert [is_summary(item) for item in client.requests] == [True, False]
@@ -936,7 +940,7 @@ async def check_checkpoint_boundaries():
     with checkpoint_fault(manager, "put", predicate) as observations:
         turn, actual = await run(
             manager, sid, "Inspect the current tool result.",
-            [response(call("already_executed"))],
+            [response(call("already_executed"), message("CURRENT_MODEL_CONTEXT_" + "z" * 6500))],
             scenario="checkpoint_preparing_after_executed_tools", observations=observations,
         )
     state = turn.state
@@ -949,9 +953,8 @@ async def check_checkpoint_boundaries():
     assert state["tool_outcomes"] == {"succeeded": 1, "rejected": 0, "failed": 0, "skipped": 0}
     result = outputs(state)
     assert len(result) == 1 and result[0]["call_id"] == "already_executed"
-    assert json.loads(result[0]["output"]) == {
-        "ok": True, "result": "ALREADY_EXECUTED_RESULT_" + "z" * 6500,
-    }
+    assert_observed(json.loads(result[0]["output"]), "ALREADY_EXECUTED_RESULT_" + "z" * 6500, "lookup_sample")
+    assert json.loads(result[0]["output"])["observation"]["mode"] == "artifact"
     assert result[0] not in actual.requests[0]["input"], "result was generated but not sent"
     assert state["history_end"] == len(state["input"])
     assert state["usage_totals"]["total_tokens"] == 12

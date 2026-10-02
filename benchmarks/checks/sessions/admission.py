@@ -5,6 +5,7 @@ import asyncio
 import gc
 import httpx
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 import os
 import weakref
 from benchmarks.checks.support.events import group_id, check_group, observe_state, observe_turn
@@ -202,12 +203,12 @@ async def check_metadata_keeps_real_budget():
         assert result.state["tool_calls"] == 2
         assert result.state["tool_outcomes"] == {"succeeded": 1, "rejected": 1, "failed": 0, "skipped": 0}
         results = outputs(result.state)
-        assert json.loads(json.loads(results[0]["output"])["result"])["content"] == "abcd"
+        assert json.loads(inline_raw(json.loads(results[0]["output"])))["content"] == "abcd"
         assert json.loads(results[1]["output"])["error"]["reason_code"] == "read_budget_exceeded"
         assert client.requests[1]["input"][-2:] == results
         assert real_executor.read_budget == {"limit_bytes": 4, "used_bytes": 4, "remaining_bytes": 0}
         assert snapshot(root) == before
-        assert all("instructions" not in request and request["tools"] == [TEXT_TOOL] for request in client.requests)
+        assert all("instructions" not in request and assert_tools(request["tools"], [TEXT_TOOL]) for request in client.requests)
         starts = [event for event in read_events(result.state) if event["event"] == "model.started"]
         assert all(event["read_budget"] is None and event["read_budget_error"] == "read_budget_unavailable" for event in starts)
         assert PRIVATE not in json.dumps(transport.sent)
@@ -307,6 +308,7 @@ async def check_preexecution_config_retry():
         manager = SessionManager()
         sid = manager.create_session(SETTINGS)
         first, _ = await run_turn(manager, sid, [response(message("retained history"))], scenario="before_preconfig_" + phase)
+        original_executor = manager._sessions[sid].execute_tool
         committed = deepcopy(manager._checkpointer.storage[sid])
         with resources() as observed, capture() as (transport, stderr):
             try:
@@ -335,7 +337,7 @@ async def check_preexecution_config_retry():
         assert manager._checkpointer.storage[sid] == committed
         assert PRIVATE not in json.dumps(transport.sent, ensure_ascii=False) + stderr.getvalue()
         report_aborted(sid, first.checkpoint_id, observed, "preconfig_" + phase)
-        manager._sessions[sid].execute_tool = None
+        manager._sessions[sid].execute_tool = original_executor
         later, client = await run_turn(manager, sid, [response(message("retained history"))], prompt="Recall", scenario="after_preconfig_" + phase)
         assert client.requests[0]["input"] == first.state["input"] + [{"role": "user", "content": "Recall"}]
         assert later.checkpoint_complete

@@ -2,7 +2,7 @@
 
 基于 LangGraph 和 Responses API 的最小 ReAct 循环。Agent 可以直接回答，也可以请求工具，在工具结果回传后继续调用模型，直到给出最终回答、达到模型调用上限或无法在上下文预算内继续。会话历史达到阈值时，可以为较早的完整轮次生成有界摘要；候选通过校验并确认保存后，才使用新活动版本继续。
 
-每次 `run_agent` 处理一次独立用户请求，使用异步、非流式模型调用。`SessionManager` 使用 LangGraph 原生内存检查点保留同一会话的上下文，让后续问题使用之前的消息和工具资料；保存寿命仅限当前进程。CLI 默认不提供工具；配置 `PROJECT_ROOT` 后，可以列举该项目目录的直接子项，并读取限额内的 UTF-8 普通文本文件（包括源码和配置）。目录结构或单个文件正文都不能证明已经理解整个项目。
+每次 `run_agent` 处理一次独立用户请求，使用异步、非流式模型调用。`SessionManager` 使用 LangGraph 原生内存检查点保留同一会话的上下文，让后续问题使用之前的消息和工具资料；保存寿命仅限当前进程。工具结果默认经过 ObservationManager：小结果完整入模，大结果保存为 Artifact，仅返回有界预览与引用，模型可通过默认提供的读取、检索工具继续访问。配置 `PROJECT_ROOT` 后，CLI 还可以列举项目目录并读取限额内的 UTF-8 普通文本文件。目录结构或部分正文都不能证明已经理解整个项目。
 
 ## 运行
 
@@ -38,9 +38,9 @@ TEXT_TOTAL_MAX_BYTES=1048576
 
 `BASE_URL` 是支持 Responses 协议的 API 基础地址，按供应商要求包含版本前缀，不追加 `/responses`。仅支持 Chat Completions 的地址不满足本项目要求。`BASE_URL`、`API_KEY`、`MODEL_NAME` 必填；请求超时默认为 300 秒且必须为有限正数，业务模型调用上限默认为 30 次且必须为正整数。超时沿用 SDK 的请求超时语义，不是 Agent 整轮时限；本项目没有整轮时限配置。连接地址、模型名称及超时由配置对象共同校验，直接构造与 dotenv 加载遵循相同规则；超时不接受布尔值。
 
-`PROJECT_ROOT` 可选，未配置或留空时保持无工具问答。`DIRECTORY_MAX_ENTRIES` 默认为每页 1000 条，`TEXT_MAX_BYTES` 默认为 131,072 字节（128 KiB），`TEXT_TOTAL_MAX_BYTES` 为每次运行成功读取的累计额度，默认 1,048,576 字节（1 MiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
+`PROJECT_ROOT` 可选，未配置或留空时不启用业务文件工具，仍提供会话内 Artifact 召回。`DIRECTORY_MAX_ENTRIES` 默认为每页 1000 条，`TEXT_MAX_BYTES` 默认为 131,072 字节（128 KiB），`TEXT_TOTAL_MAX_BYTES` 为每次运行成功读取的累计额度，默认 1,048,576 字节（1 MiB），均必须为正整数；程序构造配置或执行器时也不接受布尔值。根目录和限额由调用方控制，模型不能修改。
 
-累计读取许可不等于单次请求能够容纳全部资料。即使单文件不超过 128 KiB，包装、已有历史和当前轮其他工具结果也可能使后续请求超限。当前轮工具事实完整保留，按现有预算检查和 Compact 恢复或停止；不截断文件、丢弃结果或分块压缩，不能据此保证任意大文件任务完成。
+累计读取许可不等于单次请求能够容纳全部资料。ObservationManager 限制每次工具结果入模的增量，保留执行器返回的完整原文供召回；大量小结果或持续召回仍可能累积超限。已有整体预算检查和 History Compaction 继续决定能否发起下一次模型请求，当前 Run 的旧观测不会自动淘汰。
 
 配置通过 `python-dotenv` 显式读取当前工作目录的 `.env`，因此运行命令应位于项目根目录；优先顺序为进程环境、`.env`、生产默认值。直接构造 `ModelSettings` 或调用模型与工具便捷接口时，以显式参数为准，不自动读取环境。各生产入口共用预算默认值；升级不会覆盖已有 `.env` 或进程环境中的显式值。真实 `.env` 已加入忽略规则，连接配置本身不进入 Agent State 或应用日志；但根目录内的文件正文另受下述文件访问授权规则约束。
 
@@ -54,7 +54,7 @@ uv run lineage-agent "请用一句话介绍你自己"
 uv run lineage-agent "请先分页列举项目根目录，再选择其中的源码或配置文件读取；根据实际正文回答，并标明来源路径"
 ```
 
-被分析项目可以与 Lineage Agent 自身目录不同。相对 `PROJECT_ROOT` 以 dotenv 文件所在目录为基准；无效根目录在调用模型前报告配置错误。恢复无工具 CLI 时，将配置中的 `PROJECT_ROOT` 留空，并确保进程环境没有覆盖该值。
+被分析项目可以与 Lineage Agent 自身目录不同。相对 `PROJECT_ROOT` 以 dotenv 文件所在目录为基准；无效根目录在调用模型前报告配置错误。关闭 CLI 的业务文件工具时，将配置中的 `PROJECT_ROOT` 留空，并确保进程环境没有覆盖该值。
 
 也可以使用模块入口：
 
@@ -62,7 +62,7 @@ uv run lineage-agent "请先分页列举项目根目录，再选择其中的源�
 uv run python -m lineage_agent "请用一句话介绍你自己"
 ```
 
-CLI 只有一个可选的用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性、实际工具处理统计、业务与摘要调用次数、压缩阶段、活动版本和最近预算判断写入 stderr。提供输入参数时，退出码 `0` 表示得到最终回答，`1` 表示模型、协议、计量、日志或客户端关闭错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽，`4` 表示上下文预算达到触发阈值、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。若已得到最终回答但客户端关闭失败，仍展示该回答，同时报告关闭失败并退出 `1`；若收尾前未完成，则不展示中间文本。日志或关闭故障覆盖预算终态时，仍展示最近预算判断，同时按实际错误退出。
+CLI 只有一个可选的用户输入参数，将最终模型回答写入 stdout，将运行标识、日志位置、记录完整性、实际工具处理统计、业务与摘要调用次数、压缩阶段、活动版本和最近预算判断写入 stderr。提供输入参数时，退出码 `0` 表示得到最终回答，`1` 表示模型、协议、计量、日志或资源初始化、关闭错误，`2` 表示参数或配置错误，`3` 表示模型调用次数耗尽，`4` 表示上下文预算达到触发阈值、请求尚未完成；Ctrl-C 退出 `130`。达到上限时不会把最近一轮的中间文本当作最终回答。若已得到最终回答但客户端或 ArtifactStore 关闭失败，仍展示该回答，同时报告关闭失败并退出 `1`；若收尾前未完成，则不展示中间文本。日志或关闭故障覆盖预算终态时，仍展示最近预算判断，同时按实际错误退出。
 
 SDK 自动重试已关闭，不使用服务端会话或 `previous_response_id`。每次请求都使用本地当前上下文。
 
@@ -78,7 +78,7 @@ uv run lineage-agent
 
 明确发生在执行前的同步配置拒绝（例如客户端工厂因缺少 `API_KEY` 而拒绝创建）只拒绝当前请求，保留原检查点和会话可用性。程序调用仍抛出 `ConfigurationError`，修正后可在同一会话继续；交互模式报告本轮错误并继续接收输入。启动配置错误和单次请求的配置错误仍退出 `2`。客户端进入阶段或执行后的未处理异常、取消及保存不确定继续阻断会话，不能仅凭模型调用次数为零判断可以安全重试。
 
-程序调用可直接选择工具权限；以下在同一进程中创建两轮无工具问答：
+程序调用可直接选择业务工具权限；以下在同一进程中创建两轮问答，并在结束时清理管理器自有的 Artifact：
 
 ```python
 import asyncio
@@ -88,20 +88,20 @@ from lineage_agent.config.settings import load_settings
 
 
 async def main():
-    sessions = SessionManager()
-    session_id = sessions.create_session(load_settings())
-    first = await sessions.run_turn(session_id, "本次记录中的纸船是蓝色。请记住这个事实。")
-    if not first.checkpoint_complete:
-        raise RuntimeError(first.checkpoint_error)
-    second = await sessions.run_turn(session_id, "刚才纸船是什么颜色？")
-    print(second.state["result"]["text"] if second.state["result"] else second.state["error"])
-    print(second.session_id, second.checkpoint_id, second.checkpoint_complete)
+    with SessionManager() as sessions:
+        session_id = sessions.create_session(load_settings())
+        first = await sessions.run_turn(session_id, "本次记录中的纸船是蓝色。请记住这个事实。")
+        if not first.checkpoint_complete:
+            raise RuntimeError(first.checkpoint_error)
+        second = await sessions.run_turn(session_id, "刚才纸船是什么颜色？")
+        print(second.state["result"]["text"] if second.state["result"] else second.state["error"])
+        print(second.session_id, second.checkpoint_id, second.checkpoint_complete)
 
 
 asyncio.run(main())
 ```
 
-需要目录与读取能力时，把 `tools=[DIRECTORY_TOOL, TEXT_TOOL]` 和已绑定可信根目录的 `execute_tool=create_filesystem_executor(root)` 传入 `create_session`；这些对象与单次调用使用同一接口。会话创建后，后续输入不能更换配置、项目根目录或工具定义。未注入工具时，即使配置含 `PROJECT_ROOT`，程序接口也不自动启用工具。
+需要目录与读取能力时，把 `tools=[DIRECTORY_TOOL, TEXT_TOOL]` 和已绑定可信根目录的 `execute_tool=create_filesystem_executor(root)` 传入 `create_session`；这些对象与单次调用使用同一接口。会话创建后，后续输入不能更换配置、项目根目录或工具定义。即使配置含 `PROJECT_ROOT`，程序接口也不自动启用业务文件工具；Artifact 读取与搜索工具始终由运行环境提供。
 
 每个会话 UUID 映射为 LangGraph `thread_id`，与每轮新建的 `run_id` 分开。`SessionTurn` 提供 `session_id`、`state`、`checkpoint_id`、`checkpoint_complete` 和固定安全错误 `checkpoint_error`；只有最终保存确认成功才返回检查点 ID。同一会话的重叠提交立即抛出带固定错误码的 `SessionError`，不排队或交错合并历史；未知或已阻断的会话同样明确拒绝。不同会话可以交错运行。
 
@@ -229,13 +229,13 @@ uv run lineage-agent "请列举项目根目录，只报告实际看到的条目"
 
 上下文预算只上传固定方法名、安全步骤、数值组成、判断和请求是否发起，不上传用于计量的完整请求或 `context_risks` 来源数据。根记录保留最近一次预算判断，实际模型记录关联该次检查；预算拒绝不创建虚假的模型调用记录，根结果显示 `stopped`。计量失败、日志失败和检查点失败仍可区分。Trace 的截断和展示上限独立于模型预算，不能用于计量模型实际请求。
 
-上传前在独立副本中移除已知凭据、掩码常见凭据字段和文本格式、替换绝对项目根路径。已知凭据跨消息或文本分段时也先匹配再截断；引号内的逗号、分号和转义不会提前结束凭据遮盖。未闭合引号会遮盖剩余逻辑文本，非结构化的未加引号凭据值保守遮盖到行尾。完整 State、原始响应对象、reasoning 内容、供应商扩展、配置环境、异常堆栈和文件附件不上传。读取结果中的完整正文会发送给配置的模型端点；若模型回答引用正文，该引用仍按模型文本规则进入 Tracing，主动粘贴的正文也属于对话范围。因此不能保证文件内容绝不会进入外部追踪服务。过滤不能识别任意未知秘密，开启前应确认对话、文件名和可能引用的内容可以上传。
+上传前在独立副本中移除已知凭据、掩码常见凭据字段和文本格式、替换绝对项目根路径。已知凭据跨消息或文本分段时也先匹配再截断；引号内的逗号、分号和转义不会提前结束凭据遮盖。未闭合引号会遮盖剩余逻辑文本，非结构化的未加引号凭据值保守遮盖到行尾。完整 State、原始响应对象、reasoning 内容、供应商扩展、配置环境、异常堆栈和文件附件不上传。小结果的完整正文、大结果的预览和后续召回片段会发送给配置的模型端点；若模型回答引用正文，该引用仍按模型文本规则进入 Tracing，主动粘贴的正文也属于对话范围。因此不能保证文件内容绝不会进入外部追踪服务。过滤不能识别任意未知秘密，开启前应确认对话、文件名和可能引用的内容可以上传。
 
 追踪文本最多保留 4,000 字符，协议项、文本分段、目录条目和工具定义列表分别最多保留 128 项，每条应用上传载荷最多 64 KiB。超限上下文优先保留开头的 system/developer 指令、初始用户请求，以及最近可容纳的完整轮次；同批工具请求和对应结果作为一组保留，单组自身超限时记录整组摘要。`trace_omissions` 独立记录原始数量、保留数量和省略区间，区间使用从 1 开始、包含两端的原始列表索引。需要详细核对工具时，还应查看该请求的独立工具记录。
 
 总容量不足时先减少较旧输入，再压缩输入内容，最后才压缩输出；有效 usage 与运行关联、状态和耗时单独保留。模型文本只在结构化 `output` 中记录一次，根运行保留最终回答摘要。Trace 是经过清洗和容量限制的受控视图，不能当成完整模型请求副本。这些规则独立于 JSONL 摘要，不修改模型实际输入、工具参数、结果或 State。LangGraph 的自动 State 追踪在运行期间关闭，只提交应用显式构造的允许字段。
 
-工具结果的 JSON 超出追踪解析上限时，读取元数据也可能降级为带省略标记的摘要；不会为了展示元数据而取消容量保护，模型实际收到的完整正文不受影响。
+工具结果的 JSON 超出追踪解析上限时，读取元数据也可能降级为带省略标记的摘要；不会为了展示元数据而取消容量保护，模型实际收到的观测不受追踪投影影响。
 
 ### 故障与收尾
 
@@ -301,7 +301,7 @@ src/lineage_agent/
 
 `list_directory` 使用 `{"path": ".", "after": null}`；`path` 必填且为字符串，`after` 为上一页最后一个条目的名称，第一页为 `null`。严格 Schema 要求这两个字段，应用兼容旧调用只传 `path`。不接受额外字段；游标拒绝非字符串、空字符串及路径分隔符，只用于排序定位，不参与路径拼接。`.` 表示绑定根目录，也可以传入 `src`、`src/package` 等相对路径。Schema 使用严格模式，工具仍自行执行字段和路径校验。
 
-Python 运行接口 `run_agent` 不自动根据配置启用工具。调用方可以显式绑定目录，再通过现有接口注入；省略 `tools` 和 `execute_tool` 即为无工具运行：
+Python 运行接口 `run_agent` 不自动根据配置启用业务文件工具。调用方可以显式绑定目录，再通过现有接口注入；省略 `tools` 和 `execute_tool` 时仅提供默认 Artifact 召回工具：
 
 ```python
 import asyncio
@@ -322,7 +322,7 @@ state = asyncio.run(run_agent(
 
 直接构造配置或执行器时，相对根目录以当前工作目录为基准。执行器不读取配置、不改变工作目录，根目录绑定于该执行器；不同项目应各自创建执行器。配置读取只绝对化路径，访问校验集中在 filesystem 模块，绑定时才检查根目录并规范化。
 
-执行器成功返回一个 JSON 字符串，再由通用执行层封装到 `{"ok": true, "result": "..."}`。内层结构为：
+执行器成功返回一个 JSON 字符串，随后由 ObservationManager 选择完整 inline 或 Artifact 预览。执行器原始字符串的 JSON 结构为：
 
 ```json
 {
@@ -351,7 +351,7 @@ state = asyncio.run(run_agent(
 
 ## 纯文本读取
 
-`read_text_file` 只接受 `{"path": "docs/说明.md"}` 形式的参数。路径必填且为字符串，不接受额外字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，不按扩展名限制；源码、配置、隐藏文件以及 Dockerfile、Makefile 等无扩展名文本均可读取。项目根目录就是业务文件访问授权边界，不额外设置敏感文件黑名单；应用专用的 Artifact 缓存目录除外，所有内置文件工具均禁止进入。根内 `.env`、凭据配置等也可能被读取并发送到模型；绑定根目录即授权其中符合访问和文本规则的文件。
+`read_text_file` 的业务执行器只接受 `{"path": "docs/说明.md"}`。模型调用还可携带由运行层消费的嵌套 `observation` 提示，见下文。路径必填且为字符串，不接受其他业务字段；沿用目录工具的根目录、相对路径和禁止链接规则。目标必须是普通文件，不按扩展名限制；源码、配置、隐藏文件以及 Dockerfile、Makefile 等无扩展名文本均可读取。项目根目录就是业务文件访问授权边界，不额外设置敏感文件黑名单；应用专用的 Artifact 缓存目录除外，所有内置文件工具均禁止进入。根内 `.env`、凭据配置等也可能被读取并发送到模型；绑定根目录即授权其中符合访问和文本规则的文件。
 
 通过程序同时开放两个工具：
 
@@ -402,20 +402,24 @@ state = asyncio.run(run_agent(
 
 累计额度仅限制本次新返回的文件正文字节数，不保证整个模型上下文的 Token 或序列化字节数有界，也不限制历史输入、目录结果或任意自定义工具输出。文件 I/O 仍同步执行，慢磁盘可能占用事件循环。
 
-原因通过固定表进入模型错误结果、JSONL 和 Tracing，不携带原始异常或正文。正文只作为关联原 `call_id` 的工具结果发送给模型，不提升为 system/developer 指令；不自动跟随链接、读取引用文件或执行其中命令。模型之后请求其他工具仍受绑定根目录和参数检查限制。文件正文会发送给配置的模型端点，选择根目录和输入文件时应考虑这一点。
+原因通过固定表进入模型错误结果、JSONL 和 Tracing，不携带原始异常或正文。正文通过关联原 `call_id` 的有界观测发送给模型，不提升为 system/developer 指令；不自动跟随链接、读取引用文件或执行其中命令。模型之后请求其他工具仍受绑定根目录和参数检查限制。文件正文或其预览、召回片段会发送给配置的模型端点，选择根目录和输入文件时应考虑这一点。
 
 ## 工具结果 Artifact
 
-应用可以显式保存工具执行器返回的原始字符串，并通过 `artifact_read`、`artifact_search` 披露有限片段。`ArtifactStore` 不自动归档业务工具结果，也不生成 Preview；现有工具结果入模流程保持不变，ObservationManager 尚未接入。
+ObservationManager 在执行器返回后、结果追加到上下文前统一处理字符串。完整候选 `function_call_output.output` 不超过 4 KiB 时，以 `observation={status:"available",mode:"inline",raw_result:原始字符串}` 返回；超过时先保存完整字符串，再返回 `mode:"artifact"` 的引用、读取视图及有界预览。大小按最终 JSON 字符串的 UTF-8 字节计量，包含包装和转义，不是精确 token 数。
+
+首次归档观测最多 4 KiB，包含 `artifact_ref`、`raw_bytes`、`view_kind`、`total_chars`、`strategy`、`segments=[{start,end,text}]` 和 `complete`。预览是确定性原文片段，不是摘要；`complete=false` 表示读取视图仍有省略。无关键词时大致均分首尾预算；有关键词时按位置取首个检索页的命中附近片段、合并重叠范围，预算不足先缩减上下文再舍弃后续命中。`matches` 保留已列出的匹配区间，`matches_truncated` 表示命中组未全部列出，与全文是否展示完整独立。关键词未命中时使用首尾预览并标记 `keyword_status:"no_match"`，不能据此推断全文没有问题。
+
+运行环境仅为内置 `read_text_file` 增加嵌套参数 `observation={intent:null,keywords:[]}`。`intent` 可为空或最多 512 字符，描述调用目的，不作为内部思维链；关键词最多 8 个、每个 1–128 字符。严格 Schema 要求字段齐全，应用仍兼容缺失或无效提示并降级普通预览。提示进入业务执行器前移除，业务参数仍严格校验；其他工具不修改参数，尤其 `artifact_search.keywords` 始终属于实际搜索参数。
+
+ArtifactStore 只负责完整保存及有界读取、搜索，不选择最终预览。应用也可以显式保存材料：
 
 ```python
 from lineage_agent.agent.sessions import SessionManager
-from lineage_agent.artifacts.store import ArtifactStore
 from lineage_agent.config.settings import load_settings
 
-with ArtifactStore() as store:
-    manager = SessionManager()
-    session_id = manager.create_session(load_settings(), artifact_store=store)
+with SessionManager() as manager:
+    session_id = manager.create_session(load_settings())
     artifacts = manager.artifacts(session_id)
     saved = artifacts.put('{"content":"第一行\\nERROR: sample"}', tool_name="read_text_file")
     page = artifacts.read(saved["artifact_ref"], 0, None)
@@ -423,7 +427,9 @@ with ArtifactStore() as store:
     # 后续 manager.run_turn(session_id, ...) 中可使用两个召回工具。
 ```
 
-仅显式注入 `artifact_store` 的会话增加召回工具，既有工具继续通过 `tools` 和 `execute_tool` 注入。保存接口仅供应用代码使用，不暴露为模型工具；`manager.artifacts(session_id)` 提供当前会话的保存与读取句柄。引用格式为 `artifact://tool/<32位小写十六进制ID>`，不会暴露本地路径。模型参数只包含引用、字符位置和关键词，不能切换会话。相同会话跨 Run 保留引用，运行实例重新绑定时只重置业务执行器的读取预算。
+独立运行和会话运行均默认注册 `artifact_read`、`artifact_search`，调用方同名工具会被拒绝，业务工具继续显式注入。保存接口仅供应用代码使用，不暴露为模型工具；`manager.artifacts(session_id)` 提供绑定会话的保存与读取句柄。引用格式为 `artifact://tool/<32位小写十六进制ID>`，不暴露本地路径；模型不能通过参数切换会话。相同会话跨 Run 保留引用，重新绑定只重置业务执行器的读取预算。
+
+独立 `run_agent` 的 Store 在完整 Run 后清理，返回 State 中的引用此后不可召回。SessionManager 的默认 Store 持续到管理器 `close()`，支持上下文管理器；关闭时有正在运行的轮次则拒绝，关闭后不再接受新会话或运行。已有 `create_session(..., artifact_store=store)` 注入仍可使用，借用的 Store 由调用方关闭。初始化失败明确终止，不回退到无治理模式；清理失败保留已取得的回答和执行统计并明确报告。
 
 保存结果含 `artifact_ref`、`tool_name`、`raw_bytes`、`view_kind` 和 `total_chars`。原始字符串以 UTF-8 完整保存，不归一化换行；同一引用是不可变快照，后续读取不重新执行原工具。仅已知 `read_text_file` 的合法字符串 `content` 使用解码后的正文位置，`view_kind="content"`；未知工具使用整个原始结果，`view_kind="raw_result"`。已知工具 JSON 无效、`content` 缺失或类型错误时，原文仍完整保存，读取明确降级为 `raw_result`，并附 `degradation_reason="invalid_text_result"`。不猜测其他工具的正文结构。
 
@@ -435,7 +441,7 @@ with ArtifactStore() as store:
 
 缓存位于系统临时目录的 `lineage-agent-artifacts` 下，每个 Store 独占随机子目录。内置目录与文件工具即使绑定更大的项目根，也不能进入该保留目录；这是现有稳定文件路径假设下的应用访问边界，不是抵御恶意本地进程的操作系统沙箱。只有当前 Store 的内存索引授予会话访问权限，不扫描或导入遗留文件。使用上下文管理器或显式 `close()` 释放该实例目录；清理失败时引用仍失效，调用方可重试关闭。异常退出可能遗留文件，不承诺跨进程恢复或自动清扫其他实例。
 
-保存写入、发布、读取与完整性校验失败使用固定 `ArtifactError.code`，工具入口映射为既有安全错误包装，不返回底层异常详情；写入完成后才发布引用。JSONL 与 Tracing 继续只记录过滤后的信息，不上传完整 Artifact 正文。文件 I/O 和检索同步执行，读取时加载保存的完整结果；首版没有磁盘配额、流式索引或后台清理。
+保存写入、发布、读取与完整性校验失败使用固定 `ArtifactError.code`，不返回底层异常详情，写入完成后才发布引用。工具执行成功但观测失败时仍为 `ok:true`，同时返回 `observation.status:"unavailable"`、失败阶段和安全错误；保存失败不带引用，保存后预览失败保留原引用。模型可继续运行，不自动重试或重新执行原工具。JSONL 与 Tracing 不新增原文、预览、匹配文本或观测提示正文上传。文件 I/O 和检索同步执行，读取时加载保存的完整结果；首版没有磁盘配额、流式索引或后台清理，也不据此宣称真实模型任务完成率或回答质量提升。
 
 ## State
 
@@ -482,7 +488,7 @@ with ArtifactStore() as store:
 
 参数中的每个 JSON 对象都必须具有唯一键名，包括嵌套对象和数组中的对象。按 JSON 解码后的键名精确比较，例如 `key` 与 `\u006bey` 视为同名；不做大小写折叠或 Unicode 归一化。不同对象各自使用同名字段允许通过。重复键在 `argument_parsing` 阶段返回 `invalid_arguments`，计为拒绝且不进入执行器；同批其他请求继续处理。此前重复键会静默保留后值，现在明确拒绝，错误说明不包含原始参数或键名。Schema 的 `strict: true` 不能替代这些解析检查或工具自身的字段与业务校验。
 
-工具结果使用 `function_call_output`，其 `output` 为 JSON 字符串。成功返回 `{"ok": true, "result": "..."}`；失败返回 `{"ok": false, "error": {"code": "...", "message": "..."}}`。错误码为 `unknown_tool`、`invalid_arguments` 或 `execution_error`。参数语义错误由执行器抛出 `ToolArgumentError`，已分类执行失败使用 `ToolExecutionError`；这两类在 `error` 中另带 `reason_code`、`reason_message`，均由应用固定表生成。其他执行器异常仍使用安全的通用错误消息，未知原因码退回对应的安全默认值。
+工具结果使用 `function_call_output`，其 `output` 为 JSON 字符串。成功返回 `{"ok": true, "observation": {...}}`，以 `observation.status` 区分交付成功与观测失败；执行失败返回 `{"ok": false, "error": {"code": "...", "message": "..."}}`。错误码为 `unknown_tool`、`invalid_arguments` 或 `execution_error`。参数语义错误由执行器抛出 `ToolArgumentError`，已分类执行失败使用 `ToolExecutionError`；这两类在 `error` 中另带 `reason_code`、`reason_message`，均由应用固定表生成。其他执行器异常仍使用安全的通用错误消息，未知原因码退回对应的安全默认值。
 
 工具错误会回传模型，继续处理同批其他请求，并允许模型在剩余次数内修正。未知工具和 JSON 解析失败不会进入执行器，不增加 `tool_calls`；执行器内部校验失败或执行异常仍计一次。得到最终回答不代表此前失败的工具操作已经成功。
 
@@ -544,7 +550,7 @@ uv run --locked python -m benchmarks run agent-contracts
 uv run --locked python -m unittest discover -s benchmarks/tests -v
 ```
 
-无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、16 条隔离行为链、149 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
+无参数显示帮助，不执行检查。`agent-contracts` 覆盖五个确定性验证模块、17 条隔离行为链、155 个行为组；模块依据执行、文件系统、会话、上下文和记录约定划分，不作为五个样例项目。成熟的检查已迁入 `benchmarks/checks/`，原 `scripts/check_*.py`、`--suite`、`control-*` 与 `--research-profile` 入口已撤销。
 
 `wechat-reporting` 是固定项目任务集，包含八类任务、九个实例、19 个计划轮次，沿需求覆盖、代码与需求的反向对应、缺陷/性能分析和改进方案组织，并覆盖多轮纠正、读取受限和摘要后继续研究。真实运行使用显式启用的通用配置：
 

@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import inline_raw
 from benchmarks.checks.support.events import group_id, check_group, observe_state, observe_turn
 from benchmarks.checks.support.runtime import (
     LocalClient,
@@ -87,7 +88,7 @@ async def check_file_history_and_budget():
             response(file_call("read_first", name)), response(message("Found the local source.")),
         ], prompt="Find and inspect the source.", scenario="file_history_first")
         first_outputs = deepcopy(outputs(first.state))
-        assert json.loads(json.loads(first_outputs[-1]["output"])["result"])["content"] == body
+        assert json.loads(inline_raw(json.loads(first_outputs[-1]["output"])))["content"] == body
         assert client.requests[-1]["input"][-1] == first_outputs[-1]
         assert first.state["tool_calls"] == 2 and first.state["model_calls"] == 3
         second, following = await turn(manager, sid, [response(message(body))], prompt="What was in that source?", scenario="file_history_followup")

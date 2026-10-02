@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_observed
 from benchmarks.checks.support.events import check_group, evidence, observe_harness
 from benchmarks.checks.support.runtime import (
     CHECK_DIR,
@@ -22,6 +23,8 @@ from copy import deepcopy
 from lineage_agent.models.responses import ModelError
 from lineage_agent.recording.recorder import RunRecorder
 from lineage_agent.tools.execution import execute_calls
+from lineage_agent.artifacts.store import ArtifactStore
+from lineage_agent.observations.manager import ObservationManager
 from lineage_agent.tools.types import (
     TOOL_ARGUMENT_REASONS,
     TOOL_EXECUTION_REASONS,
@@ -59,7 +62,8 @@ async def check_safe_summaries():
     )
     assert seen == [arguments]
     output = outputs(state)[0]
-    assert json.loads(output["output"])["result"] == long_text
+    assert_observed(json.loads(output["output"]), long_text, "lookup_sample")
+    assert json.loads(output["output"])["observation"]["mode"] == "artifact"
     assert client.requests[1]["input"][-1] == output
     log_text = Path(state["log_path"]).read_text(encoding="utf-8")
     for forbidden in (secret, sensitive_field, "unknown_" + secret, "n" * 100):
@@ -162,6 +166,12 @@ async def check_safe_execution_reasons():
         assert secret not in json.dumps((state, client.requests, events))
     assert ToolExecutionError(reason_code=secret).reason_code == "execution_failed"
 
+async def governed_calls(*args, **kwargs):
+    with ArtifactStore() as store:
+        manager = ObservationManager(store.bind_session("recording-hook-contract"))
+        return await execute_calls(*args, observation_manager=manager, **kwargs)
+
+
 async def check_tool_trace_hooks():
     observe_harness("tool_executor")
     class Tracer:
@@ -190,9 +200,9 @@ async def check_tool_trace_hooks():
             raise RuntimeError("untrusted tracer-hook failure text")
         return await fixed_tool(name, arguments)
 
-    expected = await execute_calls(requests, [TOOL], executor)
+    expected = await governed_calls(requests, [TOOL], executor)
     tracer = Tracer()
-    actual = await execute_calls(requests, [TOOL], executor, tracer=tracer, step_id="step-test")
+    actual = await governed_calls(requests, [TOOL], executor, tracer=tracer, step_id="step-test")
     assert actual == expected
     assert [(kind, identifier) for kind, identifier, _ in tracer.events] == [
         (kind, request["call_id"]) for request in requests for kind in ("start", "end")
@@ -210,7 +220,7 @@ async def check_tool_trace_hooks():
         recorder = RunRecorder(CHECK_DIR)
         evidence(recorder.path, kind="tool_log", run_id=recorder.run_id)
         try:
-            actual = await execute_calls(
+            actual = await governed_calls(
                 [call("unstarted"), call("remaining")], [TOOL], fixed_tool,
                 recorder=recorder, tracer=tracer,
             )
@@ -236,7 +246,7 @@ async def check_tool_trace_hooks():
             recorder = RunRecorder(CHECK_DIR)
             evidence(recorder.path, kind="tool_log", run_id=recorder.run_id)
             try:
-                actual = await execute_calls(
+                actual = await governed_calls(
                     [first, call("remaining")], [TOOL], executor, recorder=recorder, tracer=tracer,
                 )
             finally:
@@ -381,7 +391,7 @@ async def check_failure_event_recording_failures():
             assert state["result"]["raw_response"]["status"] == "incomplete"
         results = outputs(state)
         assert len(results) == 1 and results[0]["call_id"] == request["call_id"]
-        assert json.loads(results[0]["output"]) == {"ok": True, "result": "fixed:sample"}
+        assert inline_raw(json.loads(results[0]["output"])) == "fixed:sample"
         assert client.requests[1]["input"] == client.requests[0]["input"] + [request] + results
         attempted, events = assert_failed_event(
             state, client, observations, "model.failed",

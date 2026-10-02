@@ -2,6 +2,7 @@
 
 
 import json
+from benchmarks.checks.support.observations import inline_raw
 from benchmarks.checks.support.events import observe_harness, observe_turn
 from benchmarks.checks.support.runtime import LocalClient, call, message, response
 from benchmarks.checks.support.tracing import capture, stable
@@ -166,7 +167,7 @@ async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_fail
     assert len(clients[0].requests) == 3 and len(clients[1].requests) == 1
     outputs = [item for item in clients[1].requests[0]["input"] if item.get("type") == "function_call_output"]
     assert [item["call_id"] for item in outputs] == ["directory", "text"]
-    assert json.loads(json.loads(outputs[1]["output"])["result"])["content"] == source
+    assert json.loads(inline_raw(json.loads(outputs[1]["output"])))["content"] == source
     assert outputs == [item for item in clients[0].requests[-1]["input"] if item.get("type") == "function_call_output"]
     assert turns[0].checkpoint_complete and turns[0].checkpoint_error is None
     assert turns[1].checkpoint_complete is (not final_save_failure)
@@ -182,10 +183,10 @@ async def run_sessions(root, source, *, enabled=True, mode="ok", final_save_fail
                 for item in span["inputs"].get("input", []):
                     if item.get("type") == "function_call_output" and item["call_id"] == "text":
                         filtered = json.loads(item["output"])
-                        assert filtered["result"]["content_omitted"] is True
+                        assert filtered["observation"]["raw_result"]["content_omitted"] is True
                         assert "azure-coral-58" not in json.dumps(filtered)
             if span["run_type"] == "tool" and span["name"] == "read_text_file":
-                assert span["outputs"]["result"]["content_omitted"] is True
+                assert span["outputs"]["observation"]["raw_result"]["content_omitted"] is True
         for index, turn in enumerate(turns):
             trace_root = next(span for span in spans if span["id"] == turn.state["run_id"])
             metadata = trace_root["extra"]["metadata"]

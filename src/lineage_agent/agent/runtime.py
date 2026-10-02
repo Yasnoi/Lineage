@@ -10,11 +10,15 @@ from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpoint
 from lineage_agent.agent.context import ContextRecords, new_context
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
+from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
+from lineage_agent.artifacts.tools import ARTIFACT_TOOLS, ArtifactExecutor
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.budget import annotate_context_risks
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.responses import create_client, send_prepared_response
 from lineage_agent.models.types import ModelInput, ToolDefinition
+from lineage_agent.observations.hints import enhance_tools
+from lineage_agent.observations.manager import ObservationManager
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import tool_identity
 from lineage_agent.recording.tracing import start_trace
@@ -22,6 +26,8 @@ from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 
 
 CLIENT_CLOSE_MESSAGE = "模型客户端关闭失败；已取得的回答与统计予以保留。"
+ARTIFACT_INIT_MESSAGE = "工具结果存储无法初始化，未发起模型或工具调用。"
+ARTIFACT_CLOSE_MESSAGE = "工具结果临时存储清理失败；已取得的回答与统计予以保留。"
 INVALID_INPUT_MESSAGE = "新增输入不符合支持的消息或工具协议项格式。"
 
 
@@ -158,11 +164,18 @@ async def _run_agent(
     session_id: str | None = None,
     checkpointer: SessionCheckpointer | None = None,
     checkpoint_id: str | None = None,
+    artifacts: SessionArtifacts | None = None,
 ) -> tuple[AgentState, str | None, str | None]:
     """Share execution and cleanup; sessions add only the checkpoint lifecycle."""
     input_items = normalize_input(input)
     try:
         available_tools = validate_tools(tools, execute_tool)
+        if session_id is None:
+            native_names = {tool["name"] for tool in ARTIFACT_TOOLS}
+            if any(tool["name"] in native_names for tool in available_tools):
+                raise ConfigurationError("已提供的工具名称与 Artifact 工具冲突。")
+            available_tools.extend(deepcopy(ARTIFACT_TOOLS))
+        available_tools, observation_hint_tools = enhance_tools(available_tools)
         bind_run = getattr(execute_tool, "bind_run", None)
         if callable(bind_run):
             execute_tool = bind_run()
@@ -174,6 +187,8 @@ async def _run_agent(
     recorder = RunRecorder(settings.log_dir)
     tracer = None
     propagating_error = False
+    owned_store = None
+    store_close_attempted = False
     try:
         state: AgentState = {
             "input": input_items,
@@ -228,6 +243,18 @@ async def _run_agent(
         last_node: str | None = None
         last_step_id: str | None = None
         primary_error: BaseException | None = None
+        observation_manager = None
+        artifact_initialization_failed = False
+        try:
+            if artifacts is None:
+                owned_store = ArtifactStore()
+                artifacts = owned_store.bind_session(recorder.run_id)
+                execute_tool = ArtifactExecutor(artifacts, execute_tool)
+            observation_manager = ObservationManager(artifacts)
+        except Exception:
+            artifact_initialization_failed = True
+            state.update(stop_reason="error", error=ARTIFACT_INIT_MESSAGE,
+                         error_code="artifact_store_init_error")
 
         def prepare_model_request(model_input, **options):
             return prepare_request(
@@ -263,6 +290,9 @@ async def _run_agent(
                 call_summary=call_summary,
                 context_records=ContextRecords(checkpointer, session_id) if checkpointer is not None and session_id is not None else None,
                 validate_input=lambda items: _input_shape_error(items) or _input_association_error(items),
+                observation_manager=observation_manager,
+                observation_hint_tools=observation_hint_tools,
+                native_recall_tools=frozenset(tool["name"] for tool in ARTIFACT_TOOLS),
             )
             start_budget_error = None
 
@@ -319,6 +349,9 @@ async def _run_agent(
                         state["active_context"] = active
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
+                elif artifact_initialization_failed:
+                    recorder.emit("run.initialization_failed", stage="artifact_init",
+                                  error_code="artifact_store_init_error")
                 elif invalid := _input_shape_error(state["input"]) or _input_association_error(state["input"]):
                     code, index = invalid
                     recorder.emit("run.input_rejected", stage="input_validation", error_code=code, input_index=index)
@@ -380,6 +413,27 @@ async def _run_agent(
                         recorder.emit("run.cleanup_failed", stage="client_close", error_code="client_close_error")
                         if state["stop_reason"] != "error":
                             state.update(stop_reason="error", error=CLIENT_CLOSE_MESSAGE, error_code="client_close_error")
+                    elif primary_error is None:
+                        primary_error = exc
+            if owned_store is not None:
+                store_close_attempted = True
+                try:
+                    owned_store.close()
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        previous = state["stop_reason"]
+                        if state["cleanup_error"] is None:
+                            state["cleanup_error"] = {
+                                "code": "artifact_cleanup_error", "previous_stop_reason": previous,
+                            }
+                        try:
+                            recorder.emit("run.cleanup_failed", stage="artifact_close",
+                                          error_code="artifact_cleanup_error")
+                        except BaseException:
+                            pass  # Cleanup diagnostics never replace a primary failure.
+                        if state["stop_reason"] != "error":
+                            state.update(stop_reason="error", error=ARTIFACT_CLOSE_MESSAGE,
+                                         error_code="artifact_cleanup_error")
                     elif primary_error is None:
                         primary_error = exc
         if primary_error is not None:
@@ -474,10 +528,16 @@ async def _run_agent(
         # Independently attempt every cleanup even if execution, final saving,
         # or an earlier cleanup failed. Never replace an in-flight primary error.
         cleanup_error = None
+        if owned_store is not None and not store_close_attempted:
+            try:
+                owned_store.close()
+            except BaseException as exc:
+                cleanup_error = exc
         try:
             recorder.close()
         except BaseException as exc:
-            cleanup_error = exc
+            if cleanup_error is None:
+                cleanup_error = exc
         try:
             if checkpointer is not None and session_id is not None:
                 checkpointer.unbind_run(session_id)

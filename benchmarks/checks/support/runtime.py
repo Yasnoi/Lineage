@@ -229,7 +229,7 @@ def assert_batch_returned(state, client, requests, outcomes, attempts):
         assert len(recorded) == 1
         assert recorded[0]["event_seq"] < event["event_seq"]
         if outcome == "succeeded":
-            assert set(envelope) == {"ok", "result"} and envelope["ok"] is True
+            assert set(envelope) == {"ok", "observation"} and envelope["ok"] is True
         else:
             assert set(envelope) == {"ok", "error"} and envelope["ok"] is False
             if "reason_code" in event:

@@ -9,6 +9,11 @@ from lineage_agent.agent.runtime import run_agent
 from lineage_agent.config.settings import ConfigurationError, load_settings
 from lineage_agent.tools.types import ToolArgumentError
 
+if __package__:
+    from .verification_observations import inline_result
+else:
+    from verification_observations import inline_result
+
 
 TOOL = {
     "type": "function",
@@ -53,14 +58,14 @@ async def verify():
             print(state["error"], file=sys.stderr)
 
     plain = await run_agent("请简短回答：一加一等于几？", settings)
-    report("无工具回归", plain)
+    report("无需调用工具的直接回答回归", plain)
     if (
         plain["stop_reason"] != "completed" or plain["model_calls"] != 1
         or plain["tool_requests"] != 0 or plain["tool_calls"] != 0
         or not plain["log_complete"]
     ):
-        raise AssertionError("真实端点无工具回归未通过。")
-    print("PASS 真实端点无工具回归")
+        raise AssertionError("真实端点直接回答回归未通过。")
+    print("PASS 真实端点直接回答回归")
 
     state = await run_agent(
         "请调用 get_verification_value 工具读取 key 为 sample 的值。"
@@ -79,8 +84,7 @@ async def verify():
     ]
     if len(tool_outputs) != 1:
         raise AssertionError("缺少唯一的工具回传结果。")
-    envelope = json.loads(tool_outputs[0]["output"])
-    if envelope.get("ok") is not True or envelope["result"] not in state["result"]["text"]:
+    if inline_result(tool_outputs[0]) not in state["result"]["text"]:
         raise AssertionError("最终回答未使用验证工具的固定返回结果。")
     events = [
         json.loads(line) for line in Path(state["log_path"]).read_text(encoding="utf-8").splitlines()

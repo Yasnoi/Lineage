@@ -20,10 +20,12 @@ from typing import Any, NoReturn
 from uuid import uuid4
 
 from lineage_agent.tools.filesystem import paths
-from lineage_agent.tools.types import serialize_tool_output
+from lineage_agent.tools.types import (
+    MAX_RECALL_BYTES, inline_tool_output, serialize_tool_output, tool_output_bytes,
+)
 
 
-MAX_OUTPUT_BYTES = 8192
+MAX_OUTPUT_BYTES = MAX_RECALL_BYTES
 MAX_KEYWORDS = 8
 MAX_KEYWORD_CHARS = 128
 MAX_HITS = 10
@@ -42,6 +44,7 @@ _ERRORS = {
     "invalid_artifact_result": "原始结果及来源工具必须是可编码的字符串，来源工具不能为空。",
     "invalid_artifact_session": "应用必须提供非空的会话标识。",
 }
+ARTIFACT_ERROR_CODES = frozenset(_ERRORS)
 
 
 class ArtifactError(Exception):
@@ -69,7 +72,8 @@ def _reject_constant(value: str) -> NoReturn:
     raise ValueError("Non-standard JSON constants are not supported.")
 
 
-def _content(raw: str, tool_name: str) -> tuple[str, str, str | None]:
+def tool_result_view(raw: str, tool_name: str) -> tuple[str, str, str | None]:
+    """Select the same text view for stored recall and in-memory previews."""
     if tool_name == "read_text_file":
         try:
             value = json.loads(raw, parse_constant=_reject_constant)
@@ -86,8 +90,7 @@ def _content(raw: str, tool_name: str) -> tuple[str, str, str | None]:
 
 def _fits(value: dict[str, Any]) -> bool:
     result = serialize_tool_output(value)
-    envelope = serialize_tool_output({"ok": True, "result": result})
-    return len(envelope.encode("utf-8")) <= MAX_OUTPUT_BYTES
+    return tool_output_bytes(inline_tool_output(result)) <= MAX_OUTPUT_BYTES
 
 
 def _base(record: _Record) -> dict[str, Any]:
@@ -140,7 +143,7 @@ class ArtifactStore:
                 tool_name.encode("utf-8")
             except (ValueError, UnicodeError):
                 raise ArtifactError("invalid_artifact_result") from None
-            content, view, reason = _content(raw, tool_name)
+            content, view, reason = tool_result_view(raw, tool_name)
             identifier = uuid4().hex
             ref = f"artifact://tool/{identifier}"
             metadata = {
@@ -192,7 +195,7 @@ class ArtifactStore:
             if hashlib.sha256(data).digest() != record.sha256:
                 raise ValueError("snapshot differs")
             raw = data.decode("utf-8")
-            content, _, _ = _content(raw, record.metadata["tool_name"])
+            content, _, _ = tool_result_view(raw, record.metadata["tool_name"])
             return record, content
         except Exception:
             raise ArtifactError("artifact_read_error") from None

@@ -37,7 +37,7 @@ async def check_review_tracing(root):
         models = sorted((span for span in transport.sent if span["run_type"] == "llm"), key=lambda s: s["extra"]["metadata"]["model_call"])
         tools = {span["extra"]["metadata"]["call_id"]: span for span in transport.sent if span["run_type"] == "tool"}
         assert tools["list"]["inputs"]["arguments"]["after"] is None
-        assert "next_after" in tools["list"]["outputs"]["result"]
+        assert "next_after" in tools["list"]["outputs"]["observation"]["raw_result"]
         assert marker not in json.dumps(tools) and marker in json.dumps(models[-1]["outputs"])
         for index, model in enumerate(models):
             assert model["extra"]["metadata"]["remaining_model_calls"] == 3 - index

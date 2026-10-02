@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from benchmarks.checks.support.observations import inline_raw, assert_tools
 import httpx
 from benchmarks.checks.support.events import check_group, observe_harness, observe_state
 from benchmarks.checks.support.runtime import (
@@ -36,7 +37,7 @@ async def check_direct_answer():
     state, client = await run([response(message("direct"))])
     counts(state, 1, 0, 0)
     assert state["result"]["text"] == "direct"
-    assert not client.requests[0].get("tools")
+    assert_tools(client.requests[0]["tools"])
     assert len(state["input"]) == 2
     assert state["usage_totals"] == {
         "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
@@ -66,7 +67,7 @@ async def check_tool_loop():
     counts(state, 2, 1, 1)
     output = outputs(state)[0]
     assert output["call_id"] == "call_1"
-    assert json.loads(output["output"]) == {"ok": True, "result": "fixed:sample"}
+    assert inline_raw(json.loads(output["output"])) == "fixed:sample"
     assert client.requests[1]["input"][-1] == output
     assert state["result"]["usage"] == {
         "input_tokens": 20, "output_tokens": 3, "total_tokens": 23,
@@ -196,7 +197,7 @@ async def check_mixed_batches_and_return_types():
         envelopes = assert_batch_returned(state, client, requests, expected_outcomes, attempts)
         bad_index, good_index = (1, 0) if reverse else (0, 1)
         assert envelopes[bad_index]["error"]["code"] == code
-        assert envelopes[good_index] == {"ok": True, "result": "fixed:good"}
+        assert inline_raw(envelopes[good_index]) == "fixed:good"
         expected_keys = [json.loads(item["arguments"])["key"] for item in requests] if attempts == 2 else ["good"]
         assert trace == [
             ("model", 1),

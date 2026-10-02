@@ -25,6 +25,7 @@ from lineage_agent.tools.execution import execute_calls
 from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 
 if TYPE_CHECKING:
+    from lineage_agent.observations.manager import ObservationManager
     from lineage_agent.recording.tracing import RunTrace
 
 
@@ -62,6 +63,9 @@ def build_graph(
     call_summary: SummaryCall | None = None,
     context_records: ContextRecords | None = None,
     validate_input: Callable[[list[dict[str, Any]]], tuple[str, int] | None] | None = None,
+    observation_manager: "ObservationManager | None",
+    observation_hint_tools: frozenset[str] = frozenset(),
+    native_recall_tools: frozenset[str] = frozenset(),
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
@@ -351,6 +355,9 @@ def build_graph(
             result["tool_calls"], available_tools, execute_tool,
             recorder=recorder, step_id=step_id,
             tracer=tracer,
+            observation_manager=observation_manager,
+            observation_hint_tools=observation_hint_tools,
+            native_recall_tools=native_recall_tools,
         )
         update: dict[str, Any] = {
             "input": batch["output_items"],

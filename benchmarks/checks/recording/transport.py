@@ -353,7 +353,7 @@ async def check_serialized_redaction():
                 if item.get("type") == "function_call":
                     assert json.loads(item["arguments"])["path"] == 'password="[redacted]"'
                 elif item.get("type") == "function_call_output":
-                    assert json.loads(item["output"])["result"]["entries"]
+                    assert json.loads(item["output"])["observation"]["raw_result"]["entries"]
 
 async def check_serialized_capacity():
     history = [text_item("system instructions", "system"), text_item("initial user request", "user")]

@@ -18,6 +18,11 @@ from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
+if __package__:
+    from .verification_observations import business_arguments, inline_result
+else:
+    from verification_observations import business_arguments, inline_result
+
 
 async def verify():
     settings = load_settings(Path(__file__).resolve().parents[1] / ".env")
@@ -113,20 +118,21 @@ async def verify():
     assert state["tool_outcomes"]["succeeded"] >= 2, "未成功完成目录列举和文本读取。"
 
     outputs = [item for item in state["input"] if item.get("type") == "function_call_output"]
-    successful = [item for item in outputs if json.loads(item["output"])["ok"]]
     calls = {
         item["call_id"]: item for item in state["input"]
         if item.get("type") == "function_call"
     }
+    successful = [item for item in outputs if json.loads(item["output"])["ok"]
+                  and calls[item["call_id"]]["name"] in {"list_directory", "read_text_file"}]
     assert [
         {"name": calls[item["call_id"]]["name"],
-         "arguments": json.loads(calls[item["call_id"]]["arguments"]),
-         "result": json.loads(item["output"])["result"]}
+         "arguments": business_arguments(calls[item["call_id"]]),
+         "result": inline_result(item)}
         for item in successful
     ] == actual_results, "上下文中的成功结果与实际执行器收到的请求及返回值不同。"
 
     def result_value(item):
-        return json.loads(json.loads(item["output"])["result"])
+        return json.loads(inline_result(item))
 
     root_results = [
         item for item in successful

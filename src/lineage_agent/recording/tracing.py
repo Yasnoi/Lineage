@@ -684,6 +684,7 @@ class RunTrace:
             code = error_code or (state.get("error_code") if isinstance(state, dict) else None) or checkpoint_error
             self._root.payload["error"] = code if code in _MODEL_ERRORS | set(CHECKPOINT_ERRORS) | {
                 "run_interrupted", "client_close_error", "invalid_input", "pre_execution_configuration_error",
+                "artifact_store_init_error", "artifact_cleanup_error",
                 "context_budget_exceeded", "context_measurement_error",
                 "summary_model_error", "invalid_summary", "summary_refusal", "summary_tool_request",
             } else "agent_error"

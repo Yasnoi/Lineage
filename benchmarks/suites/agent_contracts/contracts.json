@@ -1086,7 +1086,7 @@
         },
         {
           "group_id": "filesystem.artifacts.integration",
-          "description": "同会话跨 Run 召回、显式工具注入与业务工具兼容",
+          "description": "同会话跨 Run 召回、默认工具注册与业务工具兼容",
           "source": {
             "path": "benchmarks/checks/filesystem/artifacts.py",
             "symbol": "check_integration"
@@ -1112,6 +1112,104 @@
             "recording"
           ],
           "entry_module": "benchmarks.checks.filesystem.artifacts"
+        }
+      ],
+      "module": "filesystem"
+    },
+    {
+      "unit_id": "filesystem.observations",
+      "entrypoint": "benchmarks.checks.filesystem.observations:execute",
+      "script": "benchmarks/checks/filesystem/observations.py",
+      "groups": [
+        {
+          "group_id": "filesystem.observations.pipeline",
+          "description": "统一观测入口、小结果内联、大结果自动保存与有界召回。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_pipeline"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
+        },
+        {
+          "group_id": "filesystem.observations.hints",
+          "description": "结构化观测提示、参数拆分及关键词预览降级。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_hints"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
+        },
+        {
+          "group_id": "filesystem.observations.failures",
+          "description": "保存与治理失败安全返回，保留工具执行事实。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_failures"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
+        },
+        {
+          "group_id": "filesystem.observations.sessions",
+          "description": "会话隔离、跨 Run 引用及默认工具注册。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_sessions"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
+        },
+        {
+          "group_id": "filesystem.observations.privacy",
+          "description": "观测正文与提示值不进入日志及 Tracing。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_privacy"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
+        },
+        {
+          "group_id": "filesystem.observations.lifecycle",
+          "description": "运行及会话存储所有权、关闭与失败清理。",
+          "source": {
+            "path": "benchmarks/checks/filesystem/observations.py",
+            "symbol": "check_lifecycle"
+          },
+          "primary_area": "filesystem",
+          "tags": [
+            "filesystem",
+            "execution",
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.filesystem.observations"
         }
       ],
       "module": "filesystem"

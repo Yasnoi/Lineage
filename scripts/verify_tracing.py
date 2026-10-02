@@ -23,6 +23,11 @@ from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.recording.tracing import _create_client, _read_settings, _WorkerLogFilter
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, create_directory_executor
 
+if __package__:
+    from .verification_observations import inline_result
+else:
+    from verification_observations import inline_result
+
 
 # Keep the standalone command while sharing the offline projection assertion.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -139,7 +144,9 @@ async def verify():
         outputs = [item for item in state["input"] if item.get("type") == "function_call_output"]
         assert [event["call_id"] for event in created] == [item["call_id"] for item in outputs], "本地 call_id 关联不一致。"
         envelopes = {item["call_id"]: json.loads(item["output"]) for item in outputs}
-        assert [value["result"] for value in envelopes.values() if value["ok"]] == actual_results, "上下文与实际执行器结果不一致。"
+        actual_calls = {item["call_id"]: item for item in state["input"] if item.get("type") == "function_call"}
+        assert [inline_result(item) for item in outputs if envelopes[item["call_id"]]["ok"]
+                and actual_calls[item["call_id"]]["name"] == "list_directory"] == actual_results, "上下文与实际执行器结果不一致。"
         assert len(started) == len(observations) == state["model_calls"], "实际模型调用统计不一致。"
         for event, (request, _) in zip(started, observations):
             returned = [item for item in request["input"] if item.get("type") == "function_call_output"]

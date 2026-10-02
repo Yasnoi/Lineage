@@ -4,6 +4,7 @@
 import builtins
 import io
 import json
+from benchmarks.checks.support.observations import assert_observed
 import os
 from benchmarks.checks.support.events import observe_state
 from benchmarks.checks.support.runtime import (
@@ -197,8 +198,11 @@ async def run_case(
         requested = [item["call_id"] for item in request["input"] if item.get("type") == "function_call"]
         submitted = [item for item in request["input"] if item.get("type") == "function_call_output"]
         assert submitted == [by_id[identifier] for identifier in requested]
-    successful = [item["result"] for item in result_envelopes(state) if item["ok"]]
-    assert successful == [item["result"] for item in observed if "result" in item]
+    successful = [item for item in result_envelopes(state) if item["ok"]]
+    originals = [item for item in observed if "result" in item]
+    assert len(successful) == len(originals)
+    for envelope, original in zip(successful, originals, strict=True):
+        assert_observed(envelope, original["result"], original["name"])
     if state["stop_reason"] == "completed" and len(client.requests) > 1:
         assert [item for item in client.requests[-1]["input"] if item.get("type") == "function_call_output"] == outputs(state)
     log = Path(state["log_path"]).read_text(encoding="utf-8")

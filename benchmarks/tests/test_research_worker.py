@@ -382,10 +382,11 @@ class ResearchWorkerTests(unittest.TestCase):
         background_bytes = 6144 if current_profile else 12288
         background.write_text("b" * background_bytes, encoding="utf-8")
         self.spec["case_id"] = "compaction-fixture"
-        self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288}
+        self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288, "pressure_max_bytes": 32768}
         self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
-        # This 12 KiB history and bounded pressure fixture targets the original
-        # window; larger production defaults must not remove the tested event.
+        # Raw background is archived before entering context. Allow bounded
+        # pressure to compensate for the shorter observation while retaining
+        # the real compaction/source/version checks below.
         self.spec["profile"].update(
             context_budget_tokens=32768, max_output_tokens=4096,
             context_safety_margin_tokens=1024, summary_target_percent=40,

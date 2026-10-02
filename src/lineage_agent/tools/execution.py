@@ -5,6 +5,7 @@ import math
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from lineage_agent.models.types import FunctionCall, ToolDefinition
+from lineage_agent.observations.hints import split_observation
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import (
     summarize_arguments,
@@ -23,6 +24,7 @@ from lineage_agent.tools.types import (
 )
 
 if TYPE_CHECKING:
+    from lineage_agent.observations import ObservationManager
     from lineage_agent.recording.tracing import RunTrace
 
 
@@ -56,6 +58,9 @@ async def execute_calls(
     tools: list[ToolDefinition],
     execute_tool: ToolExecutor | None,
     *,
+    observation_manager: "ObservationManager",
+    observation_hint_tools: frozenset[str] = frozenset(),
+    native_recall_tools: frozenset[str] = frozenset(),
     recorder: RunRecorder | None = None,
     step_id: str | None = None,
     tracer: "RunTrace | None" = None,
@@ -123,6 +128,9 @@ async def execute_calls(
                 )
             else:
                 arguments_summary = summarize_arguments(arguments, available_tools[call["name"]])
+                keywords: tuple[str, ...] = ()
+                if call["name"] in observation_hint_tools:
+                    arguments, keywords = split_observation(arguments)
                 if execute_tool is None:
                     stage = "executor_configuration"
                     output = _error("execution_error", "本次运行未配置工具执行器。")
@@ -171,7 +179,12 @@ async def execute_calls(
                         raise
                     else:
                         outcome = "succeeded"
-                        output = {"ok": True, "result": result}
+                        # Only governed observations become protocol items. Keep
+                        # execution success separate from delivery failures.
+                        output = observation_manager.observe(
+                            result, tool_name=call["name"], keywords=keywords,
+                            native_recall=call["name"] in native_recall_tools,
+                        )
 
         if reason_code is not None:
             output["error"].update(reason_code=reason_code, reason_message=reason_message)
@@ -183,7 +196,14 @@ async def execute_calls(
             )
         details = {**identity, "stage": stage, "arguments_summary": arguments_summary}
         if output["ok"]:
-            details["result_summary"] = summarize_value(output["result"])
+            observation = output["observation"]
+            details["result_summary"] = summarize_value(result)
+            details["observation_status"] = observation["status"]
+            if observation.get("mode") is not None:
+                details["observation_mode"] = observation["mode"]
+            if observation["status"] == "unavailable":
+                details["observation_stage"] = observation["stage"]
+                details["observation_error_code"] = observation["error"]["code"]
         else:
             details["error_code"] = output["error"]["code"]
         if reason_code is not None:

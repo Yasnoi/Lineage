@@ -4,6 +4,7 @@
 import builtins
 import io
 import json
+from benchmarks.checks.support.observations import assert_observed
 import os
 from benchmarks.checks.support.events import coverage_gap, observe_state
 from benchmarks.checks.support.runtime import (
@@ -133,8 +134,11 @@ async def run_case(scenario, root, replies, *, max_entries=100, settings=None, e
             if item.get("type") == "function_call_output"
         ]
         assert submitted == generated
-        successful_values = [json.loads(item["output"])["result"] for item in generated if json.loads(item["output"])["ok"]]
-        assert successful_values == [item["result"] for item in observed if "result" in item]
+        successful_values = [json.loads(item["output"]) for item in generated if json.loads(item["output"])["ok"]]
+        originals = [item["result"] for item in observed if "result" in item]
+        assert len(successful_values) == len(originals)
+        for envelope, raw in zip(successful_values, originals, strict=True):
+            assert_observed(envelope, raw, "list_directory")
     log_text = Path(state["log_path"]).read_text(encoding="utf-8")
     for marker in (
         str(root), root.name, "文件 private.txt", "child private", "nested.txt",
@@ -199,6 +203,8 @@ async def rejected_then_success(root, scenario, *, path=None, arguments=None, at
     scanned = []
 
     def tracked_scan(value):
+        if not isinstance(value, (str, os.PathLike)) or not Path(value).is_relative_to(root.parent):
+            return real_scandir(value)
         scanned.append(Path(value))
         return real_scandir(value)
 

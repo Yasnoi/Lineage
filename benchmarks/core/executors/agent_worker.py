@@ -105,7 +105,8 @@ def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: M
     history_end = previous["history_end"]
     history = previous["input"][:history_end]
     prepared = prepare_request(settings.model_name, history + [{"role": "user", "content": base}],
-                               tools=TOOL_DEFINITIONS, instructions=business[-1].get("instructions"),
+                               tools=business[-1].get("tools", TOOL_DEFINITIONS),
+                               instructions=business[-1].get("instructions"),
                                max_output_tokens=settings.max_output_tokens)
     risks = previous["context_risks"][:history_end] + [None]
     measured = check_context_budget(prepared, risks, settings)
@@ -255,6 +256,7 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
     manager = None
     sid = None
     code = 2
+    primary_failure = False
 
     def save():
         result["metrics"] = usage_metrics(observer) if observer else {}
@@ -405,6 +407,7 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
         result["execution_status"] = "completed"
         code = 0
     except BaseException as exc:
+        primary_failure = True
         error = exc.code if isinstance(exc, WorkerAbort) else ("interrupted" if isinstance(exc, KeyboardInterrupt) else "worker_execution_failed")
         result["issues"].append(safe_issue("worker", error, error_type=type(exc).__name__))
         # Safe hard failures stop scheduling; ordinary API errors are returned as Agent facts.
@@ -419,6 +422,18 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                 pending["issues"].append(safe_issue("dependency", "sample_stopped"))
         if observer and mechanism.get("kind") == "read_limit":
             result["coverage"] = [read_limit_coverage(observer, mechanism)]
+    finally:
+        if manager is not None:
+            try:
+                manager.close()
+            except BaseException as exc:
+                if not isinstance(exc, Exception) and not primary_failure:
+                    raise
+                # Preserve all completed answers and the primary stop reason.
+                # Storage cleanup diagnostics never include paths or exception text.
+                result["issues"].append(safe_issue("cleanup", "artifact_cleanup_error"))
+                result["execution_status"] = "failed"
+                code = 2
     result["ended_at"] = utc_now()
     result["final"] = True
     observation_path = output / "observations.jsonl"

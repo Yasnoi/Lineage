@@ -189,14 +189,11 @@ class TraceSanitizer:
         if type(output.get("ok")) is bool:
             result["ok"] = output["ok"]
         if output.get("ok") is True:
-            raw = output.get("result")
-            decoded, valid = self._decode(raw)
-            if name == "list_directory" and valid:
-                result["result"] = self._directory(decoded)
-            elif name == "read_text_file" and valid:
-                result["result"] = self._text_file(decoded)
+            if "observation" in output:
+                result["observation"] = self._observation(output["observation"], name)
             else:
-                result["result"] = {"summary": summarize_value(raw), "omitted": "unsupported_result"}
+                # Previously supplied protocol history may use the old envelope.
+                result["result"] = self._raw_tool_result(output.get("result"), name)
         elif output.get("ok") is False:
             error = output.get("error")
             code = error.get("code") if isinstance(error, dict) else None
@@ -213,7 +210,52 @@ class TraceSanitizer:
                     reason_code = None
                 if reason_code is not None:
                     result["error"].update(reason_code=reason_code, reason_message=reason_message)
-        self._omissions(result, output, {"ok", "result", "error"})
+        self._omissions(result, output, {"ok", "result", "observation", "error"})
+        return result
+
+    def _raw_tool_result(self, raw: Any, name: str | None) -> dict[str, Any]:
+        decoded, valid = self._decode(raw)
+        if name == "list_directory" and valid:
+            return self._directory(decoded)
+        if name == "read_text_file" and valid:
+            return self._text_file(decoded)
+        return {"summary": summarize_value(raw), "omitted": "unsupported_result"}
+
+    def _observation(self, value: Any, name: str | None) -> dict[str, Any]:
+        """Project delivery metadata; never upload previews, hints or matches."""
+        if not isinstance(value, dict):
+            return {"summary": summarize_value(value), "omitted": "invalid_observation"}
+        result: dict[str, Any] = {}
+        for key, allowed in (
+            ("status", ("available", "unavailable")),
+            ("mode", ("inline", "artifact")),
+            ("stage", ("serialize", "save", "preview")),
+            ("view_kind", ("content", "raw_result")),
+            ("strategy", ("head_tail", "keywords")),
+            ("keyword_status", ("not_requested", "matched", "no_match")),
+            ("degradation_reason", ("invalid_text_result",)),
+        ):
+            if value.get(key) in allowed:
+                result[key] = value[key]
+        for key in ("raw_bytes", "total_chars"):
+            if type(value.get(key)) is int and value[key] >= 0:
+                result[key] = value[key]
+        for key in ("complete", "matches_truncated"):
+            if key in value and (type(value[key]) is bool or value[key] is None):
+                result[key] = value[key]
+        if value.get("status") == "available" and value.get("mode") == "inline":
+            result["raw_result"] = self._raw_tool_result(value.get("raw_result"), name)
+        if "segments" in value:
+            result["segments"] = {"summary": summarize_value(value["segments"]), "omitted": "content"}
+        if "matches" in value:
+            result["matches"] = {"summary": summarize_value(value["matches"]), "omitted": "content"}
+        if "error" in value:
+            # Import lazily so recording does not own observation policy.
+            from lineage_agent.observations.manager import safe_observation_error
+            error = value["error"]
+            code, message = safe_observation_error(error.get("code") if isinstance(error, dict) else None)
+            result["error"] = {"code": code, "message": message}
+        self._omissions(result, value, set(result))
         return result
 
     def _text_fragments(self, texts: list[str]) -> list[str]:
@@ -723,10 +765,10 @@ class TraceSanitizer:
             result["text"] = self.text(final["text"])
         if isinstance(final, dict):
             result["has_refusal"] = final.get("has_refusal") is True
-        if isinstance(cleanup, dict) and cleanup.get("code") == "client_close_error":
+        if isinstance(cleanup, dict) and cleanup.get("code") in ("client_close_error", "artifact_cleanup_error"):
             previous = cleanup.get("previous_stop_reason")
             result["cleanup_error"] = {
-                "code": "client_close_error",
+                "code": cleanup["code"],
                 "previous_stop_reason": previous if previous in _STOP_REASONS else None,
             }
         for key in ("model_calls", "summary_calls", "tool_requests", "tool_calls"):
@@ -847,6 +889,8 @@ class TraceSanitizer:
         if self._size(result) > _MAX_PAYLOAD and isinstance(outputs.get("output"), list):
             self._retain(outputs, "output", [], summarized=list(range(len(outputs["output"]))))
         directory = outputs.get("result")
+        if isinstance(outputs.get("observation"), dict):
+            directory = outputs["observation"].get("raw_result")
         if self._size(result) > _MAX_PAYLOAD and isinstance(directory, dict) and isinstance(directory.get("entries"), list):
             self._retain(directory, "entries", [])
 

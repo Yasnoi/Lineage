@@ -19,6 +19,11 @@ from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
+if __package__:
+    from .verification_observations import business_arguments, inline_result, runtime_tools
+else:
+    from verification_observations import business_arguments, inline_result, runtime_tools
+
 
 class ObservedExecutor:
     """Preserve run binding and observe unmodified results without logging bodies."""
@@ -56,8 +61,9 @@ def cache_observation(response):
 
 
 def check_request_options(requests, max_model_calls, tools):
+    expected_tools = runtime_tools(tools)
     for index, request in enumerate(requests, 1):
-        assert request["tools"] == tools, "实际工具定义随额度变化。"
+        assert request["tools"] == expected_tools, "实际工具定义与默认召回及观测提示不一致。"
         if index == max_model_calls:
             assert request["instructions"] == FINAL_ANSWER_INSTRUCTIONS
             assert request["tool_choice"] == "none"
@@ -146,8 +152,9 @@ async def verify():
         assert tools == original_tools
         calls = {item["call_id"]: item for item in state["input"] if item.get("type") == "function_call"}
         outputs = [item for item in state["input"] if item.get("type") == "function_call_output"]
-        success = [item for item in outputs if json.loads(item["output"])["ok"]]
-        assert [(calls[item["call_id"]]["name"], json.loads(calls[item["call_id"]]["arguments"]), json.loads(item["output"])["result"]) for item in success] == records
+        success = [item for item in outputs if json.loads(item["output"])["ok"]
+                   and calls[item["call_id"]]["name"] in {"list_directory", "read_text_file"}]
+        assert [(calls[item["call_id"]]["name"], business_arguments(calls[item["call_id"]]), inline_result(item)) for item in success] == records
         directory_results = [json.loads(value) for name, _, value in records if name == "list_directory"]
         assert any(value["truncated"] and value["next_after"] == source for value in directory_results), "未观察到真实截断第一页。"
         assert any(value["after"] == source and not value["truncated"] for value in directory_results), "模型未使用游标继续列举。"
@@ -162,7 +169,7 @@ async def verify():
             assert received == outputs[:len(received)]
             assert event["input_tool_result_call_ids"] == [item["call_id"] for item in received]
             used_bytes = sum(
-                json.loads(json.loads(item["output"])["result"])["bytes_read"]
+                json.loads(inline_result(item))["bytes_read"]
                 for item in received
                 if calls[item["call_id"]]["name"] == "read_text_file" and json.loads(item["output"])["ok"]
             )
