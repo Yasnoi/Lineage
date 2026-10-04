@@ -44,6 +44,7 @@ class Observer:
         self.global_stop_reason = None
         self.sequence = 0
         self.request_durations: list[float] = []
+        self.response_outputs: list[dict] = []
 
     def record(self, event: dict) -> dict:
         self.sequence += 1
@@ -86,6 +87,11 @@ class Observer:
                     finally:
                         self.request_durations.append(time.monotonic() - sent_at)
                     reported = usage_fields(response)
+                    body = response if isinstance(response, dict) else response.model_dump(
+                        mode="json", by_alias=True, exclude_unset=True)
+                    self.response_outputs.append({"turn": self.turn, "purpose": purpose,
+                                                  "request_id": reserved["request_id"],
+                                                  "output": deepcopy(body.get("output", []))})
                     self.request_usage.append(reported)
                     self.record({"event": "request_finished", "request_id": reserved["request_id"],
                                  "purpose": purpose, "usage": reported,

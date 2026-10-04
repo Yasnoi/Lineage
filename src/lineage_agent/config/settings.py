@@ -26,6 +26,7 @@ class ConfigurationError(ValueError):
 _REMOVED_OPTION = object()
 _REMOVED_CONTEXT_OPTIONS = (
     "context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes",
+    "context_keep_recent_turns",
 )
 
 
@@ -33,6 +34,7 @@ def _removed_configuration(names: list[str]) -> ConfigurationError:
     return ConfigurationError(
         f"{', '.join(name.upper() for name in names)} 已移除。请删除旧配置；"
         "摘要目标改用 SUMMARY_TARGET_PERCENT（默认 40），"
+        "保护窗口改用 CONTEXT_KEEP_RECENT_GROUPS（默认 3），"
         "上下文触发上限固定为 CONTEXT_BUDGET_TOKENS。"
     )
 
@@ -54,19 +56,23 @@ class ModelSettings:
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     context_safety_margin_tokens: int = DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
     opaque_fallback_tokens: int = 4096
-    context_keep_recent_turns: int = 2
+    context_keep_recent_groups: int = 3
     summary_target_percent: int = 40
+    context_recovery_margin_percent: int = 10
     # Accept obsolete keywords only to give a precise migration error. InitVars
     # are not dataclass fields and never appear in asdict or saved configuration.
     context_trigger_percent: InitVar[object] = _REMOVED_OPTION
     context_target_percent: InitVar[object] = _REMOVED_OPTION
     summary_max_output_tokens: InitVar[object] = _REMOVED_OPTION
     summary_max_bytes: InitVar[object] = _REMOVED_OPTION
+    context_keep_recent_turns: InitVar[object] = _REMOVED_OPTION
 
     def __post_init__(self, context_trigger_percent: object, context_target_percent: object,
-                      summary_max_output_tokens: object, summary_max_bytes: object) -> None:
+                      summary_max_output_tokens: object, summary_max_bytes: object,
+                      context_keep_recent_turns: object) -> None:
         removed = [name for name, value in zip(_REMOVED_CONTEXT_OPTIONS, (
             context_trigger_percent, context_target_percent, summary_max_output_tokens, summary_max_bytes,
+            context_keep_recent_turns,
         ), strict=True) if value is not _REMOVED_OPTION]
         if removed:
             raise _removed_configuration(removed)
@@ -112,7 +118,7 @@ class ModelSettings:
             raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
         for name in (
             "context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens",
-            "context_keep_recent_turns",
+            "context_keep_recent_groups",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -125,6 +131,9 @@ class ModelSettings:
         if (type(self.summary_target_percent) is not int
                 or not 1 <= self.summary_target_percent <= 100):
             raise ConfigurationError("SUMMARY_TARGET_PERCENT 必须是 1 到 100 的整数。")
+        if (type(self.context_recovery_margin_percent) is not int
+                or not 0 <= self.context_recovery_margin_percent <= 99):
+            raise ConfigurationError("CONTEXT_RECOVERY_MARGIN_PERCENT 必须是 0 到 99 的整数。")
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -199,8 +208,9 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         ("MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
         ("CONTEXT_SAFETY_MARGIN_TOKENS", DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS),
         ("OPAQUE_FALLBACK_TOKENS", 4096),
-        ("CONTEXT_KEEP_RECENT_TURNS", 2),
+        ("CONTEXT_KEEP_RECENT_GROUPS", 3),
         ("SUMMARY_TARGET_PERCENT", 40),
+        ("CONTEXT_RECOVERY_MARGIN_PERCENT", 10),
     ):
         try:
             budget_values[name.lower()] = int(os.environ.get(name, str(default)))

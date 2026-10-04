@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import subprocess
-from benchmarks.core.files import atomic_write_json
+from benchmarks.core.files import ROOT, atomic_write_json
 
 class MaterialError(ValueError):
     pass
@@ -133,11 +133,19 @@ def instantiate_materials(prepared_root, destination, task):
     if edits:
         raise MaterialError("variant target outside approved material")
     for fixture in task.get("fixtures", []):
-        prefix = b"EVALUATION-CONSTRUCTED BACKGROUND. No project facts.\n"
-        size = fixture["bytes"]
-        if type(size) is not int or not len(prefix) <= size <= 16384:
-            raise MaterialError("invalid bounded fixture")
-        files.append({**_write_file(root, fixture["path"], prefix + b"x" * (size - len(prefix))),
+        if "text_path" in fixture:
+            if "bytes" in fixture:
+                raise MaterialError("fixture must have one content source")
+            data = _destination(ROOT, fixture["text_path"]).read_bytes()
+            if not 1 <= len(data) <= 16384 or _sha(data) != fixture.get("sha256"):
+                raise MaterialError("versioned fixture content differs")
+        else:
+            prefix = b"EVALUATION-CONSTRUCTED BACKGROUND. No project facts.\n"
+            size = fixture["bytes"]
+            if type(size) is not int or not len(prefix) <= size <= 16384:
+                raise MaterialError("invalid bounded fixture")
+            data = prefix + b"x" * (size - len(prefix))
+        files.append({**_write_file(root, fixture["path"], data),
                       "kind": "evaluation_fixture", "version": fixture["version"]})
     if task.get("material_edits"):
         # Label the copy without giving the injected defect or expected conclusion.

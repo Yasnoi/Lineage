@@ -17,6 +17,7 @@ from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.observations.hints import enhance_tools
 from lineage_agent.tools.types import ToolExecutor
+from lineage_agent.tools.history import HISTORY_TOOL_NAMES
 
 
 _SESSION_ERRORS = {
@@ -124,9 +125,9 @@ class SessionManager:
         with self._lifecycle_lock:
             self._ensure_open()
             available_tools = validate_tools(tools, execute_tool)
-            artifact_names = {tool["name"] for tool in ARTIFACT_TOOLS}
+            artifact_names = {tool["name"] for tool in ARTIFACT_TOOLS} | HISTORY_TOOL_NAMES
             if any(tool["name"] in artifact_names for tool in available_tools):
-                raise ConfigurationError("已提供的工具名称与 Artifact 工具冲突。")
+                raise ConfigurationError("已提供的工具名称与内置召回工具冲突。")
             # Reject incompatible reserved schemas before allocating storage.
             enhance_tools(available_tools)
             session_id = str(uuid4())

@@ -26,7 +26,7 @@ DERIVED = "SUMMARY_DERIVED_BODY_PRIVATE_9be2"
 
 QUOTE = "Final answer may quote a previously read fact."
 
-async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
+async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane="H"):
     run_id, session_id, summary_id, version_id, checkpoint_id = [str(uuid4()) for _ in range(5)]
     observe_harness(
         "summary_trace_harness", run_id=run_id, session_id=session_id,
@@ -36,7 +36,7 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
     metadata = {
         "summary_id": summary_id, "candidate_version_id": version_id,
         "confirmed_checkpoint_id": checkpoint_id, "step_id": "step-0002",
-        "request_no": 2, "pass_no": 1, "summary_call": 1, "source_bytes": len(BODY),
+        "request_no": 2, "attempt_no": 1, "summary_call": 1, "source_bytes": len(BODY), "lane": lane,
         "recovery_budget": {"input_budget_tokens": 10000, "fixed_tokens": 500,
                             "preserved_tokens": 7500, "available_tokens": 2000, "target_tokens": 800},
         "status": "candidate",
@@ -44,23 +44,35 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
             {"run_id": source_run, "checkpoint_id": checkpoint_id, "item_count": 2},
         ]},
         "material": BODY, "message": DERIVED,
+        "lanes": {lane: {"summary_id": summary_id, "status": "generated", "model_called": True,
+                         "target_bytes": 800, "summary_bytes": 700, "summary_call": 1, "document": DERIVED}},
     }
+    h_ref = {"summary_id": str(uuid4()), "checkpoint_id": checkpoint_id, "lane": "H"}
+    r_ref = {"summary_id": str(uuid4()), "checkpoint_id": checkpoint_id, "lane": "R"}
+    old_r_ref = {"summary_id": str(uuid4()), "checkpoint_id": checkpoint_id, "lane": "R"}
     active = {
         "version_id": version_id, "parent_version_id": str(uuid4()),
-        "summary": {"summary_id": summary_id, "checkpoint_id": checkpoint_id},
-        "turns": [], "turn_start": 1,
+        "history_summary": h_ref, "run_summary": r_ref,
+        "turns": [], "turn_start": 4,
+        "summary_spans": [{"index": index, "lane": reference["lane"], "summary_id": reference["summary_id"],
+                           "run_id": owner, "reference": reference}
+                          for index, reference, owner in ((0, h_ref, source_run), (2, old_r_ref, source_run), (5, r_ref, run_id))],
     }
     summary_request = prepare_summary_request(
         SETTINGS, {"sources": [{"source_id": "fixture:0", "role": "user", "kind": "message",
                                 "payload": {"role": "user", "content": BODY}}]},
-        target_tokens=metadata["recovery_budget"]["target_tokens"],
+        target_bytes=metadata["recovery_budget"]["target_tokens"], lane=lane,
     )
     assert is_summary_request(summary_request) and summary_request["reasoning"] == {"effort": "none"}
-    assert summary_request["max_output_tokens"] == 800
+    assert summary_request["max_output_tokens"] == SETTINGS.max_output_tokens
     business_request = prepare_request(
         SETTINGS.model_name, [
-            {"role": "assistant", "content": DERIVED},
+            {"role": "assistant", "content": DERIVED + " H"},
+            {"role": "user", "content": "Earlier task."},
+            {"role": "assistant", "content": DERIVED + " old R"},
+            {"role": "assistant", "content": "Earlier retained answer."},
             {"role": "user", "content": "Answer using the derived context."},
+            {"role": "assistant", "content": DERIVED + " current R"},
         ], max_output_tokens=128,
     )
     original = deepcopy((summary_request, business_request, metadata, active))
@@ -116,10 +128,15 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal"):
         assert span["inputs"]["content_omitted"] is True
         assert span["outputs"]["content_omitted"] is True
         assert span["extra"]["metadata"]["summary_id"] == summary_id
-        assert span["extra"]["metadata"]["pass_no"] == 1
+        assert span["extra"]["metadata"]["attempt_no"] == 1
+        assert span["extra"]["metadata"]["lane"] == lane
+        assert span["extra"]["metadata"]["lanes"][lane]["model_called"] is True
         assert span["extra"]["metadata"]["recovery_budget"] == metadata["recovery_budget"]
         assert span["extra"]["metadata"]["outcome"] == ("failed" if error else "returned")
         assert business[0]["inputs"]["summary_content_omitted"] is True
+        assert business[0]["inputs"]["summary_items_omitted"] == 3
+        assert "Answer using the derived context." in json.dumps(business[0]["inputs"])
+        assert "Earlier retained answer." in json.dumps(business[0]["inputs"])
         assert QUOTE in json.dumps(business[0]["outputs"])
         assert roots[0]["outputs"]["text"] == QUOTE
         assert roots[0]["outputs"]["summary_calls"] == 1

@@ -36,6 +36,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 from io import StringIO
+from lineage_agent.tools.history import HISTORY_TOOLS
 from lineage_agent.artifacts.tools import ARTIFACT_TOOLS
 from lineage_agent.agent import graph, runtime
 from lineage_agent.agent.sessions import SessionError, SessionManager
@@ -131,7 +132,7 @@ async def check_transparent_request_and_boundary():
     # requests; retain the original small-window cases above independently.
     production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
     padded = [{"role": "user", "content": ""}]
-    prepared = prepare_request(production.model_name, padded, tools=ARTIFACT_TOOLS)
+    prepared = prepare_request(production.model_name, padded, tools=ARTIFACT_TOOLS + HISTORY_TOOLS)
     assert prepared["max_output_tokens"] == production.max_output_tokens == 16384
     padded[0]["content"] = "p" * (225424 - compact_bytes(prepared))
     for extra in (0, 1):
@@ -320,12 +321,15 @@ async def check_measurement_failure():
     cycle["cycle"] = cycle
     inputs = [[{"type": "provider_extension", "value": value}] for value in invalid] + [[cycle]]
     for index, items in enumerate(inputs):
-        # No checkpointer for intentionally nonserializable values: this isolates
-        # the pre-dispatch measurement boundary from checkpoint serialization.
+        # Independent Runs now use the same confirmed saver as sessions.
+        # Its serializer rejects object/cycle before the business budget gate.
         state, client, _ = await run([], prompt=items, scenario=f"measurement_unserializable_{index}")
         assert not client.requests and state["model_calls"] == 0
-        assert state["error_code"] == "context_measurement_error"
-        assert state["context_budget"]["decision"] == "error" and state["context_budget"]["request_sent"] is False
+        if index < 2:
+            assert state["error_code"] == "context_measurement_error"
+            assert state["context_budget"]["decision"] == "error" and state["context_budget"]["request_sent"] is False
+        else:
+            assert state["error_code"] == "checkpoint_write_error" and state["context_budget"] is None
         assert state["usage_totals"]["missing_usage_calls"] == 0
     with patch.object(runtime, "prepare_request", side_effect=ValueError(PRIVATE)):
         state, _, _ = await run([], scenario="request_preparation_failure")
@@ -494,7 +498,7 @@ async def check_tracing_diagnostics():
     assert "trigger_tokens" in json.dumps(transport.sent)
 
 async def check_cli():
-    settings = replace(SETTINGS, context_budget_tokens=8000)
+    settings = replace(SETTINGS, context_budget_tokens=10000)
     state, _, _ = await run([], prompt="x" * 10000, settings=settings, scenario="cli_budget_state")
     with redirect_stderr(StringIO()) as error, redirect_stdout(StringIO()) as output:
         assert cli.display_run(state, settings) == 4

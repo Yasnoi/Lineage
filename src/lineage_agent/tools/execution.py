@@ -2,6 +2,7 @@
 
 import json
 import math
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from lineage_agent.models.types import FunctionCall, ToolDefinition
@@ -72,6 +73,7 @@ async def execute_calls(
         if tool.get("type") == "function" and isinstance(tool.get("name"), str)
     }
     output_items: list[dict[str, Any]] = []
+    call_facts: list[dict[str, Any]] = []
     tool_calls = 0
     outcomes: ToolOutcomes = {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 0}
     error: str | None = None
@@ -86,6 +88,12 @@ async def execute_calls(
     def skip_remaining(first_index: int, *, first_traced: bool = False) -> None:
         outcomes["skipped"] += len(calls) - first_index
         for index in range(first_index, len(calls)):
+            call_facts.append({
+                "call_id": calls[index]["call_id"], "name": calls[index]["name"],
+                "request_index": index + 1, "outcome": "skipped", "stage": "execution",
+                "reason_code": "logging_error", "executor_entered": False,
+                "protocol_output_created": False, "output": None,
+            })
             record(
                 "tool.skipped",
                 **tool_identity(calls[index], index + 1),
@@ -109,6 +117,7 @@ async def execute_calls(
         reason_code = reason_message = None
         outcome = "rejected"
         stage = "name_validation"
+        executor_entered = False
         if call["name"] not in available_tools:
             output = _error("unknown_tool", "请求的工具未在本次运行中提供。")
         else:
@@ -151,6 +160,7 @@ async def execute_calls(
                         error = LOG_FAILURE_MESSAGE
                         break
                     tool_calls += 1
+                    executor_entered = True
                     try:
                         result = await execute_tool(call["name"], arguments)
                         if not isinstance(result, str):
@@ -170,7 +180,31 @@ async def execute_calls(
                     except Exception:
                         outcome = "failed"
                         output = _error("execution_error", "工具执行失败。")
-                    except BaseException:
+                    except BaseException as interruption:
+                        # Attach actual facts to the original interruption. The
+                        # graph may save them while still propagating it; none
+                        # of these absent results becomes a protocol output.
+                        outcomes["failed"] += 1
+                        call_facts.append({
+                            "call_id": call["call_id"], "name": call["name"],
+                            "request_index": index + 1, "outcome": "interrupted", "stage": "execution",
+                            "reason_code": "tool_interrupted", "executor_entered": True,
+                            "protocol_output_created": False, "output": None,
+                        })
+                        for skipped_index in range(index + 1, len(calls)):
+                            skipped = calls[skipped_index]
+                            outcomes["skipped"] += 1
+                            call_facts.append({
+                                "call_id": skipped["call_id"], "name": skipped["name"],
+                                "request_index": skipped_index + 1, "outcome": "skipped", "stage": "execution",
+                                "reason_code": "tool_interrupted", "executor_entered": False,
+                                "protocol_output_created": False, "output": None,
+                            })
+                        interruption.tool_batch = {
+                            "output_items": deepcopy(output_items), "tool_calls": tool_calls,
+                            "tool_outcomes": outcomes.copy(), "call_facts": deepcopy(call_facts),
+                            "error": None,
+                        }
                         if tracer is not None:
                             tracer.tool_end(
                                 token, output=_error("tool_interrupted", "工具执行被中断。"),
@@ -218,6 +252,13 @@ async def execute_calls(
             "output": serialize_tool_output(output),
         }
         output_items.append(item)
+        call_facts.append({
+            "call_id": call["call_id"], "name": call["name"], "request_index": index + 1,
+            "outcome": outcome, "stage": stage,
+            "reason_code": reason_code or (output.get("error") or {}).get("code"),
+            "executor_entered": executor_entered, "protocol_output_created": True,
+            "output": deepcopy(output),
+        })
         result_details = {
             **identity,
             "stage": "result_generation",
@@ -239,5 +280,6 @@ async def execute_calls(
         "output_items": output_items,
         "tool_calls": tool_calls,
         "tool_outcomes": outcomes,
+        "call_facts": call_facts,
         "error": error,
     }

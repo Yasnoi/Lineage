@@ -41,6 +41,7 @@ class SavedState(TypedDict):
 async def run_case(*, enabled=True, mode="ok", checkpoint_error=None):
     session_id = str(uuid4())
     recorder = RunRecorder(CHECK_DIR)
+    recorder.bind_session(session_id)
     saver = SessionCheckpointer()
     saver.bind_run(session_id, recorder)
     config = {"configurable": {"thread_id": session_id}}

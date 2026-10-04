@@ -13,8 +13,8 @@ from benchmarks.suites.wechat_reporting.suite import definition
 class DefinitionTests(unittest.TestCase):
     def test_tasks_cover_research_workflow_with_matching_rubrics(self):
         suite=definition()
-        self.assertEqual(len(suite['units']),9)
-        self.assertEqual(sum(len(t['turns']) for t in suite['units']),19)
+        self.assertEqual(len(suite['units']),10)
+        self.assertEqual(sum(len(t['turns']) for t in suite['units']),21)
         self.assertEqual({t['case_id'] for t in suite['units']},set(suite['rubric']['cases']))
         for task in suite['units']:
             rule=suite['rubric']['cases'][task['case_id']]
@@ -82,6 +82,26 @@ class MaterialTests(unittest.TestCase):
         with self.assertRaises(materials.MaterialError):materials.verify_materials(self.prepared)
         path.unlink();(Path(self.manifest['material_root'])/'code/README.md').write_text('changed')
         with self.assertRaises(materials.MaterialError):materials.instantiate_materials(self.prepared,self.root/'copy',self.task('defect-reference'))
+
+    def test_history_chain_is_fixed_utf8_and_every_observation_remains_inline(self):
+        import asyncio
+        from lineage_agent.tools.filesystem.text import create_text_executor
+        from lineage_agent.tools.types import inline_tool_output, tool_output_bytes
+        task = self.task('history-recall')
+        instance = materials.instantiate_materials(self.prepared, self.root/'history', task)
+        executor = create_text_executor(instance['material_root'])
+        self.assertEqual(len(task['fixtures']), 16)
+        for index, fixture in enumerate(task['fixtures']):
+            raw = asyncio.run(executor('read_text_file', {'path': fixture['path']}))
+            self.assertLess(tool_output_bytes(inline_tool_output(raw)), 4096)
+            body = json.loads(raw)['content']
+            if index < 15:
+                self.assertIn(task['fixtures'][index + 1]['path'], body)
+        self.assertEqual(materials.verify_materials(self.root/'history'), instance)
+        changed = deepcopy(task)
+        changed['fixtures'][0]['sha256'] = '0' * 64
+        with self.assertRaisesRegex(materials.MaterialError, 'fixture content differs'):
+            materials.instantiate_materials(self.prepared, self.root/'changed-fixture', changed)
 
     def test_path_escape_and_changed_manifest_rejected(self):
         for relative in ('../outside','C:/outside','/outside','..\\outside'):

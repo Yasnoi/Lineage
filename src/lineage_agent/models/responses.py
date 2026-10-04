@@ -253,3 +253,80 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
     if not result["text"].strip() and not result["tool_calls"]:
         raise ModelError(result=result, code="empty_response")
     return result
+
+
+def compactable_group_items(items: list[dict[str, Any]], *, require_response: bool = True) -> bool:
+    """Check a complete text/tool protocol group without rewriting its contents.
+
+    Known reasoning may be removed with its whole group, including an opaque
+    encrypted field. The summary reader must omit that field, never decode it.
+    Unknown extensions and non-text items remain protocol barriers.
+    """
+    def has_encrypted(value: Any) -> bool:
+        if isinstance(value, dict):
+            return "encrypted_content" in value or any(has_encrypted(child) for child in value.values())
+        return isinstance(value, list) and any(has_encrypted(child) for child in value)
+
+    def text_parts(value: Any) -> bool:
+        return isinstance(value, list) and all(
+            isinstance(part, dict) and part.get("type") in {
+                "input_text", "output_text", "refusal", "reasoning_text", "summary_text", "text",
+            } and isinstance(part.get("refusal" if part.get("type") == "refusal" else "text"), str)
+            and not has_encrypted(part) for part in value
+        )
+
+    if not isinstance(items, list) or not items:
+        return False
+    pending: set[str] = set()
+    seen: set[str] = set()
+    has_response = False
+    for item in items:
+        if not isinstance(item, dict) or item.get("status") not in (None, "completed"):
+            return False
+        kind = item.get("type")
+        allowed_keys = {
+            "message": {"type", "id", "role", "status", "content", "phase"},
+            "reasoning": {"type", "id", "status", "summary", "content", "encrypted_content"},
+            "function_call": {"type", "id", "status", "call_id", "name", "arguments", "caller", "namespace", "async"},
+            "function_call_output": {"type", "id", "status", "call_id", "output"},
+        }
+        shape = "message" if kind is None and "role" in item else kind
+        if shape not in allowed_keys or set(item) - allowed_keys[shape]:
+            return False
+        if kind == "message" or kind is None and "role" in item:
+            if item.get("role") not in {"user", "assistant"} or has_encrypted(item):
+                return False
+            if item.get("phase") not in (None, "commentary", "final_answer"):
+                return False
+            content = item.get("content")
+            if not isinstance(content, str) and not text_parts(content):
+                return False
+            has_response |= item.get("role") == "assistant"
+        elif kind == "reasoning":
+            if (item.get("encrypted_content") is not None and not isinstance(item["encrypted_content"], str)
+                    or any(item.get(key) is not None and not text_parts(item[key]) for key in ("content", "summary"))):
+                return False
+        elif kind == "function_call":
+            call_id = item.get("call_id")
+            # SDK-compatible direct calls may include explicit absent metadata.
+            # Program callers, namespaces and asynchronous dependencies need a
+            # different adapter and cannot be silently reconstructed here.
+            if (item.get("caller") not in (None, {"type": "direct"})
+                    or item.get("namespace") is not None or item.get("async") not in (None, False)):
+                return False
+            if (has_encrypted(item) or not isinstance(call_id, str) or not call_id.strip()
+                    or call_id in seen or not isinstance(item.get("name"), str) or not item["name"].strip()
+                    or not isinstance(item.get("arguments"), str)):
+                return False
+            seen.add(call_id)
+            pending.add(call_id)
+            has_response = True
+        elif kind == "function_call_output":
+            call_id, output = item.get("call_id"), item.get("output")
+            if (has_encrypted(item) or not isinstance(call_id, str) or call_id not in pending
+                    or not isinstance(output, str) and not text_parts(output)):
+                return False
+            pending.remove(call_id)
+        else:
+            return False
+    return (has_response or not require_response) and not pending

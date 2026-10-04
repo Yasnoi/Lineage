@@ -552,18 +552,26 @@ class TraceSanitizer:
 
     def model_inputs(self, model_name: str, input: Any, tools: Any, *, instructions=None, tool_choice=None, active_context=None) -> dict[str, Any]:
         """Project Responses messages and nested tool envelopes before upload."""
-        summary = active_context.get("summary") if isinstance(active_context, dict) else None
-        if isinstance(summary, dict) and isinstance(input, list) and input:
-            # Explicit application provenance, not a text-prefix heuristic.
-            # Exclude the derived body before even gathering readable leaves.
-            input = [
-                {"role": "assistant", "content": "[summary content omitted]"},
-                *input[1:],
-            ]
+        spans = self.summary_spans(active_context)
+        omitted = 0
+        if spans and isinstance(input, list):
+            # Filter all application-owned positions before either content
+            # projection or metadata caps; old Runs' R messages count too.
+            positions = {span["index"] for span in spans}
+            filtered = []
+            for index, item in enumerate(input):
+                if index in positions and isinstance(item, dict) and item.get("role") == "assistant":
+                    filtered.append({"role": "assistant", "content": "[summary content omitted]"})
+                    omitted += 1
+                else:
+                    filtered.append(item)
+            input = filtered
         result: dict[str, Any] = {"model": self.text(model_name), **self._items(input, key="input")}
-        if isinstance(summary, dict):
+        if spans:
             result["active_context"] = self.active_context(active_context)
+        if omitted:
             result["summary_content_omitted"] = True
+            result["summary_items_omitted"] = omitted
         if isinstance(instructions, str):
             result["instructions"] = self.text(instructions)
         if tool_choice in ("none", "auto", "required"):
@@ -584,19 +592,69 @@ class TraceSanitizer:
             return value
         return None
 
+    @staticmethod
+    def _history_reference(value: Any) -> str | None:
+        if type(value) is str and re.fullmatch(
+            r"history://(?:scope/[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+            r"|record/[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}/[0-9]{1,16})", value,
+        ):
+            return value
+        return None
+
     @classmethod
     def _reference(cls, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
             return {}
         result: dict[str, Any] = {}
-        for key in ("run_id", "checkpoint_id", "summary_id", "source_id"):
+        for key in ("run_id", "checkpoint_id", "summary_id", "source_id", "group_id"):
             identifier = cls._identifier(value.get(key))
+            if identifier is None and key == "source_id":
+                identifier = cls._history_reference(value.get(key))
             if identifier is not None:
                 result[key] = identifier
-        for key in ("item_count", "start", "end"):
+        for key in ("history_ref", "record_ref"):
+            reference = cls._history_reference(value.get(key))
+            if reference is not None:
+                result[key] = reference
+        if value.get("lane") in ("H", "R"):
+            result["lane"] = value["lane"]
+        for key in ("item_count", "group_count", "record_end", "start", "end"):
             number = value.get(key)
             if type(number) is int and 0 <= number <= 2**63 - 1:
                 result[key] = number
+        ranges = value.get("ranges")
+        if isinstance(ranges, list):
+            # Range entries cannot recursively carry arbitrary provenance.
+            result["ranges"] = [{key: item[key] for key in ("run_id", "start", "end")
+                                  if (key == "run_id" and cls._identifier(item.get(key)) is not None)
+                                  or (key != "run_id" and type(item.get(key)) is int and 0 <= item[key] <= 2**63 - 1)}
+                                 for item in ranges[:_MAX_LINEAGE_ITEMS] if isinstance(item, dict)]
+            result["range_count"] = len(ranges)
+            if len(ranges) > _MAX_LINEAGE_ITEMS:
+                result["ranges_omitted"] = len(ranges) - _MAX_LINEAGE_ITEMS
+        return result
+
+    @classmethod
+    def summary_spans(cls, value: Any) -> list[dict[str, Any]]:
+        """Retain every safe position internally; never retain derived content."""
+        spans = value.get("summary_spans") if isinstance(value, dict) else None
+        if not isinstance(spans, list):
+            return []
+        result = []
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            index, lane = span.get("index"), span.get("lane")
+            summary_id = cls._identifier(span.get("summary_id"))
+            if type(index) is not int or not 0 <= index <= 2**63 - 1 or lane not in ("H", "R") or summary_id is None:
+                continue
+            projected = {"index": index, "lane": lane, "summary_id": summary_id}
+            run_id = cls._identifier(span.get("run_id"))
+            if run_id is not None:
+                projected["run_id"] = run_id
+            if isinstance(span.get("reference"), dict):
+                projected["reference"] = cls._reference(span["reference"])
+            result.append(projected)
         return result
 
     @classmethod
@@ -609,8 +667,15 @@ class TraceSanitizer:
             identifier = cls._identifier(value.get(key))
             if identifier is not None:
                 result[key] = identifier
-        if isinstance(value.get("summary"), dict):
-            result["summary"] = cls._reference(value["summary"])
+        for key in ("history_summary", "run_summary"):
+            if isinstance(value.get(key), dict):
+                result[key] = cls._reference(value[key])
+        spans = cls.summary_spans(value)
+        if spans:
+            result["summary_spans"] = spans[:_MAX_LINEAGE_ITEMS]
+            result["summary_span_count"] = len(spans)
+            if len(spans) > _MAX_LINEAGE_ITEMS:
+                result["summary_spans_omitted"] = len(spans) - _MAX_LINEAGE_ITEMS
         turns = value.get("turns")
         if isinstance(turns, list):
             result["turns"] = [cls._reference(turn) for turn in turns[:_MAX_LINEAGE_ITEMS]]
@@ -625,20 +690,27 @@ class TraceSanitizer:
         if not isinstance(value, dict):
             return {}
         result: dict[str, Any] = {}
-        for key in ("summary_id", "candidate_version_id", "confirmed_checkpoint_id", "summary_checkpoint_id"):
+        for key in ("summary_id", "old_version_id", "candidate_version_id", "confirmed_checkpoint_id", "summary_checkpoint_id"):
             identifier = cls._identifier(value.get(key))
             if identifier is not None:
                 result[key] = identifier
-        for key in ("request_no", "pass_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call"):
+        for key in ("request_no", "pass_no", "attempt_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call",
+                    "original_required", "candidate_required", "removed_items", "removed_turns"):
             number = value.get(key)
             if type(number) is int and 0 <= number <= 2**63 - 1:
                 result[key] = number
+        for key in ("net_reclaimed", "recovery_margin"):
+            number = value.get(key)
+            if type(number) is int and -(2**63) <= number <= 2**63 - 1:
+                result[key] = number
+        if value.get("lane") in ("H", "R"):
+            result["lane"] = value["lane"]
         step = value.get("step_id")
         if type(step) is str and re.fullmatch(r"step-[0-9]{4,16}", step):
             result["step_id"] = step
         if value.get("status") in (
             "preparing", "summary_budget_rejected", "candidate", "retry_pending", "pending_save",
-            "confirmed", "used", "stopped", "failed",
+            "confirmed", "used", "stopped", "failed", "history_ready", "current_ready", "validated",
         ):
             result["status"] = value["status"]
         reason = value.get("reason")
@@ -647,6 +719,9 @@ class TraceSanitizer:
             "summary_budget_exceeded", "summary_too_large", "summary_not_effective",
             "recovery_exhausted", "summary_refusal", "summary_tool_request", "invalid_summary",
             "context_measurement_error", "summary_model_error", "logging_error", "checkpoint_error",
+            "source_changed", "candidate_budget_exceeded", "recovery_margin_insufficient",
+            "history_record_missing", "history_reference_invalid", "invalid_source_reference",
+            "no_shortening_space", "unsupported_protocol_boundary", "no_compressible_range",
         }:
             result["reason"] = reason
         sources = value.get("sources")
@@ -657,6 +732,8 @@ class TraceSanitizer:
             result["recovery_budget"] = {
                 key: recovery[key] for key in (
                     "input_budget_tokens", "fixed_tokens", "preserved_tokens", "available_tokens", "target_tokens",
+                    "margin_required", "target_bytes", "retained_required", "available_bytes",
+                    "base_required", "hard_capacity", "soft_target",
                 ) if type(recovery.get(key)) is int and -(2**63) <= recovery[key] <= 2**63 - 1
             }
         if isinstance(sources, dict):
@@ -671,6 +748,26 @@ class TraceSanitizer:
                 if len(turns) > _MAX_LINEAGE_ITEMS:
                     source_view["turns_omitted"] = len(turns) - _MAX_LINEAGE_ITEMS
             result["sources"] = source_view
+        lanes = value.get("lanes")
+        if isinstance(lanes, dict):
+            result["lanes"] = {}
+            for lane in ("H", "R"):
+                source = lanes.get(lane)
+                if not isinstance(source, dict):
+                    continue
+                projected = cls._reference(source)
+                if source.get("status") in ("empty", "prepared", "reused", "generated", "failed"):
+                    projected["status"] = source["status"]
+                if type(source.get("model_called")) is bool:
+                    projected["model_called"] = source["model_called"]
+                for key in ("target_bytes", "summary_bytes", "summary_call"):
+                    number = source.get(key)
+                    if type(number) is int and 0 <= number <= 2**63 - 1:
+                        projected[key] = number
+                budget = cls.context_budget(source.get("summary_budget"))
+                if budget:
+                    projected["summary_budget"] = budget
+                result["lanes"][lane] = projected
         for key in ("summary_budget", "candidate_budget"):
             budget = cls.context_budget(value.get(key))
             if budget:

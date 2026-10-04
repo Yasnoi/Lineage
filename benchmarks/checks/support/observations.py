@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 
 from lineage_agent.artifacts.tools import ARTIFACT_TOOLS
+from lineage_agent.tools.history import HISTORY_TOOLS
 from lineage_agent.tools.filesystem.text import TEXT_TOOL
 
 
@@ -16,7 +17,7 @@ def inline_raw(envelope):
 
 
 def assert_tools(actual, business=()):
-    expected_names = [item["name"] for item in business] + [item["name"] for item in ARTIFACT_TOOLS]
+    expected_names = [item["name"] for item in business] + [item["name"] for item in ARTIFACT_TOOLS + HISTORY_TOOLS]
     assert [item["name"] for item in actual] == expected_names
     for delivered, original in zip(actual, business):
         if original["name"] == TEXT_TOOL["name"] and original["parameters"] == TEXT_TOOL["parameters"]:
@@ -30,7 +31,7 @@ def assert_tools(actual, business=()):
             assert hint["additionalProperties"] is False
         else:
             assert delivered == original
-    assert actual[len(business):] == ARTIFACT_TOOLS
+    assert actual[len(business):] == ARTIFACT_TOOLS + HISTORY_TOOLS
     return True
 
 

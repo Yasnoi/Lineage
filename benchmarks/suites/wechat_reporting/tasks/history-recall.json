@@ -1,0 +1,148 @@
+{
+  "unit_id": "history-recall",
+  "case_id": "history-recall",
+  "version": "1",
+  "title": "单 Run 压缩后回查小结果",
+  "capabilities": [
+    "compaction",
+    "current_run",
+    "history_recall"
+  ],
+  "turns": [
+    "从 evaluation-fixtures/history-chain/01.txt 开始按链逐份完整读取，每份只读一次；不列目录、不预取。链末给最终问题，届时用 history_search 和 history_read 查证已压缩的旧记录，禁止重新读旧文件。读完前不回答；最终按末份要求交付。所有资料为评测构造。"
+  ],
+  "settings_overrides": {
+    "context_budget_tokens": 65536,
+    "context_keep_recent_groups": 3,
+    "summary_target_percent": 40
+  },
+  "mechanism": {
+    "kind": "history_recall",
+    "chain_paths": [
+      "evaluation-fixtures/history-chain/01.txt",
+      "evaluation-fixtures/history-chain/02.txt",
+      "evaluation-fixtures/history-chain/03.txt",
+      "evaluation-fixtures/history-chain/04.txt",
+      "evaluation-fixtures/history-chain/05.txt",
+      "evaluation-fixtures/history-chain/06.txt",
+      "evaluation-fixtures/history-chain/07.txt",
+      "evaluation-fixtures/history-chain/08.txt",
+      "evaluation-fixtures/history-chain/09.txt",
+      "evaluation-fixtures/history-chain/10.txt",
+      "evaluation-fixtures/history-chain/11.txt",
+      "evaluation-fixtures/history-chain/12.txt",
+      "evaluation-fixtures/history-chain/13.txt",
+      "evaluation-fixtures/history-chain/14.txt",
+      "evaluation-fixtures/history-chain/15.txt",
+      "evaluation-fixtures/history-chain/16.txt"
+    ],
+    "target_path": "evaluation-fixtures/history-chain/02.txt",
+    "record_key": "LARCH-17",
+    "source_text": "旧记录“额度137”已经撤回；生效额度为37。不得自动放行；即使具备两份签名，也必须由值班复核员确认后手动放行。没有复核确认时仍禁止放行。"
+  },
+  "dimensions": [
+    "facts_evidence",
+    "target_coverage",
+    "uncertainty_boundaries",
+    "constraints_history",
+    "execution_consistency"
+  ],
+  "fixtures": [
+    {
+      "path": "evaluation-fixtures/history-chain/01.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/01.txt",
+      "sha256": "40b009c4eae51e797808b9b1356ead6495b293a04523bd13ae0a8b5905a59378",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/02.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/02.txt",
+      "sha256": "a7f37a1b353dfdf1481fdb12521636ca526581d4b0297f821e7d0c2568fb37aa",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/03.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/03.txt",
+      "sha256": "187a006c6d5ec18eebc0ccdeda84e72ccd7a6a67ff5ead9ef8882cb41852881f",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/04.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/04.txt",
+      "sha256": "6dbfbd13ce5024001187ac0f48fd9c930210405724312a557cbe26ce22f6a067",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/05.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/05.txt",
+      "sha256": "b83d730f84b53dd54d50812f3abc2179cce0d07356b017b709d26ad1ad6783f3",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/06.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/06.txt",
+      "sha256": "d91eb3323029753b7e15d0851ed5d18433d99c5d5ab812a575c8e705667853b4",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/07.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/07.txt",
+      "sha256": "0f1475872d41d8d1f9c3dc09ede822649bab2229c31b7d05692271e90dc8a90e",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/08.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/08.txt",
+      "sha256": "d6264a752fb02a055f868e252addd79b1af65fe48bb98171c577561504112761",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/09.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/09.txt",
+      "sha256": "74d4fc61824a9f4e4b791d8ec703c2310e26de208cd2a403559a8a7f1689b7ff",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/10.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/10.txt",
+      "sha256": "fc3137982440b17dfb9b3987a88969bb6312953f52a3f60f130e8aded1d3a7df",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/11.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/11.txt",
+      "sha256": "19cb6f43243c281585009597bac57749f8cd833e8c04c8dba6ae6af19e75033f",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/12.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/12.txt",
+      "sha256": "c68bff4f70dd049dfe45fce987a764d633bc15d29a380cb9bf22796d8b33f649",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/13.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/13.txt",
+      "sha256": "62fada7e76b35924aa7963610cc82ae2f4a253ac2296dce32f3cad9eff8283f5",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/14.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/14.txt",
+      "sha256": "994b3980145658243c422cc0fad36a50844a129788e896a1bcaf41b20909ec41",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/15.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/15.txt",
+      "sha256": "c4af87f6c0099d030ebcd0825cc86b6c56d9ee15335d98ee2cc39a214ec5c415",
+      "version": "history-chain-v1"
+    },
+    {
+      "path": "evaluation-fixtures/history-chain/16.txt",
+      "text_path": "benchmarks/suites/wechat_reporting/fixtures/history-chain-v1/16.txt",
+      "sha256": "81069d6275e811a3a75559310683e95aac4884af35b469fb0af26caaadaed968",
+      "version": "history-chain-v1"
+    }
+  ]
+}

@@ -86,13 +86,37 @@ def stable(state):
     # Independent runs allocate independent version and checkpoint identities.
     # Keep the descriptor shape, turn order and all behavioral data comparable.
     active = value.get("active_context")
+    identities = {state["run_id"]: "<current-run>"}
     if active:
         active["version_id"] = "<active-version>"
         if active["parent_version_id"] is not None:
             active["parent_version_id"] = "<parent-version>"
         for index, turn in enumerate(active["turns"]):
+            identities[turn["run_id"]] = f"<turn-{index}>"
             turn["run_id"] = f"<turn-{index}>"
             turn["checkpoint_id"] = f"<checkpoint-{index}>"
+        for group in active.get("groups", []):
+            group["group_id"] = group["group_id"].replace(state["run_id"], "<current-run>")
+        for index, reference in enumerate(active.get("item_refs", [])):
+            if isinstance(reference, str):
+                for identifier, replacement in identities.items():
+                    reference = reference.replace(identifier, replacement)
+                active["item_refs"][index] = reference
+    # Raw protocol bodies and business call IDs remain exact. Only the new
+    # application-owned record identities vary across otherwise equal runs.
+    for record in value.get("record_batch", []):
+        for key in ("run_id", "group_id", "source_ref"):
+            if isinstance(record.get(key), str):
+                for identifier, replacement in identities.items():
+                    record[key] = record[key].replace(identifier, replacement)
+    metrics = value.get("record_metrics", {})
+    if "checkpoint_serialized_bytes" in metrics:
+        measured = metrics["checkpoint_serialized_bytes"]
+        assert type(measured) is int and measured >= 0
+        # Native checkpoint serialization can compress distinct UUIDs to
+        # different lengths. Keep availability/positive storage use comparable.
+        if measured:
+            metrics["checkpoint_serialized_bytes"] = "<positive-byte-measurement>"
     return value
 
 def hanging_upload_child():

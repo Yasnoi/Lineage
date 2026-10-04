@@ -326,14 +326,15 @@ class JudgeScopeDefinitionTests(unittest.TestCase):
                     else:
                         manual = True
                     self.assertEqual(scope, 'human_only' if manual else 'model_suggestion', item['id'])
-        self.assertEqual(counts, {'conditions': [37, 19], 'severe_errors': [9, 18], 'mechanism_review': [0, 2]})
+        self.assertEqual(counts, {'conditions': [41, 20], 'severe_errors': [9, 19], 'mechanism_review': [0, 3]})
 
     def test_scope_metadata_does_not_change_existing_scoring_standards(self):
         from benchmarks.suites.wechat_reporting.suite import HERE, load_rubric
         archived = json.loads((HERE / 'history/rubric-v2.json').read_text(encoding='utf-8'))
         current = load_rubric()
         self.assertEqual(archived['version'], 'wechat-rubric-v2')
-        self.assertEqual(current['version'], 'wechat-rubric-v3')
+        self.assertEqual(current['version'], 'wechat-rubric-v4')
+        current['cases'].pop('history-recall')
         current['version'] = archived['version']
         for rule in current['cases'].values():
             for group in rubric.ASSESSMENT_GROUPS:

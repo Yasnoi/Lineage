@@ -23,6 +23,7 @@ _COMPACTION_STAGE_LABELS: dict[CompactionStatus, str] = {
     "candidate": "候选已生成", "retry_pending": "等待再次压缩", "pending_save": "版本等待保存确认",
     "confirmed": "版本保存已确认", "used": "新版本已用于业务请求",
     "stopped": "未切换并停止", "failed": "压缩失败",
+    "history_ready": "历史摘要已准备", "current_ready": "当前前缀摘要已准备", "validated": "候选检查通过",
 }
 
 
@@ -50,6 +51,18 @@ def format_run_summary(state: AgentState) -> str:
             summary += f"（{compaction['reason']}）"
         if compaction.get("summary_id"):
             summary += f"，摘要 {compaction['summary_id']}"
+        if compaction.get("attempt_no"):
+            summary += f"，第 {compaction['attempt_no']} 次尝试"
+        lanes = compaction.get("lanes", {})
+        if lanes:
+            details = []
+            labels = {"empty": "无来源", "prepared": "待生成", "reused": "复用", "generated": "已生成", "failed": "失败"}
+            for lane, value in lanes.items():
+                details.append(f"{lane}：{labels.get(value.get('status'), '未确认')}")
+            summary += "\n摘要分路：" + "，".join(details)
+        if "net_reclaimed" in compaction and "recovery_margin" in compaction:
+            summary += (f"\n上下文净回收：{compaction['net_reclaimed']}；"
+                        f"恢复余量：{compaction['recovery_margin']}（本地预算估算单位）")
         if compaction.get("confirmed_checkpoint_id"):
             summary += f"\n版本确认检查点：{compaction['confirmed_checkpoint_id']}"
     budget = TraceSanitizer.context_budget(state.get("context_budget"))

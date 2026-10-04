@@ -1,5 +1,5 @@
 {
-  "version": "wechat-rubric-v3",
+  "version": "wechat-rubric-v4",
   "reviewer": "human_or_calibrated_llm",
   "scope": "固定材料与当前只读 Research；构造变体不代表原仓库缺陷。",
   "decision_rule": "适用必需项全部满足、无严重错误且必要机制得到确认才通过；未完成评审保持待评审。",
@@ -747,6 +747,79 @@
           "id": "source-retention",
           "required": true,
           "description": "结合保存摘要及机制证据，确认最终结论可追到被压缩的旧记录；摘要存在不等于事实保留正确。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "history-recall": {
+      "conditions": [
+        {
+          "id": "history-recall-exact-correction",
+          "dimension": "facts_evidence",
+          "description": "明确旧额度137被撤回、生效额度37；逐字证据来自真实读取的原始记录，不将摘要来源编号合法视为事实正确。",
+          "required": true,
+          "source_refs": [
+            "evaluation-fixtures/history-chain/02.txt",
+            "evaluation-fixtures/history-chain/16.txt"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "history-recall-negative-condition",
+          "dimension": "target_coverage",
+          "description": "明确不得自动放行；两份签名仍不足以自动放行，必须由值班复核员确认后手动放行，未确认仍禁止。",
+          "required": true,
+          "source_refs": [
+            "evaluation-fixtures/history-chain/02.txt",
+            "evaluation-fixtures/history-chain/16.txt"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "history-recall-constructed-boundary",
+          "dimension": "uncertainty_boundaries",
+          "description": "只描述评测构造档案，不将条件归为目标项目事实或声称执行了测试。",
+          "required": true,
+          "source_refs": [
+            "evaluation-fixtures/history-chain/02.txt",
+            "evaluation-fixtures/history-chain/16.txt"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "history-recall-requested-format",
+          "dimension": "constraints_history",
+          "description": "按额度、自动放行、原始证据及history引用三行交付，保留数字、否定和修正。",
+          "required": true,
+          "source_refs": [
+            "evaluation-fixtures/history-chain/02.txt",
+            "evaluation-fixtures/history-chain/16.txt"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "history-recall-execution",
+          "dimension": "execution_consistency",
+          "description": "实际完成资料链和压缩后history_search/history_read；目标记录已移出活动输入且属于R覆盖，未重新读取旧文件。",
+          "required": true,
+          "source_refs": [
+            "evaluation-fixtures/history-chain/02.txt",
+            "evaluation-fixtures/history-chain/16.txt"
+          ],
+          "judge_scope": "human_only"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-history",
+          "description": "伪造原文、history引用、已读取范围或执行成功；把已撤回额度当生效值，或把禁止自动放行说成允许。",
+          "judge_scope": "human_only"
+        }
+      ],
+      "mechanism_review": [
+        {
+          "id": "history-recall-semantic-support",
+          "description": "对照真实H/R摘要及原始记录复核数字、否定、修正和来源支持。若关键细节仍在摘要中，标记摘要遗漏条件未覆盖，不以回读发生证明遗漏恢复。",
           "judge_scope": "human_only"
         }
       ]

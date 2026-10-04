@@ -391,7 +391,9 @@ async def check_integration():
         first_calls = [artifact_call("artifact_first", "artifact_read", ref, start=0, end=None),
                        call("ordinary", name="read_text_file", arguments='{"path":"small.txt"}')]
         first, client, _ = await run_turn(manager, sid, [response(*first_calls), response(message())], "artifact_first_run")
-        assert {tool["name"] for tool in client.requests[0]["tools"]} == {"read_text_file", "artifact_read", "artifact_search"}
+        assert {tool["name"] for tool in client.requests[0]["tools"]} == {
+            "read_text_file", "artifact_read", "artifact_search", "history_read", "history_search",
+        }
         assert first.state["tool_outcomes"]["succeeded"] == 2
         first_outputs = outputs(first.state)
         assert [item["call_id"] for item in first_outputs] == ["artifact_first", "ordinary"]

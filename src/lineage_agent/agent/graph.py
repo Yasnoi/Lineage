@@ -13,6 +13,7 @@ from lineage_agent.agent.state import AgentState, CompactionRequestOptions, Comp
 from lineage_agent.agent.compaction import MAX_COMPACT_PASSES, SummaryCall, build_compaction_nodes
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
+from lineage_agent.agent.records import make_record_batch
 from lineage_agent.config.settings import DEFAULT_MAX_MODEL_CALLS, ModelSettings
 from lineage_agent.models.budget import (
     annotate_context_risks, budget_measurement_error, check_context_budget,
@@ -73,6 +74,37 @@ def build_graph(
     available_tools = tools or []
 
     def finish(state: AgentState, update: dict[str, Any], node: str, step_id: str | None) -> dict[str, Any]:
+        update.setdefault("record_batch", [])
+        appended = update.get("input", [])
+        new_model = node == "model" and update.get("model_calls", state["model_calls"]) > state["model_calls"]
+        if new_model or node == "tools":
+            active = deepcopy(state["active_context"])
+            model_call = update.get("model_calls", state["model_calls"])
+            group_id = f"{state['run_id']}:{model_call}"
+            batch = make_record_batch(state["run_id"], state["record_sequence"], appended,
+                                      group_id=group_id, kind="model" if new_model else "tool",
+                                      call_facts=update.get("new_call_facts", []))
+            update.pop("new_call_facts", None)
+            sequence = state["record_sequence"] + len(batch)
+            update.update(record_batch=batch, record_sequence=sequence,
+                          record_revision=state["record_revision"] + bool(batch))
+            active["item_refs"] += [r["source_ref"] for r in batch if r.get("item") is not None]
+            closed = update.get("history_end", state["history_end"]) == len(state["input"]) + len(appended)
+            if new_model:
+                if appended:
+                    active["groups"].append({"group_id": group_id, "model_call": model_call,
+                        "start": len(state["input"]), "end": len(state["input"]) + len(appended),
+                        "record_start": state["record_sequence"], "record_end": sequence, "closed": closed})
+                update["run_call_ids"] = state["run_call_ids"] + [item["call_id"] for item in appended
+                    if item.get("type") == "function_call" and isinstance(item.get("call_id"), str)]
+                update["record_admitted_through"] = sequence if closed else state["record_sequence"]
+            elif active["groups"]:
+                active["groups"][-1].update(end=len(state["input"]) + len(appended), record_end=sequence, closed=closed)
+                if closed:
+                    update["record_admitted_through"] = sequence
+            if appended:
+                active.update(parent_version_id=active["version_id"], version_id=str(uuid4()))
+            update["active_context"] = active
         # Checkpoint writes can fail before LangGraph yields a node's update.
         # Keep only this run's actual facts, never a second history store.
         if observe_state is not None:
@@ -92,33 +124,6 @@ def build_graph(
         if tracer is not None:
             tracer.bind_active_context(state["active_context"])
         compaction: CompactionState | None = deepcopy(state["compaction"])
-        if compaction is not None and compaction["status"] == "retry_pending":
-            assert context_records is not None
-            checkpoint_id = context_records.confirmed()
-            saved = await context_records.saver.read_confirmed(context_records.session_id, checkpoint_id)
-            saved_attempt = saved.checkpoint["channel_values"].get("compaction", {})
-            if (saved.checkpoint["channel_values"].get("run_id") != state["run_id"]
-                    or saved_attempt.get("status") != "retry_pending"
-                    or saved_attempt.get("summary_id") != compaction["summary_id"]
-                    or saved_attempt.get("request_no") != compaction["request_no"]
-                    or saved_attempt.get("pass_no") != 1
-                    or not 1 <= compaction["pass_no"] < MAX_COMPACT_PASSES
-                    or compaction.get("request_no") != state["model_calls"] + 1):
-                raise CheckpointError("checkpoint_read_error")
-            # Preserve the first attempt in its own checkpoints. Replacing it
-            # only after this barrier also keeps its summary_result association
-            # intact if preparing or saving the second attempt fails.
-            second: CompactionState = {
-                "request_no": compaction["request_no"], "pass_no": compaction["pass_no"] + 1,
-                "summary_id": str(uuid4()), "status": "preparing", "reason": None,
-                "candidate_input": {"summary_id": compaction["summary_id"],
-                                    "checkpoint_id": compaction["summary_checkpoint_id"]},
-                **{key: deepcopy(compaction[key]) for key in (
-                    "request_options", "old_version_id", "sources", "removed_items", "removed_turns",
-                    "source_headers", "outcome_headers", "opaque_omissions",
-                )},
-            }
-            return finish(state, {"compaction": second}, "model", step_id)
         if compaction is not None and compaction["status"] == "pending_save":
             assert context_records is not None
             checkpoint_id = context_records.confirmed()
@@ -182,7 +187,7 @@ def build_graph(
                 compaction is None or compaction["request_no"] != state["model_calls"] + 1
             ):
                 compaction = {
-                    "request_no": state["model_calls"] + 1, "pass_no": 1, "summary_id": str(uuid4()),
+                    "request_no": state["model_calls"] + 1, "attempt_no": 1, "pass_no": 1, "summary_id": str(uuid4()),
                     "status": "preparing", "reason": None,
                     "request_options": request_options,
                     "old_version_id": state["active_context"]["version_id"],
@@ -290,6 +295,7 @@ def build_graph(
                     item["call_id"] for item in state["input"]
                     if item.get("type") == "function_call"
                 }
+                previous_ids.update(state["run_call_ids"])
                 ids = [call["call_id"] for call in calls]
                 if len(set(ids)) != len(ids) or any(value in previous_ids for value in ids):
                     failure = ("duplicate_call_id", "response_validation")
@@ -317,7 +323,11 @@ def build_graph(
                 else "max_model_calls" if update["stop_reason"] == "max_model_calls"
                 else "protocol_error"
             )
+            facts = []
             for index, call in enumerate(requests, 1):
+                facts.append({"call_id": call.get("call_id"), "name": call.get("name"), "request_index": index,
+                              "outcome": "skipped", "stage": "routing", "reason_code": reason,
+                              "executor_entered": False, "protocol_output_created": False, "output": None})
                 update["tool_outcomes"]["skipped"] += 1
                 emit(
                     "tool.skipped", step_id, "model",
@@ -327,6 +337,8 @@ def build_graph(
                     tracer.tool_skipped(
                         call, step_id=step_id, request_index=index, reason=reason,
                     )
+            update["new_call_facts"] = facts
+            update["execution_facts"] = state["execution_facts"] + [{k: v for k, v in fact.items() if k != "output"} for fact in facts]
         if recorder is not None and recorder.failed:
             update.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
         if tracer is not None:
@@ -338,6 +350,11 @@ def build_graph(
                 stage=trace_failure[1] if trace_failure else None,
             )
         if compaction is not None and compaction.get("request_no") == model_calls and compaction["status"] == "used":
+            events = deepcopy(state["compaction_events"])
+            for event in events:
+                if event["request_no"] == compaction["request_no"] and event["attempt_no"] == compaction["attempt_no"]:
+                    event.update(status="used", confirmed_checkpoint_id=compaction["confirmed_checkpoint_id"])
+            update["compaction_events"] = events
             emit("compaction.used", step_id, "model", summary_id=compaction["summary_id"],
                  version_id=state["active_context"]["version_id"],
                  checkpoint_id=compaction["confirmed_checkpoint_id"], model_call=model_calls)
@@ -351,16 +368,25 @@ def build_graph(
         step_id = recorder.next_step() if recorder is not None else None
         result = state["result"]
         assert result is not None
-        batch = await execute_calls(
-            result["tool_calls"], available_tools, execute_tool,
-            recorder=recorder, step_id=step_id,
-            tracer=tracer,
-            observation_manager=observation_manager,
-            observation_hint_tools=observation_hint_tools,
-            native_recall_tools=native_recall_tools,
-        )
+        interrupted = None
+        try:
+            batch = await execute_calls(
+                result["tool_calls"], available_tools, execute_tool,
+                recorder=recorder, step_id=step_id, tracer=tracer,
+                observation_manager=observation_manager,
+                observation_hint_tools=observation_hint_tools,
+                native_recall_tools=native_recall_tools,
+            )
+        except BaseException as exc:
+            batch = getattr(exc, "tool_batch", None)
+            if batch is None:
+                raise
+            interrupted = exc
         update: dict[str, Any] = {
             "input": batch["output_items"],
+            "new_call_facts": batch["call_facts"],
+            "execution_facts": state["execution_facts"] + [{k: v for k, v in fact.items() if k != "output"}
+                for fact in batch["call_facts"]],
             "context_risks": state["context_risks"] + annotate_context_risks(
                 batch["output_items"], fallback_tokens=settings.opaque_fallback_tokens,
                 run_id=state["run_id"],
@@ -379,13 +405,16 @@ def build_graph(
             call["call_id"] for call in result["tool_calls"]
         ]:
             update["history_end"] = len(state["input"]) + len(batch["output_items"])
-        return finish(state, update, "tools", step_id)
+        updated = finish(state, update, "tools", step_id)
+        if interrupted is not None:
+            raise interrupted
+        return updated
 
     def after_model(state: AgentState) -> str:
         if state["stop_reason"] is not None:
             return END
         if (state["compaction"] or {}).get("status") == "preparing":
-            return "summary"
+            return "prepare_compaction"
         return "tools"
 
     def after_tools(state: AgentState) -> str:
@@ -394,17 +423,22 @@ def build_graph(
     builder = StateGraph(AgentState)
     builder.add_node("model", model_node)
     builder.add_node("tools", tools_node)
-    summarize, activate = build_compaction_nodes(
+    nodes = build_compaction_nodes(
         settings=settings, records=context_records, call_summary=call_summary,
         prepare_model_request=prepare_model_request, recorder=recorder, tracer=tracer,
         finish=finish, accumulate_usage=_accumulate_usage,
         validate_input=validate_input or (lambda items: None),
     )
-    builder.add_node("summary", summarize)
-    builder.add_node("activate_context", activate)
+    for name, node in nodes.items():
+        builder.add_node(name, node)
     builder.add_edge(START, "model")
-    builder.add_conditional_edges("model", after_model, {"tools": "tools", "summary": "summary", END: END})
-    builder.add_conditional_edges("tools", after_tools, {"model": "model", END: END})
-    builder.add_conditional_edges("summary", lambda state: END if state["stop_reason"] else "activate_context")
-    builder.add_conditional_edges("activate_context", lambda state: END if state["stop_reason"] else "model")
+    builder.add_conditional_edges("model", after_model)
+    builder.add_conditional_edges("tools", after_tools)
+    for source, target in (("prepare_compaction", "summarize_history"),
+                           ("summarize_history", "summarize_current"),
+                           ("summarize_current", "validate_candidate"),
+                           ("activate_context", "model")):
+        builder.add_conditional_edges(source, lambda state, target=target: END if state["stop_reason"] else target)
+    builder.add_conditional_edges("validate_candidate", lambda state: END if state["stop_reason"] else
+                                  "prepare_compaction" if state["compaction"]["status"] == "retry_pending" else "activate_context")
     return builder.compile(checkpointer=checkpointer)

@@ -15,19 +15,29 @@ class RecordReference(TypedDict):
 
 class TurnReference(RecordReference):
     item_count: int
+    group_count: int
+    record_end: int
 
 
 class SummaryReference(TypedDict):
     summary_id: str
     checkpoint_id: str
+    lane: str
+    history_ref: str
+    ranges: list[dict[str, Any]]
 
 
 class ActiveContext(TypedDict):
     version_id: str
     parent_version_id: str | None
-    summary: SummaryReference | None
+    history_summary: SummaryReference | None
+    run_summary: SummaryReference | None
     turns: list[TurnReference]
     turn_start: int
+    initial_input_count: int
+    groups: list[dict[str, Any]]
+    item_refs: list[str | None]
+    summary_spans: list[dict[str, Any]]
 
 
 class CompactionRequestOptions(TypedDict):
@@ -35,59 +45,40 @@ class CompactionRequestOptions(TypedDict):
     tool_choice: Literal["none"] | None
 
 
-class CompactionSources(TypedDict):
-    previous_summary: SummaryReference | None
-    added_turns: list[TurnReference]
-
-
 CompactionStatus = Literal[
     "preparing", "summary_budget_rejected", "candidate", "retry_pending", "pending_save",
-    "confirmed", "used", "stopped", "failed",
+    "confirmed", "used", "stopped", "failed", "history_ready", "current_ready", "validated",
 ]
 
 
 class CompactionState(TypedDict):
-    """One of at most two recoveries for a business request, with saved evidence.
-
-    An early stop can precede creation of a summary ID. Later fields become
-    available at the milestones below and survive a subsequent stop/failure.
-    These annotations do not validate checkpoints or acknowledge their saving.
-    """
+    """One complete H/R attempt; original facts remain in the checkpoint chain."""
 
     request_no: int
+    attempt_no: int
     status: CompactionStatus
     reason: str | None
-
-    # Preparing an actual attempt.
+    request_options: CompactionRequestOptions
     pass_no: NotRequired[int]
-    summary_id: NotRequired[str]
-    old_version_id: NotRequired[str]
-    request_options: NotRequired[CompactionRequestOptions]
     step_id: NotRequired[str | None]
-    # Source selection and summary request checking.
-    sources: NotRequired[CompactionSources]
-    # A second attempt derives only from this saved, never-activated candidate.
-    candidate_input: NotRequired[SummaryReference]
-    source_headers: NotRequired[list[dict[str, Any]]]
-    outcome_headers: NotRequired[list[dict[str, Any]]]
-    opaque_omissions: NotRequired[list[dict[str, Any]]]
-    allowed_source_ids: NotRequired[list[str]]
-    removed_items: NotRequired[int]
+    old_version_id: NotRequired[str]
+    snapshot: NotRequired[dict[str, Any]]
+    lanes: NotRequired[dict[str, dict[str, Any]]]
+    removed_indices: NotRequired[list[int]]
     removed_turns: NotRequired[int]
-    recovery_budget: NotRequired[dict[str, int]]
-    summary_budget: NotRequired[ContextBudget]
-    summary_request_sha256: NotRequired[str]
-    summary_call: NotRequired[int]
-    cause_code: NotRequired[str]
-    # Validated candidate; the raw model response remains in summary_result.
-    document: NotRequired[dict[str, list[dict[str, Any]]]]
-    message: NotRequired[dict[str, Any]]
-    summary_bytes: NotRequired[int]
+    removed_groups: NotRequired[list[str]]
     candidate_version_id: NotRequired[str]
+    original_required: NotRequired[int]
+    candidate_required: NotRequired[int]
+    net_reclaimed: NotRequired[int]
+    recovery_margin: NotRequired[int]
+    recovery_budget: NotRequired[dict[str, int]]
     candidate_budget: NotRequired[ContextBudget]
-    # pending_save refers to the confirmed candidate, not a confirmed activation.
+    summary_budget: NotRequired[ContextBudget]
+    summary_call: NotRequired[int]
+    summary_lane: NotRequired[str]
+    summary_id: NotRequired[str]
     summary_checkpoint_id: NotRequired[str]
-    # Added only after activation saving is confirmed; retained when used.
     confirmed_checkpoint_id: NotRequired[str]
 
 
@@ -109,6 +100,15 @@ class AgentState(TypedDict):
     context_budget: ContextBudget | None
     active_context: ActiveContext
     compaction: CompactionState | None
+    compaction_events: list[dict[str, Any]]
+    record_batch: list[dict[str, Any]]
+    record_sequence: int
+    record_revision: int
+    record_admitted_through: int
+    history_scopes: dict[str, dict[str, Any]]
+    record_metrics: dict[str, int]
+    execution_facts: list[dict[str, Any]]
+    run_call_ids: list[str]
     summary_calls: int
     summary_result: ModelResult | None
     summary_usage_totals: UsageTotals

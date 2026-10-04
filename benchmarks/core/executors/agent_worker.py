@@ -17,6 +17,7 @@ from benchmarks.core.processes import require_local_agent as _require_local_agen
 from benchmarks.core.contracts import known, not_applicable, unknown
 from benchmarks.core.budgets import RequestBudget, WorkerAbort
 from benchmarks.core.evidence import ObservedTools, Observer, digest
+from benchmarks.core.compact_evidence import HISTORY_CHECKS, history_coverage, material, source_has_text, summary_lane, turn_compact_evidence
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
@@ -39,7 +40,8 @@ COMPACTION_CHECKS = (
 
 def planned_coverage(mechanism: dict | None) -> list[dict]:
     kind = (mechanism or {}).get("kind")
-    names = COMPACTION_CHECKS if kind == "compaction" else ("actual_read_limit",) if kind == "read_limit" else ()
+    names = (COMPACTION_CHECKS if kind == "compaction" else HISTORY_CHECKS if kind == "history_recall"
+             else ("actual_read_limit",) if kind == "read_limit" else ())
     return [{"name": name, "status": "gap", "reason": "mechanism not yet observed", "evidence": []} for name in names]
 
 
@@ -58,9 +60,9 @@ def value_or_unknown(value, reason="not observed") -> dict:
 
 def make_settings(spec: dict) -> ModelSettings:
     profile = spec["profile"]
-    retired = set(profile) & {"context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"}
+    retired = set(profile) & {"context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes", "context_keep_recent_turns"}
     if retired:
-        raise ConfigurationError("请移除旧 Compact 配置并使用 SUMMARY_TARGET_PERCENT：" + ", ".join(sorted(retired)))
+        raise ConfigurationError("请移除旧 Compact 配置；组保护使用 CONTEXT_KEEP_RECENT_GROUPS，摘要比例使用 SUMMARY_TARGET_PERCENT：" + ", ".join(sorted(retired)))
     allowed = {field.name for field in fields(ModelSettings)} - {"log_dir", "project_root"}
     values = {key: value for key, value in profile.items() if key in allowed}
     return ModelSettings(**values, project_root=Path(spec["material_root"]),
@@ -86,6 +88,9 @@ def usage_metrics(observer: Observer) -> dict:
         metrics[key + "_missing_requests"] = known(len(observer.request_events) - len(values))
     metrics["mean_request_seconds"] = (known(sum(observer.request_durations) / len(observer.request_durations))
                                        if observer.request_durations else unknown("no completed transport observation"))
+    for purpose in ("summary", "business"):
+        metrics[purpose + "_request_seconds"] = known(sum(duration for event, duration in
+            zip(observer.request_events, observer.request_durations) if event["purpose"] == purpose))
     complete = bool(observer.request_events) and all(
         metrics[key + "_missing_requests"]["value"] == 0 for key in ("input_tokens", "cached_input_tokens"))
     if complete and metrics["input_tokens"]["value"] > 0 and metrics["cached_input_tokens"]["value"] <= metrics["input_tokens"]["value"]:
@@ -125,11 +130,12 @@ def context_projection(state: dict) -> dict:
     active = state.get("active_context") or {}
     compaction = state.get("compaction") or {}
     return {"active_version": value_or_unknown(active.get("version_id")),
-            "summary": known(active["summary"]) if active.get("summary") else not_applicable("no active summary"),
+            "history_summary": known(active["history_summary"]) if active.get("history_summary") else not_applicable("no historical summary"),
+            "run_summary": known(active["run_summary"]) if active.get("run_summary") else not_applicable("no current summary"),
             "compaction": {key: deepcopy(compaction[key]) for key in (
-                "status", "reason", "summary_id", "old_version_id", "candidate_version_id", "sources",
-                "removed_items", "removed_turns", "summary_checkpoint_id", "confirmed_checkpoint_id",
-                "pass_no", "candidate_input", "summary_request_sha256", "recovery_budget",
+                "status", "reason", "request_no", "attempt_no", "old_version_id", "candidate_version_id",
+                "removed_items", "removed_turns", "confirmed_checkpoint_id", "recovery_budget",
+                "candidate_budget", "net_reclaimed", "recovery_margin", "lanes",
             ) if key in compaction}}
 
 
@@ -147,88 +153,102 @@ def read_limit_coverage(observer: Observer, mechanism: dict) -> dict:
 def compaction_coverage(observer: Observer, states: list[dict], old_record: dict | None,
                         unchanged_record: bool | None, prompts: list[str], mechanism: dict,
                         summary_record: dict | None = None) -> list[dict]:
-    source_turn = mechanism["source_turn"]
-    pressure_turn = mechanism["pressure_turn"]
-    follow_up_turn = mechanism["follow_up_turn"]
+    source_turn, pressure_turn, follow_up_turn = (mechanism[key] for key in ("source_turn", "pressure_turn", "follow_up_turn"))
     proofs = {}
     proofs["setup_without_compaction"] = len(states) >= pressure_turn - 1 and all(s.get("summary_calls") == 0 for s in states[:pressure_turn - 1])
     summary_requests = [r for r in observer.requests.get(pressure_turn, []) if is_summary_request(r)]
     compacted = states[pressure_turn - 1] if len(states) >= pressure_turn else {}
     before = states[pressure_turn - 2] if len(states) >= pressure_turn - 1 else {}
-    compaction = compacted.get("compaction") or {}
-    active = compacted.get("active_context") or {}
+    compaction, active = compacted.get("compaction") or {}, compacted.get("active_context") or {}
     attempts = (summary_record or {}).get("summary_results", [])
-    lineage_valid = bool(1 <= len(attempts) <= 2 and len(attempts) == len(summary_requests)
+    lineage_valid = bool(1 <= len(attempts) <= 4 and len(attempts) == len(summary_requests)
                          and (summary_record or {}).get("run_id") == compacted.get("run_id"))
+    seen, prior_lanes = set(), {}
     for index, attempt in enumerate(attempts):
         entry = attempt.get("compaction") or {}
+        lane = summary_lane(summary_requests[index]) if index < len(summary_requests) else None
+        value = entry.get("lanes", {}).get(lane, {})
+        identity = (entry.get("request_no"), entry.get("attempt_no"), lane)
         lineage_valid = lineage_valid and (
-            entry.get("pass_no") == index + 1
-            and entry.get("request_no") == compaction.get("request_no")
-            and index < len(summary_requests)
-            and entry.get("summary_request_sha256") == digest(summary_requests[index])
-        )
-        if index:
-            previous = attempts[index - 1]
-            previous_entry = previous.get("compaction") or {}
-            lineage_valid = lineage_valid and entry.get("candidate_input") == {
-                "summary_id": previous_entry.get("summary_id"), "checkpoint_id": previous.get("checkpoint_id"),
-            } and entry.get("sources") == previous_entry.get("sources")
-            try:
-                material = json.loads(summary_requests[index]["input"][0]["content"])
-                lineage_valid = lineage_valid and material["candidate_input"] == {
-                    **entry["candidate_input"], "document": previous_entry["document"],
-                } and "previous_summary" not in material and all("payload" not in item for item in material["sources"])
-            except (KeyError, IndexError, TypeError, ValueError):
-                lineage_valid = False
-    last = (attempts[-1].get("compaction") or {}) if attempts else {}
-    lineage_valid = lineage_valid and last.get("summary_id") == compaction.get("summary_id")
+            lane in {"H", "R"} and entry.get("attempt_no") in {1, 2}
+            and entry.get("request_no") == compaction.get("request_no") and identity not in seen
+            and value.get("summary_request_sha256") == digest(summary_requests[index]))
+        try:
+            lineage_valid = lineage_valid and json.loads(attempt["result"]["text"]) == value.get("document")
+        except (KeyError, TypeError, ValueError):
+            lineage_valid = False
+        seen.add(identity)
+        if entry.get("attempt_no") == 2:
+            previous = prior_lanes.get(lane, {})
+            retry = material(summary_requests[index])
+            candidate = retry.get("candidate_input", {})
+            lineage_valid = lineage_valid and bool(previous) and (
+                candidate.get("document") == previous.get("document")
+                and candidate.get("summary_id") == previous.get("summary_id")
+                and candidate.get("checkpoint_id")
+                and candidate == value.get("candidate_input")
+                and all("payload" not in item for item in retry.get("sources", [])))
+        prior_lanes[lane] = value
+    ref = active.get("history_summary") or {}
+    last_h = compaction.get("lanes", {}).get("H", {})
     proofs["summary_saved_and_activated"] = bool(
-        lineage_valid and compaction.get("status") == "used"
-        and compaction.get("summary_checkpoint_id") and compaction.get("confirmed_checkpoint_id")
-        and active.get("summary") and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
-    source_items = []
-    try:
-        source_items = json.loads(summary_requests[0]["input"][0]["content"])["sources"]
-    except (IndexError, KeyError, TypeError, ValueError):
-        pass
+        lineage_valid and compaction.get("status") == "used" and compaction.get("confirmed_checkpoint_id")
+        and ref.get("summary_id") == last_h.get("summary_id") and ref.get("checkpoint_id")
+        and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
+    source_items = [source for request in summary_requests if summary_lane(request) == "H"
+                    for source in material(request).get("sources", []) if "payload" in source]
     first_run = states[source_turn - 1].get("run_id") if len(states) >= source_turn else None
-    selected = [source for source in source_items if str(source.get("source_id", "")).startswith(str(first_run) + ":")]
+    selected = [source for source in source_items if str(source.get("source_id", "")).startswith(f"history://record/{first_run}/")]
     admitted = (old_record or {}).get("admitted_input", [])
     old_tools = [item for item in admitted if item.get("type") == "function_call_output"]
-    proofs["old_record_selected"] = bool(old_tools and selected and all(
-        any(source.get("payload") == item for source in selected) for item in old_tools))
+    def original_selected(item):
+        for source in selected:
+            try:
+                payload = source["payload"]
+                if (json.loads(payload) if isinstance(payload, str) else payload)["item"] == item:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                pass
+        return False
+    proofs["old_record_selected"] = bool(old_tools) and all(original_selected(item) for item in old_tools)
     old_user_items = [item for item in admitted if item.get("role") == "user"]
-    proofs["old_user_requirements_selected"] = bool(old_user_items and all(
-        any(source.get("payload") == item for source in selected) for item in old_user_items))
+    proofs["old_user_requirements_selected"] = bool(old_user_items) and all(original_selected(item) for item in old_user_items)
     following = [r for r in observer.requests.get(follow_up_turn, []) if not is_summary_request(r)]
-    message = compaction.get("message")
+    h_spans = [span for span in active.get("summary_spans", [])
+               if span.get("lane") == "H" and span.get("summary_id") == ref.get("summary_id")]
+    message = compacted["input"][h_spans[0]["index"]] if len(h_spans) == 1 else None
+    try:
+        inserted = json.loads(message["content"])
+        proofs["summary_saved_and_activated"] &= (
+            inserted["document"] == last_h.get("document") and inserted["summary_id"] == ref.get("summary_id")
+            and inserted["history"]["history_ref"] == ref.get("history_ref"))
+    except (KeyError, TypeError, ValueError):
+        proofs["summary_saved_and_activated"] = False
     proofs["following_uses_saved_version"] = bool(
         following and message and following[0].get("input") == compacted.get("input", []) + [{"role": "user", "content": prompts[follow_up_turn - 1]}]
         and following[0]["input"][0] == message)
-    proofs["old_tool_originals_removed"] = bool(following and old_tools and all(
-        item not in following[0].get("input", []) for item in old_tools))
-    proofs["old_user_originals_removed"] = bool(following and old_user_items and all(
-        item not in following[0].get("input", []) for item in old_user_items))
-    proofs["following_keeps_selected_version"] = bool(len(states) >= follow_up_turn and states[follow_up_turn - 1].get("summary_calls") == 0
-        and (states[follow_up_turn - 1].get("active_context") or {}).get("version_id") == active.get("version_id"))
+    proofs["old_tool_originals_removed"] = bool(following and old_tools and all(item not in following[0].get("input", []) for item in old_tools))
+    proofs["old_user_originals_removed"] = bool(following and old_user_items and all(item not in following[0].get("input", []) for item in old_user_items))
+    # Ordinary appends now change the active version, so compare the stable saved
+    # summary identity rather than requiring an unchanged overall view version.
+    proofs["following_keeps_selected_version"] = bool(
+        len(states) >= follow_up_turn and states[follow_up_turn - 1].get("summary_calls") == 0
+        and (states[follow_up_turn - 1].get("active_context") or {}).get("history_summary") == active.get("history_summary")
+        and ref)
     proofs["no_recent_tool_reads"] = bool(len(states) >= follow_up_turn and all(state.get("tool_calls") == 0 for state in states[mechanism["no_tools_from_turn"] - 1:]))
     proofs["original_record_unchanged"] = unchanged_record is True
-    proofs["first_turn_requested_files_read"] = any(
-        event["turn"] == source_turn and event["name"] == "read_text_file" and event["outcome"] == "succeeded"
-        and event.get("path") == mechanism["source_path"] for event in observer.tool_events)
-    proofs["first_turn_background_read"] = any(
-        event["turn"] == source_turn and event["name"] == "read_text_file" and event["outcome"] == "succeeded"
-        and event.get("path") == mechanism["background_path"] and event.get("bytes_read") == mechanism["background_bytes"]
-        for event in observer.tool_events)
+    proofs["first_turn_requested_files_read"] = any(event["turn"] == source_turn and event["name"] == "read_text_file"
+        and event["outcome"] == "succeeded" and event.get("path") == mechanism["source_path"] for event in observer.tool_events)
+    proofs["first_turn_background_read"] = any(event["turn"] == source_turn and event["name"] == "read_text_file"
+        and event["outcome"] == "succeeded" and event.get("path") == mechanism["background_path"]
+        and event.get("bytes_read") == mechanism["background_bytes"] for event in observer.tool_events)
     process = evidence(observer.output_dir / "mechanism.json", "mechanism", "in-memory actual SDK comparisons")
-    details = {"checks": proofs, "first_run_id": first_run,
-               "summary_source_ids": [item.get("source_id") for item in selected],
-               "old_tool_item_sha256": [digest(item) for item in old_tools],
-               "summary_request_sha256": [digest(item) for item in summary_requests],
-               "following_request_sha256": [digest(item) for item in following],
-               "semantic_boundary": "Recent answers require separate human review for restated facts; no semantic pass is inferred."}
-    atomic_write_json(observer.output_dir / "mechanism.json", details)
+    atomic_write_json(observer.output_dir / "mechanism.json", {
+        "checks": proofs, "first_run_id": first_run, "summary_source_ids": [item.get("source_id") for item in selected],
+        "old_tool_item_sha256": [digest(item) for item in old_tools],
+        "summary_request_sha256": [digest(item) for item in summary_requests],
+        "following_request_sha256": [digest(item) for item in following],
+        "semantic_boundary": "Recent answers require separate human review for restated facts; no semantic pass is inferred."})
     process["availability"] = "available"
     return [{"name": name, "status": "verified" if passed else "gap",
              "reason": "actual request/checkpoint comparison satisfied" if passed else "required mechanism evidence absent or differs",
@@ -356,6 +376,9 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                 for key in ("model_calls", "summary_calls", "tool_calls", "tool_requests", "tool_outcomes", "usage_totals", "summary_usage_totals"):
                     current["metrics"][key] = value_or_unknown(state.get(key))
                 current["metrics"]["usage_basis"] = known("usage_totals already includes summary; summary_usage_totals is a subset")
+                compact_metrics, compact_path = turn_compact_evidence(observer, state, index, settings)
+                current["metrics"].update(compact_metrics)
+                current["process_evidence"].append(evidence(compact_path, "compact", "actual local summary/recall evidence"))
                 answer = (state.get("result") or {}).get("text")
                 if isinstance(answer, str):
                     answer_path = output / f"turn-{index:02d}-answer.md"
@@ -404,6 +427,8 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
             result["coverage"] = compaction_coverage(observer, states, old_record, unchanged_record, spec["prompts"], mechanism, summary_record)
         elif mechanism.get("kind") == "read_limit":
             result["coverage"] = [read_limit_coverage(observer, mechanism)]
+        elif mechanism.get("kind") == "history_recall":
+            result["coverage"] = history_coverage(observer, states, mechanism)
         result["execution_status"] = "completed"
         code = 0
     except BaseException as exc:
@@ -422,6 +447,8 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                 pending["issues"].append(safe_issue("dependency", "sample_stopped"))
         if observer and mechanism.get("kind") == "read_limit":
             result["coverage"] = [read_limit_coverage(observer, mechanism)]
+        elif observer and mechanism.get("kind") == "history_recall":
+            result["coverage"] = history_coverage(observer, states, mechanism)
     finally:
         if manager is not None:
             try:

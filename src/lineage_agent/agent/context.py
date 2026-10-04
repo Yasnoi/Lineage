@@ -2,19 +2,18 @@
 
 from copy import deepcopy
 import json
-from collections.abc import Callable
+import re
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
 from langgraph.checkpoint.base import CheckpointTuple
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.records import RecordStore, record_projection
 from lineage_agent.agent.state import (
-    ActiveContext, AgentState, CompactionSources, RecordReference, SummaryReference,
+    ActiveContext, AgentState, RecordReference, SummaryReference,
 )
 from lineage_agent.config.settings import ModelSettings
-from lineage_agent.models.budget import check_context_budget
-from lineage_agent.models.summarization import minimum_summary_message_bytes
 from lineage_agent.tools.types import ToolOutcomes
 
 
@@ -27,52 +26,14 @@ class TurnSlice(TypedDict):
     tool_outcomes: ToolOutcomes
 
 
-class CompactionSelection(TypedDict):
-    sources: CompactionSources
-    material: dict[str, Any]
-    allowed_source_ids: list[str]
-    removed_items: int
-    removed_turns: int
-    recovery_budget: dict[str, int]
-
-
 def new_context() -> ActiveContext:
     return {"version_id": str(uuid4()), "parent_version_id": None,
-            "summary": None, "turns": [], "turn_start": 0}
+            "history_summary": None, "run_summary": None, "turns": [], "turn_start": 0,
+            "initial_input_count": 0, "groups": [], "item_refs": [], "summary_spans": []}
 
 
 def json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
-
-
-def budget_for_retained(
-    state: AgentState, settings: ModelSettings, prepare_request: Callable[..., dict[str, Any]],
-    removed_items: int, request_options: dict[str, Any],
-) -> dict[str, int]:
-    """Measure F and P using complete requests; B includes insertion punctuation.
-
-    These are internal policy units, including the existing opaque reserves.
-    Neither output reserves nor margins are included in F/P and deducted again.
-    The final candidate is independently checked as a complete request.
-    """
-    if type(removed_items) is not int or not 0 <= removed_items <= len(state["input"]):
-        raise ValueError("invalid removal boundary")
-    fixed = check_context_budget(prepare_request([], **request_options), [], settings)
-    retained = check_context_budget(
-        prepare_request(state["input"][removed_items:], **request_options),
-        state["context_risks"][removed_items:], settings,
-    )
-    if fixed["decision"] == "error" or retained["decision"] == "error":
-        raise ValueError("context measurement failed")
-    fixed_cost = fixed["transparent_tokens"] + fixed["opaque_risk_tokens"]
-    retained_cost = retained["transparent_tokens"] + retained["opaque_risk_tokens"]
-    available_input = settings.context_budget_tokens - retained["output_reserve_tokens"] - retained["safety_margin_tokens"]
-    available_summary = available_input - retained_cost
-    return {
-        "input_budget_tokens": available_input, "fixed_tokens": fixed_cost,
-        "preserved_tokens": retained_cost - fixed_cost, "available_tokens": available_summary,
-        "target_tokens": available_summary * settings.summary_target_percent // 100,
-    }
 
 
 async def _read_final_turn(
@@ -116,7 +77,10 @@ async def read_record(
     """Read only confirmed snapshots; never resume, reset, or heal a failed thread."""
     saved, start, boundary = await _read_final_turn(saver, session_id, ref)
     final = saved.checkpoint["channel_values"]
-    items = final["input"]
+    originals = await RecordStore(saver, session_id).records(ref["run_id"], checkpoint_id=ref["checkpoint_id"])
+    items = [record["item"] for record in originals if record.get("item") is not None]
+    admitted = [record["item"] for record in originals if record.get("item") is not None
+                and record["sequence"] < final.get("record_admitted_through", 0)]
     model_results, summary_results = {}, {}
     cursor = saved
     seen = set()
@@ -147,8 +111,9 @@ async def read_record(
         cursor = (await saver.read_confirmed(session_id, parent["configurable"]["checkpoint_id"])) if parent else None
     return deepcopy({
         "run_id": ref["run_id"], "checkpoint_id": ref["checkpoint_id"],
-        "input": items[start:], "admitted_input": items[start:boundary],
-        "history_end": boundary - start,
+        "input": items, "admitted_input": admitted,
+        "history_end": len(admitted), "records": originals,
+        "groups": sorted({record["group_id"] for record in originals if record.get("group_id")}),
         **{name: final.get(name) for name in (
             "stop_reason", "error_code", "tool_outcomes", "model_calls", "summary_calls", "usage_totals",
         )},
@@ -157,63 +122,16 @@ async def read_record(
     })
 
 
-def _without_encrypted(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _without_encrypted(child) for key, child in value.items() if key != "encrypted_content"}
-    if isinstance(value, list):
-        return [_without_encrypted(child) for child in value]
-    return value
-
-
-def _has_encrypted(value: Any) -> bool:
-    if isinstance(value, dict):
-        return "encrypted_content" in value or any(_has_encrypted(child) for child in value.values())
-    return isinstance(value, list) and any(_has_encrypted(child) for child in value)
-
-
-def readable_item(item: dict) -> tuple[dict, bool] | None:
-    """Unknown/multimodal/authority-bearing items are whole-turn barriers."""
-    kind = item.get("type")
-    message = kind == "message" or (kind is None and "role" in item)
-    if message:
-        if item.get("role") not in {"user", "assistant"} or _has_encrypted(item):
-            return None
-        content = item.get("content")
-        if not isinstance(content, str) and not _text_parts(content):
-            return None
-    elif kind == "reasoning":
-        if any(key in item and not _text_parts(item[key]) for key in ("content", "summary")):
-            return None
-    elif kind == "function_call":
-        if _has_encrypted(item) or not isinstance(item.get("arguments"), str):
-            return None
-    elif kind == "function_call_output":
-        value = item.get("output")
-        if _has_encrypted(item) or (not isinstance(value, str) and not _text_parts(value)):
-            return None
-    else:
-        return None
-    return deepcopy(_without_encrypted(item)), _has_encrypted(item)
-
-
-def _text_parts(value: Any) -> bool:
-    return isinstance(value, list) and all(
-        isinstance(part, dict) and part.get("type") in {
-            "input_text", "output_text", "refusal", "reasoning_text", "summary_text", "text",
-        } and not _has_encrypted(part)
-        for part in value
-    )
-
-
 def _source_ids(document: dict) -> set[str]:
     return {source for section in document.values() for entry in section for source in entry["source_ids"]}
 
 
 class ContextRecords:
-    """Run-bound access to the session's confirmed originals; no body cache."""
+    """Confirmed original facts and effective views, bound to one storage scope."""
 
     def __init__(self, saver: SessionCheckpointer, session_id: str):
         self.saver, self.session_id = saver, session_id
+        self.store = RecordStore(saver, session_id)
 
     def confirmed(self) -> str:
         if error := self.saver.failure(self.session_id):
@@ -223,76 +141,149 @@ class ContextRecords:
             raise CheckpointError("checkpoint_read_error")
         return checkpoint_id
 
-    async def summary(self, ref: SummaryReference | None) -> dict[str, list[dict[str, Any]]] | None:
+    async def snapshot(self, checkpoint_id: str) -> dict:
+        saved = await self.saver.read_confirmed(self.session_id, checkpoint_id)
+        return saved.checkpoint["channel_values"]
+
+    async def summary(self, ref: SummaryReference | None) -> dict | None:
         if ref is None:
             return None
-        saved = await self.saver.read_confirmed(self.session_id, ref["checkpoint_id"])
-        compaction = saved.checkpoint["channel_values"].get("compaction")
-        if not isinstance(compaction, dict) or compaction.get("summary_id") != ref["summary_id"]:
+        values = await self.snapshot(ref["checkpoint_id"])
+        lane = (values.get("compaction") or {}).get("lanes", {}).get(ref["lane"], {})
+        if lane.get("summary_id") != ref["summary_id"] or not isinstance(lane.get("document"), dict):
             raise CheckpointError("checkpoint_read_error")
-        document = compaction.get("document")
-        if not isinstance(document, dict):
-            raise CheckpointError("checkpoint_read_error")
-        return deepcopy(document)
+        return deepcopy(lane["document"])
 
-    async def select(
-        self, state: AgentState, settings: ModelSettings,
-        prepare_request: Callable[..., dict[str, Any]], instructions: str | None,
-        tool_choice: Literal["none"] | None,
-        *, summary_id: str,
-    ) -> tuple[CompactionSelection | None, str | None]:
-        """Choose the shortest safe old prefix that permits a nonempty summary."""
+    async def select(self, state: AgentState, settings: ModelSettings) -> tuple[dict | None, str | None]:
+        from lineage_agent.models.responses import compactable_group_items
         active = state["active_context"]
-        turns = active["turns"]
-        eligible = len(turns) - settings.context_keep_recent_turns
-        if eligible <= 0:
-            return None, "no_eligible_history"
-        old_summary = await self.summary(active["summary"])
-        material = {"previous_summary": old_summary, "sources": [], "turn_outcomes": [], "opaque_omissions": []}
-        allowed = _source_ids(old_summary) if old_summary is not None else set()
-        offset = 1 if active["summary"] else 0
-        removed = offset
-        for index, ref in enumerate(turns[:eligible]):
-            record = await read_turn_slice(self.saver, self.session_id, ref)
-            items = record["admitted_input"]
-            if len(items) != ref["item_count"] or items != state["input"][offset:offset + len(items)]:
+        checkpoint_id = self.confirmed()
+        saved = await self.snapshot(checkpoint_id)
+        if (saved.get("record_revision") != state["record_revision"]
+                or saved.get("active_context", {}).get("version_id") != active["version_id"]):
+            return None, "source_changed"
+        groups = active["groups"]
+        closed = [g for g in groups if g["closed"]]
+        protected = settings.context_keep_recent_groups
+        remove_groups = closed[:-protected] if len(closed) > protected else []
+        need = max(0, protected - len(closed))
+        keep_turn_at = len(active["turns"])
+        if need:
+            for i in range(len(active["turns"]) - 1, -1, -1):
+                keep_turn_at = i
+                need -= active["turns"][i]["group_count"]
+                if need <= 0:
+                    break
+        turns = active["turns"][:keep_turn_at]
+        old_start = 1 if active["history_summary"] else 0
+        history_end = old_start + sum(turn["item_count"] for turn in turns)
+        history_indices = list(range(old_start, history_end))
+        current_indices = [i for group in remove_groups for i in range(group["start"], group["end"])]
+        # Protocol legality is checked on complete groups/turns, never by making up results.
+        offset = old_start
+        spans = {span["index"]: span for span in active["summary_spans"]}
+        for turn in turns:
+            original_items = [state["input"][i] for i in range(offset, offset + turn["item_count"]) if i not in spans]
+            if not compactable_group_items(original_items, require_response=False):
+                return None, "unsupported_protocol_boundary"
+            offset += turn["item_count"]
+        for group in remove_groups:
+            if not compactable_group_items(state["input"][group["start"]:group["end"]]):
+                return None, "unsupported_protocol_boundary"
+        all_records = await self.store.records(checkpoint_id=checkpoint_id)
+        by_ref = {r["source_ref"]: r for r in all_records}
+        lanes = {}
+        for lane, indices, previous in (
+            ("H", history_indices, active["history_summary"]),
+            ("R", current_indices, active["run_summary"]),
+        ):
+            prior = [previous] if previous else []
+            prior += [spans[i]["reference"] for i in indices if i in spans]
+            visible = [active["item_refs"][i] for i in indices if active["item_refs"][i]]
+            covered = set(visible)
+            # Historical outcomes and already summarized ranges remain searchable.
+            ranges = [r for ref in prior for r in ref["ranges"]]
+            if lane == "H":
+                ranges += [{"run_id": turn["run_id"], "start": 0, "end": turn["record_end"]} for turn in turns]
+                visible += [r["source_ref"] for r in all_records if r["kind"] == "outcome"
+                            and r["run_id"] in {turn["run_id"] for turn in turns}]
+            else:
+                ranges += [{"run_id": state["run_id"], "start": g["record_start"], "end": g["record_end"]}
+                           for g in remove_groups]
+            covered.update(r["source_ref"] for r in all_records if any(
+                r["run_id"] == bounds["run_id"] and bounds["start"] <= r["sequence"] < bounds["end"]
+                for bounds in ranges))
+            covered.update(visible)
+            documents = [await self.summary(ref) for ref in prior]
+            allowed = set(visible)
+            for document in documents:
+                allowed.update(_source_ids(document))
+            if not allowed.issubset(covered) or not covered.issubset(by_ref):
                 raise CheckpointError("checkpoint_read_error")
-            readable = [readable_item(item) for item in items]
-            if any(item is None for item in readable):
-                return None, "protected_history"
-            for item_index, converted in enumerate(readable):
-                payload, omitted = converted
-                source_id = f"{ref['run_id']}:{item_index}"
-                allowed.add(source_id)
-                material["sources"].append({
-                    "source_id": source_id, "role": payload.get("role", "tool" if payload.get("type") == "function_call_output" else "assistant"),
-                    "kind": payload.get("type", "message"), "payload": payload,
-                })
-                if omitted:
-                    material["opaque_omissions"].append({"source_id": source_id, "kind": "encrypted_reasoning"})
-            outcome_id = f"{ref['run_id']}:outcome"
-            allowed.add(outcome_id)
-            material["turn_outcomes"].append({
-                "source_id": outcome_id, "run_id": ref["run_id"],
-                **{key: record[key] for key in ("stop_reason", "error_code", "tool_outcomes")},
-            })
-            removed += len(items)
-            offset += len(items)
-            try:
-                allocation = budget_for_retained(
-                    state, settings, prepare_request, removed,
-                    {"instructions": instructions, "tool_choice": tool_choice},
-                )
-                minimum = minimum_summary_message_bytes(summary_id, allowed)
-                # Adding the first item to a nonempty array also adds a comma.
-                minimum += int(bool(state["input"][removed:]))
-            except (TypeError, ValueError, KeyError):
-                return None, "context_measurement_error"
-            if allocation["target_tokens"] >= minimum:
-                return {
-                    "sources": {"previous_summary": deepcopy(active["summary"]), "added_turns": deepcopy(turns[:index + 1])},
-                    "material": material, "allowed_source_ids": sorted(allowed),
-                    "removed_items": removed, "removed_turns": index + 1,
-                    "recovery_budget": allocation,
-                }, None
-        return None, "protected_context_too_large"
+            if not covered:
+                lanes[lane] = {"status": "empty", "source_refs": [], "previous": [], "allowed_source_ids": []}
+                continue
+            scope = await self.store.register_scope(sorted(covered), checkpoint_id=checkpoint_id)
+            visible_refs = set(visible)
+            lanes[lane] = {
+                "status": "selected", "source_refs": [r["source_ref"] for r in all_records
+                                                       if r["source_ref"] in visible_refs], "previous": prior,
+                "allowed_source_ids": sorted(allowed), "scope": scope,
+                "summary_id": str(uuid4()),
+                "source_metadata": {ref: _artifact_metadata(by_ref[ref]) for ref in allowed
+                                    if _artifact_metadata(by_ref[ref])},
+                "source_bytes": sum(len(record_projection(by_ref[ref])[0].encode("utf-8")) for ref in visible_refs)
+                    + sum(json_bytes(doc) for doc in documents),
+            }
+        if all(lane["status"] == "empty" for lane in lanes.values()):
+            return None, "no_compressible_range"
+        removed = set(history_indices + current_indices)
+        if active["history_summary"]:
+            removed.add(0)
+        if active["run_summary"]:
+            removed.update(span["index"] for span in active["summary_spans"]
+                           if span["run_id"] == state["run_id"] and span["lane"] == "R")
+        return {
+            "snapshot": {"run_id": state["run_id"], "source_checkpoint_id": checkpoint_id,
+                         "record_revision": state["record_revision"], "active_version_id": active["version_id"]},
+            "lanes": lanes, "removed_indices": sorted(removed), "removed_turns": len(turns),
+            "removed_groups": [g["group_id"] for g in remove_groups],
+        }, None
+
+    async def material(self, compaction: dict, lane: str, state: AgentState) -> dict:
+        selected = compaction["lanes"][lane]
+        checkpoint_id = compaction["snapshot"]["source_checkpoint_id"]
+        documents = [await self.summary(ref) for ref in selected["previous"]]
+        sources = []
+        for source_ref in selected["source_refs"]:
+            record = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
+            projection, opaque = record_projection(record)
+            sources.append({"source_id": source_ref, "kind": record["kind"],
+                            "group_id": record.get("group_id"), "payload": json.loads(projection),
+                            "opaque_omitted": opaque})
+        material = {"sources": sources, "previous_summary": documents,
+                    "turn_outcomes": [], "allowed_source_ids": selected["allowed_source_ids"]}
+        if lane == "R":
+            active = state["active_context"]
+            start = active["turn_start"]
+            material["current_request_readonly"] = deepcopy(state["input"][start:start + active["initial_input_count"]])
+        return material
+
+
+def _artifact_metadata(record: dict) -> dict:
+    """Only program-created observation/recall fields confer Artifact identity."""
+    item = record.get("item") or {}
+    if item.get("type") != "function_call_output" or not isinstance(item.get("output"), str):
+        return {}
+    try:
+        envelope = json.loads(item["output"])
+        observation = envelope.get("observation", {})
+        value = observation
+        if observation.get("mode") == "inline" and (record.get("execution") or {}).get("name") in {"artifact_read", "artifact_search"}:
+            value = json.loads(observation["raw_result"])
+        ref = value.get("artifact_ref")
+        if not isinstance(ref, str) or re.fullmatch(r"artifact://tool/[0-9a-f]{32}", ref) is None:
+            return {}
+        return {key: deepcopy(value[key]) for key in ("artifact_ref", "view_kind", "total_chars", "complete", "start", "end") if key in value}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {}

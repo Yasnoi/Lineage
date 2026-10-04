@@ -1,6 +1,7 @@
 """Run-bound diagnostics and fail-closed writes for native in-memory checkpoints."""
 
 from typing import Any
+from secrets import token_bytes
 
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -40,11 +41,27 @@ class SessionCheckpointer(InMemorySaver):
         # the fixed reason across turns, and create a fresh exception per use.
         self._failures: dict[str, str] = {}
         self._confirmed: dict[str, str] = {}
+        self._confirmed_ids: dict[str, set[str]] = {}
         self._recorders: dict[str, RunRecorder] = {}
+        self._history_cursor_keys: dict[str, bytes] = {}
 
     def bind_run(self, thread_id: str, recorder: RunRecorder) -> None:
-        recorder.bind_session(thread_id)
         self._recorders[thread_id] = recorder
+
+    def history_cursor_key(self, thread_id: str) -> bytes:
+        """Keep opaque recall cursors valid for the storage scope's lifetime."""
+        if thread_id not in self._history_cursor_keys:
+            self._history_cursor_keys[thread_id] = token_bytes(32)
+        return self._history_cursor_keys[thread_id]
+
+    def release(self, thread_id: str) -> None:
+        """Release private Run storage without affecting another session."""
+        self.delete_thread(thread_id)
+        self._failures.pop(thread_id, None)
+        self._confirmed.pop(thread_id, None)
+        self._confirmed_ids.pop(thread_id, None)
+        self._recorders.pop(thread_id, None)
+        self._history_cursor_keys.pop(thread_id, None)
 
     def unbind_run(self, thread_id: str) -> None:
         self._recorders.pop(thread_id, None)
@@ -59,6 +76,8 @@ class SessionCheckpointer(InMemorySaver):
         References are issued only after successful native checkpoint writes.
         """
         try:
+            if checkpoint_id not in self._confirmed_ids.get(thread_id, set()):
+                raise ValueError("unconfirmed record")
             saved = self.get_tuple({"configurable": {
                 "thread_id": thread_id, "checkpoint_id": checkpoint_id,
             }})
@@ -131,6 +150,7 @@ class SessionCheckpointer(InMemorySaver):
             raise self._failed(thread_id, "checkpoint_write_error", "checkpoint_write") from None
         checkpoint_id = saved_config["configurable"]["checkpoint_id"]
         self._confirmed[thread_id] = checkpoint_id
+        self._confirmed_ids.setdefault(thread_id, set()).add(checkpoint_id)
         details: dict[str, Any] = {"checkpoint_id": checkpoint_id}
         if type(metadata.get("step")) is int:
             details["checkpoint_step"] = metadata["step"]

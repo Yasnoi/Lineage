@@ -2,12 +2,15 @@
 
 from copy import deepcopy
 from typing import Any
+from uuid import uuid4
+import json
 
 from langsmith import tracing_context
 from langgraph.types import Overwrite
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
 from lineage_agent.agent.context import ContextRecords, new_context
+from lineage_agent.agent.records import make_record_batch
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
 from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
@@ -23,6 +26,7 @@ from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE, RunRecorder
 from lineage_agent.recording.summaries import tool_identity
 from lineage_agent.recording.tracing import start_trace
 from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
+from lineage_agent.tools.history import HISTORY_TOOLS, HISTORY_TOOL_NAMES, HistoryExecutor
 
 
 CLIENT_CLOSE_MESSAGE = "模型客户端关闭失败；已取得的回答与统计予以保留。"
@@ -175,6 +179,9 @@ async def _run_agent(
             if any(tool["name"] in native_names for tool in available_tools):
                 raise ConfigurationError("已提供的工具名称与 Artifact 工具冲突。")
             available_tools.extend(deepcopy(ARTIFACT_TOOLS))
+        if any(tool["name"] in HISTORY_TOOL_NAMES for tool in available_tools):
+            raise ConfigurationError("已提供的工具名称与历史工具冲突。")
+        available_tools.extend(deepcopy(HISTORY_TOOLS))
         available_tools, observation_hint_tools = enhance_tools(available_tools)
         bind_run = getattr(execute_tool, "bind_run", None)
         if callable(bind_run):
@@ -189,6 +196,8 @@ async def _run_agent(
     propagating_error = False
     owned_store = None
     store_close_attempted = False
+    private_checkpointer = checkpointer is None
+    scope_id = session_id or "run:" + recorder.run_id
     try:
         state: AgentState = {
             "input": input_items,
@@ -200,6 +209,11 @@ async def _run_agent(
             "context_budget": None,
             "active_context": new_context(),
             "compaction": None,
+            "compaction_events": [],
+            "record_batch": make_record_batch(recorder.run_id, 0, input_items),
+            "record_sequence": len(input_items), "record_revision": 1,
+            "record_admitted_through": 0, "history_scopes": {}, "record_metrics": {},
+            "execution_facts": [], "run_call_ids": [],
             "summary_calls": 0,
             "summary_result": None,
             "summary_usage_totals": {
@@ -225,17 +239,23 @@ async def _run_agent(
             "error_code": None,
             "cleanup_error": None,
         }
+        state["active_context"].update(initial_input_count=len(input_items),
+                                       item_refs=[r["source_ref"] for r in state["record_batch"]])
+        if checkpointer is None:
+            checkpointer = SessionCheckpointer()
+        checkpointer.bind_run(scope_id, recorder)
+        context_records = ContextRecords(checkpointer, scope_id)
+        execute_tool = HistoryExecutor(context_records.store, execute_tool)
         tracer = start_trace(recorder.run_id, settings)
         if session_id is not None:
-            assert checkpointer is not None
-            checkpointer.bind_run(session_id, recorder)
+            recorder.bind_session(session_id)
             tracer.bind_session(session_id)
-        config: dict[str, Any] = {"recursion_limit": 8 * settings.max_model_calls + 1}
+        config: dict[str, Any] = {"recursion_limit": 16 * settings.max_model_calls + 8,
+            "configurable": {"thread_id": scope_id}, "metadata": {"run_id": recorder.run_id}}
+        if checkpoint_id is not None:
+            config["configurable"]["checkpoint_id"] = checkpoint_id
         if session_id is not None:
-            config["configurable"] = {"thread_id": session_id}
-            if checkpoint_id is not None:
-                config["configurable"]["checkpoint_id"] = checkpoint_id
-            config["metadata"] = {"session_id": session_id, "run_id": recorder.run_id}
+            config["metadata"]["session_id"] = session_id
         checkpoint_error: str | None = None
         final_checkpoint_id: str | None = None
         client_manager = None
@@ -288,11 +308,11 @@ async def _run_agent(
                 max_model_calls=settings.max_model_calls, recorder=recorder, tracer=tracer,
                 checkpointer=checkpointer, observe_state=observe_state,
                 call_summary=call_summary,
-                context_records=ContextRecords(checkpointer, session_id) if checkpointer is not None and session_id is not None else None,
+                context_records=context_records,
                 validate_input=lambda items: _input_shape_error(items) or _input_association_error(items),
                 observation_manager=observation_manager,
                 observation_hint_tools=observation_hint_tools,
-                native_recall_tools=frozenset(tool["name"] for tool in ARTIFACT_TOOLS),
+                native_recall_tools=frozenset(tool["name"] for tool in ARTIFACT_TOOLS) | HISTORY_TOOL_NAMES,
             )
             start_budget_error = None
 
@@ -342,10 +362,15 @@ async def _run_agent(
                                 "run_id": saved.values["run_id"],
                                 "checkpoint_id": saved.config["configurable"]["checkpoint_id"],
                                 "item_count": boundary - start,
+                                "group_count": sum(g["closed"] for g in active["groups"]),
+                                "record_end": saved.values["record_sequence"],
                             })
-                        active["turn_start"] = boundary
-                        if (1 if active["summary"] else 0) + sum(ref["item_count"] for ref in active["turns"]) != boundary:
-                            raise CheckpointError("checkpoint_read_error")
+                        active.update(turn_start=boundary, run_summary=None, groups=[],
+                                      initial_input_count=len(input_items),
+                                      parent_version_id=active["version_id"], version_id=str(uuid4()),
+                                      item_refs=active["item_refs"][:boundary] + state["active_context"]["item_refs"],
+                                      summary_spans=[span for span in active["summary_spans"] if span["index"] < boundary])
+                        state["history_scopes"] = deepcopy(saved.values.get("history_scopes", {}))
                         state["active_context"] = active
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
@@ -377,10 +402,7 @@ async def _run_agent(
                 # A model node can also prepare compaction without a new call.
                 # Its latest result may belong to tools that already completed.
                 # Only unmatched requests are known to have remained unexecuted.
-                result_ids = {
-                    item.get("call_id") for item in state["input"]
-                    if item.get("type") == "function_call_output"
-                }
+                result_ids = {fact["call_id"] for fact in state["execution_facts"]}
                 calls = [
                     call for call in state["result"]["tool_calls"]
                     if call["call_id"] not in result_ids
@@ -395,7 +417,7 @@ async def _run_agent(
                     tracer.tool_skipped(
                         call, step_id=last_step_id, request_index=index, reason="checkpoint_error",
                     )
-            if state["stop_reason"] is None:
+            if state["stop_reason"] is None or private_checkpointer:
                 state.update(stop_reason="error", error=str(exc), error_code=exc.code)
         except BaseException as exc:
             primary_error = exc
@@ -441,6 +463,26 @@ async def _run_agent(
             # There is no completed record if execution did not return a final State.
             configuration_rejected = isinstance(primary_error, PreExecutionConfigurationError)
             failure_code = "pre_execution_configuration_error" if configuration_rejected else "run_interrupted"
+            if not configuration_rejected and checkpointer.failure(scope_id) is None and last_node is not None:
+                # A cancelled tool batch may have produced real results before
+                # LangGraph could checkpoint its update. Save those facts once;
+                # this is never a resume, and the original exception still wins.
+                state.update(stop_reason="error", error_code="run_interrupted", error="运行被中断。")
+                terminal = make_record_batch(state["run_id"], state["record_sequence"], [{
+                    "stop_reason": "error", "error_code": "run_interrupted",
+                    "tool_outcomes": state["tool_outcomes"],
+                }], kind="outcome")
+                state.update(record_batch=state["record_batch"] + terminal,
+                             record_sequence=state["record_sequence"] + len(terminal),
+                             record_revision=state["record_revision"] + 1)
+                try:
+                    with tracing_context(enabled=False, parent=False):
+                        await graph.aupdate_state(
+                            {"configurable": {"thread_id": scope_id}},
+                            {**deepcopy(state), "input": Overwrite(deepcopy(state["input"]))}, as_node="model",
+                        )
+                except BaseException:
+                    pass  # Failed acknowledgement cannot replace the interruption.
             try:
                 recorder.emit(
                     "run.configuration_rejected" if configuration_rejected else "run.aborted",
@@ -481,21 +523,48 @@ async def _run_agent(
             read_budget=end_budget, read_budget_error=end_budget_error,
             **({
                 "checkpoint_finalization": "failed" if checkpoint_error else "pending",
-                "last_confirmed_checkpoint_id": checkpointer.last_confirmed(session_id),
+                "last_confirmed_checkpoint_id": checkpointer.last_confirmed(scope_id),
                 "checkpoint_error": checkpoint_error,
-            } if checkpointer is not None and session_id is not None else {}),
+            } if checkpointer is not None else {}),
         )
         state["log_complete"] = recorder.close()
         if not state["log_complete"]:
             state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
-        if checkpointer is not None and session_id is not None:
+        if checkpointer is not None:
+            outcome = make_record_batch(state["run_id"], state["record_sequence"], [{
+                "stop_reason": state["stop_reason"], "error_code": state["error_code"],
+                "tool_outcomes": state["tool_outcomes"], "model_calls": state["model_calls"],
+            }], kind="outcome")
+            state.update(record_batch=state["record_batch"] + outcome, record_sequence=state["record_sequence"] + len(outcome),
+                         record_revision=state["record_revision"] + 1)
+            try:
+                originals = await context_records.store.records(state["run_id"])
+                # Snapshot before final serialization. Count serialized values, not Python heap memory.
+                def binary_bytes(value):
+                    if isinstance(value, bytes):
+                        return len(value)
+                    if isinstance(value, dict):
+                        return sum(binary_bytes(child) for child in value.values())
+                    if isinstance(value, (tuple, list)):
+                        return sum(binary_bytes(child) for child in value)
+                    return 0
+                state["record_metrics"] = {
+                    "count": len(originals) + len(outcome),
+                    "logical_bytes": sum(len(json.dumps(r, ensure_ascii=False).encode("utf-8")) for r in originals + outcome),
+                    "checkpoint_serialized_bytes": binary_bytes(checkpointer.storage.get(scope_id, {}))
+                        + sum(binary_bytes(v) for k, v in checkpointer.blobs.items() if k[0] == scope_id)
+                        + sum(binary_bytes(v) for k, v in checkpointer.writes.items() if k[0] == scope_id),
+                    "measured_before_final_save": True,
+                }
+            except Exception:
+                state["record_metrics"] = {"count": state["record_sequence"]}
             # The JSONL intentionally ends before this final acknowledgement. Its
             # completion, including close errors, is part of the final saved State.
-            checkpointer.unbind_run(session_id)
+            checkpointer.unbind_run(scope_id)
             if checkpoint_error is None:
                 final_config = {
-                    "configurable": {"thread_id": session_id},
-                    "metadata": {"session_id": session_id, "run_id": recorder.run_id},
+                    "configurable": {"thread_id": scope_id},
+                    "metadata": {"run_id": recorder.run_id, **({"session_id": session_id} if session_id else {})},
                 }
                 try:
                     with tracing_context(enabled=False, parent=False):
@@ -517,6 +586,9 @@ async def _run_agent(
                     except BaseException:
                         pass
                     raise
+            if checkpoint_error is not None and private_checkpointer:
+                state.update(stop_reason="error", error_code=checkpoint_error,
+                             error=str(CheckpointError(checkpoint_error)))
             tracer.finish_checkpoint(final_checkpoint_id, checkpoint_error)
         tracer.finish(state, read_budget=end_budget, read_budget_error=end_budget_error)
         await tracer.close()
@@ -539,8 +611,10 @@ async def _run_agent(
             if cleanup_error is None:
                 cleanup_error = exc
         try:
-            if checkpointer is not None and session_id is not None:
-                checkpointer.unbind_run(session_id)
+            if checkpointer is not None:
+                checkpointer.unbind_run(scope_id)
+                if private_checkpointer:
+                    checkpointer.release(scope_id)
         except BaseException as exc:
             if cleanup_error is None:
                 cleanup_error = exc

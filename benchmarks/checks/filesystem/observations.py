@@ -90,7 +90,7 @@ async def check_pipeline():
         assert all(raw not in item["output"] for item in items)
         if number == 1:
             names = {tool["name"] for tool in request["tools"]}
-            assert names == {"lookup_sample", "artifact_read", "artifact_search"}
+            assert names == {"lookup_sample", "artifact_read", "artifact_search", "history_read", "history_search"}
             return response(*(tool_call(f"large_{i}", "lookup_sample", key=str(i)) for i in range(3)))
         if number == 2:
             assert len(items) == len(published) == 3

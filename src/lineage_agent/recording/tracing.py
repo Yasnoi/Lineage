@@ -417,6 +417,10 @@ class RunTrace:
             return
         self._active_context = self._sanitizer.active_context(active_context)
         self._root.payload["extra"]["metadata"]["active_context"] = self._active_context
+        # Uploads have bounded lineage, but internal filtering must remember
+        # every app-owned summary position, including old Runs' prefix summaries.
+        self._active_context = {**self._active_context,
+                                "summary_spans": self._sanitizer.summary_spans(active_context)}
 
     @_safe
     def observe_compaction(self, metadata) -> None:
@@ -687,6 +691,7 @@ class RunTrace:
                 "artifact_store_init_error", "artifact_cleanup_error",
                 "context_budget_exceeded", "context_measurement_error",
                 "summary_model_error", "invalid_summary", "summary_refusal", "summary_tool_request",
+                "source_changed", "history_record_missing", "history_reference_invalid", "invalid_source_reference",
             } else "agent_error"
         elif stopped:
             self._root.payload["error"] = state["stop_reason"]

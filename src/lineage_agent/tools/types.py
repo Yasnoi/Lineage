@@ -51,6 +51,11 @@ TOOL_ARGUMENT_REASONS = {
     "invalid_artifact_ref": "Artifact 引用格式无效。",
     "invalid_artifact_range": "字符范围必须是正文内的有效左闭右开范围。",
     "invalid_artifact_keywords": "检索需要 1 至 8 个关键词，每个包含 1 至 128 个字符。",
+    "invalid_history_arguments": "历史工具参数字段或类型不符合要求。",
+    "invalid_history_ref": "历史引用格式无效。",
+    "invalid_history_range": "字符范围必须是原始记录可读视图中的有效左闭右开范围。",
+    "invalid_history_keywords": "检索需要 1 至 8 个关键词，每个包含 1 至 128 个字符。",
+    "invalid_history_cursor": "历史检索游标无效，或与范围及关键词不匹配。",
 }
 
 
@@ -63,6 +68,7 @@ TOOL_EXECUTION_REASONS = {
     "artifact_not_found": "当前会话中不存在该 Artifact。",
     "artifact_read_error": "Artifact 无法读取或快照完整性校验失败。",
     "artifact_store_closed": "ArtifactStore 已关闭，引用不再可用。",
+    "history_read_error": "当前运行或会话的原始记录无法读取或完整性校验失败。",
 }
 
 
@@ -149,4 +155,5 @@ class ToolBatchResult(TypedDict):
     output_items: list[dict[str, Any]]
     tool_calls: int
     tool_outcomes: ToolOutcomes
+    call_facts: list[dict[str, Any]]
     error: str | None

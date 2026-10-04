@@ -177,8 +177,8 @@ class V2RunnerTests(unittest.TestCase):
         units, _ = catalog.load_catalog()
         self.assertEqual(len(units), 17)
         groups = [g for unit in units.values() for g in unit["groups"]]
-        self.assertEqual(len(groups), 155)
-        self.assertEqual(len({g["group_id"] for g in groups}), 155)
+        self.assertEqual(len(groups), 184)
+        self.assertEqual(len({g["group_id"] for g in groups}), 184)
         self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_data.py" for g in groups), 2)
         self.assertEqual(sum(g.get("legacy_source", {}).get("path") == "scripts/check_trace_usage.py" for g in groups), 4)
 

@@ -1,6 +1,6 @@
 # 工程约定与迁移覆盖
 
-本文面向维护确定性检查的开发者。唯一可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 17 条隔离行为链包含 155 个行为组（原 138 组、动态摘要恢复新增 3 组、Artifact 新增 8 组及观测治理新增 6 组）；实际是否执行及结果以运行报告为准。
+本文面向维护确定性检查的开发者。工程行为组的可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 17 条隔离行为链包含 184 个行为组；实际是否执行及结果以运行报告为准。`benchmarks/tests/` 另有可通过 `unittest` 执行的框架和专项检查，部分与工程行为组复用同一场景，不重复累加为覆盖数量。
 
 ## 模块与判断依据
 
@@ -9,7 +9,7 @@
 | `execution` | 19 | 输入/响应协议、批次继续、结果关联、调用额度和终态统计；直接比较实际请求、工具返回和 State。 |
 | `filesystem` | 36 | 目录与文本路径边界、读取额度、真实 I/O，以及 Artifact 快照、有界召回与会话隔离；核对实际文件和累计预算。 |
 | `sessions` | 25 | 历史准入、隔离、重置、并发拒绝、保存和关闭；核对原生检查点及后续请求。 |
-| `context` | 36 | 请求预算、风险计量、摘要选择、保存屏障和活动版本；对照真实请求参数与记录。 |
+| `context` | 65 | 请求预算、风险计量、H/R 选源、三组保护、原始记录回读、保存屏障和活动版本；对照实际请求参数与记录。 |
 | `recording` | 39 | JSONL、过滤、usage 投影、序列化、上传异常和有限收尾；对照实际 SDK 载荷与故障观察。 |
 
 一次跨模块场景保留完整执行链，只按主要模块计一次；标签不作为根因结论。响应耗时、真实 token 与缓存字段由真实任务轨迹另外观测，替身 token 不算成本。没有统一总分。
@@ -18,11 +18,28 @@
 
 来源基线为 `c97467ed41bcd3a0232033f9160d15199b30069b`。14 个原 `scripts/check_*.py` 已移除，其检查函数和实际公共替身归入 Benchmark。ReAct 的执行检查与记录检查分开；Review 的输入协议、文件系统预算、追踪投影按职责分开，未拆断单个故障链。Session 两处异步入口后的 CLI 检查、fixture 收尾和五次摘要 Tracing exercise 均保留。data/usage 组经 recording.transport 调用，不另建隔离单元或重复计数。
 
-此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖 138 组；断言数量不是覆盖率。动态 Compact 改造保留这些行为组，调整已被替代的比例阈值及固定摘要上限断言，并增加下表中的三个恢复行为组。Artifact 的八组为新增约定，不属于旧脚本迁移；当前结果以 155 组的实际事件、请求、状态及故障证据为准。
+此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖当时的 138 组，不能解释为当前改造仍逐条保持 AST 不变，断言数量也不是覆盖率。后续动态恢复、Artifact 和观测治理扩展至 155 组；本次将旧 Compact 的 22 组替换为当前前缀、H/R、原始记录及保存边界的 51 组，合计 184 组。当前证据以实际事件、请求、状态及故障观察为准。
 
 Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响应上限、关键词分页、会话及缓存路径隔离、关闭与故障行为，并用离线模型替身走通两轮工具调用及记录过滤。观测治理检查另行验证自动归档、结构化提示、默认召回工具和治理故障；两类检查均不以真实模型的上下文下降或回答质量作为结论。
 
 框架回归保留选择拒绝、状态分离、回执一致性、事件有效前缀、资源收尾、保存故障、会话/材料隔离、预算与评分绑定。旧 v1 worker 和 control-* 别名专用执行测试随接口撤销，其仍适用的断言/启动/源码/优化保护/保存等边界由组 worker 与通用框架测试承接；旧结果读取测试独立保留。新增第二个项目注册、构造材料、LLM 建议绑定与离线网络边界测试。
+
+## Compact 与历史召回的检查来源
+
+当前 Run 前缀恢复及原始记录回读使用下列 `unittest` 场景，入口为 `python -m unittest discover -s benchmarks/tests -v`。其中前缀 21 组、保存与请求边界 6 组、原始记录 13 组、配置 3 组和摘要协议 8 组也由 `context.compaction` 调用，共 51 个工程组；两种入口复用场景，不能视为两份独立覆盖。其余传输、追踪和 Benchmark 检查单独执行。
+
+| 检查来源 | 覆盖范围 |
+| --- | --- |
+| [test_prefix_compaction.py](tests/test_prefix_compaction.py) | 独立 Run、会话第一轮、H/R 整体启用与失败隔离、三组保护和旧轮次边界、重复压缩、原始调用身份、最多两次尝试及四次摘要调用、源版本和保存故障、压缩后搜索并读取遗漏细节。 |
+| [test_compaction_boundaries.py](tests/test_compaction_boundaries.py) | 完整请求检查与实际 SDK 参数一致、超过软目标但满足提交条件、独立 Run 最终保存失败、激活确认与日志故障，以及短任务无摘要调用。 |
+| [test_history.py](tests/test_history.py) | 不可变原始记录、固定快照、缺失与冲突身份、未被摘要引用的记录、会话隔离、Unicode 与转义后的 8 KiB 分页、查询绑定游标、原生召回不重复归档，以及执行失败和中断事实。 |
+| [test_compact_settings.py](tests/test_compact_settings.py)、[test_summary_contracts.py](tests/test_summary_contracts.py)、[test_compact_transport.py](tests/test_compact_transport.py) | 三组和恢复余量配置、旧轮次配置迁移拒绝、H/R 模板与机器引用白名单、字节目标和 API 输出上限分离、完整协议组及已知加密 reasoning 边界。 |
+| [test_compact_tracing.py](tests/test_compact_tracing.py) | H/R 和旧 R 按可信摘要位置过滤、普通伪造标记不触发过滤、元数据截断不遗漏正文过滤、两路指标与 CLI 阶段。 |
+| [test_compact_evidence.py](tests/test_compact_evidence.py)、[test_compact_entrypoint.py](tests/test_compact_entrypoint.py) | Benchmark 历史召回证据、存储指标与请求开销、统一运行入口和配置限制。 |
+
+`recording.compaction` 继续验证追踪关闭、开启和上传失败时的业务等价性；两路摘要正文实际进入业务请求，但 H、R 和历史轮次的 R 都按程序维护的 `summary_spans` 隐去派生正文。用于过滤的完整索引与上传的有界来源元数据分别处理，普通用户消息中的仿造标记不能改变过滤范围。
+
+这些确定性检查证明控制流、协议和保存约定，不能证明摘要事实准确。真实 `defect-reference`、`history-recall` 和 `compaction-continuation` 的任务完成、条件保留、失败状态及来源支持需单独评审，来源编号合法不替代语义核查。
 
 ## 逐组对应关系
 
@@ -131,28 +148,57 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 | `context.budget.budget_checkpoint_failures` | context | 预算停止和工具完成后的检查点保存失败；context, sessions, execution, recording | `check_context_budget.py:check_budget_checkpoint_failures` | [check_budget_checkpoint_failures](checks/context/budget.py) |
 | `context.budget.tracing_diagnostics` | context | 预算追踪诊断过滤及上传故障等价性；context, recording | `check_context_budget.py:check_tracing_diagnostics` | [check_tracing_diagnostics](checks/context/budget.py) |
 | `context.budget.cli` | context | 预算停止展示与交互拒绝后继续；context, sessions, execution | `check_context_budget.py:check_cli` | [check_cli](checks/context/budget.py) |
-| `context.compaction.configuration` | context | 摘要和历史保留配置边界；context | `check_compaction.py:check_configuration` | [check_configuration](checks/context/compaction.py) |
-| `context.compaction.stable_history_and_records` | context | 未压缩活动版本与运行记录拷贝隔离；context, sessions | `check_compaction.py:check_stable_history_and_records` | [check_stable_history_and_records](checks/context/compaction.py) |
-| `context.compaction.selection_read_path` | context | 轻量历史选择与完整记录等价及源读取失败；context, sessions, recording | `check_compaction.py:check_selection_read_path` | [check_selection_read_path](checks/context/compaction.py) |
-| `context.compaction.compaction_status_consumers` | context | 压缩状态的 CLI 展示与追踪投影；context, recording | `check_compaction.py:check_compaction_status_consumers` | [check_compaction_status_consumers](checks/context/compaction.py) |
-| `context.compaction.activation_and_stable_reuse` | context | 摘要保存确认、活动版本切换与后续复用；context, sessions, recording | `check_compaction.py:check_activation_and_stable_reuse` | [check_activation_and_stable_reuse](checks/context/compaction.py) |
-| `context.compaction.request_options_through_compaction` | context | 请求选项贯穿选择、候选、真实保存和 SDK；context, sessions, execution | `check_compaction.py:check_request_options_through_compaction` | [check_request_options_through_compaction](checks/context/compaction.py) |
-| `context.compaction.refusal_boundaries` | context | 无可压缩历史或当前请求过大时保持旧版本；context, sessions | `check_compaction.py:check_refusal_boundaries` | [check_refusal_boundaries](checks/context/compaction.py) |
-| `context.compaction.summary_failure_cases` | context | 摘要服务、协议、来源及大小失败停止业务请求；context, execution | `check_compaction.py:check_summary_failure_cases` | [check_summary_failure_cases](checks/context/compaction.py) |
-| `context.compaction.usage_missing` | context | 摘要与业务用量缺失分计及新轮重置；context, recording, sessions | `check_compaction.py:check_usage_missing` | [check_usage_missing](checks/context/compaction.py) |
-| `context.compaction.summary_and_candidate_budget_boundaries` | context | 摘要请求及候选预算和准备失败边界；context, execution | `check_compaction.py:check_summary_and_candidate_budget_boundaries` | [check_summary_and_candidate_budget_boundaries](checks/context/compaction.py) |
-| `context.compaction.dynamic_summary_budgets` | context | 实际请求的 W/O/F/P 动态目标及超过软目标的合法摘要；context, execution | 动态摘要恢复新增 | [check_dynamic_summary_budgets](checks/context/compaction.py) |
-| `context.compaction.bounded_recovery_passes` | context | 同请求最多两次摘要、候选来源与请求归档及二次预检；context, sessions, recording | 动态摘要恢复新增 | [check_bounded_recovery_passes](checks/context/compaction.py) |
-| `context.compaction.second_pass_checkpoint_boundaries` | context | 重试与第二候选保存故障保持旧上下文及已发生消耗；context, sessions, recording | 动态摘要恢复新增 | [check_second_pass_checkpoint_boundaries](checks/context/compaction.py) |
-| `context.compaction.opaque_barriers_and_omissions` | context | 受保护历史阻止压缩及加密内容省略；context, sessions | `check_compaction.py:check_opaque_barriers_and_omissions` | [check_opaque_barriers_and_omissions](checks/context/compaction.py) |
-| `context.compaction.real_file_and_failure_source` | context | 真实文件及工具失败事实进入摘要来源；context, filesystem, execution | `check_compaction.py:check_real_file_and_failure_source` | [check_real_file_and_failure_source](checks/context/compaction.py) |
-| `context.compaction.repeated_compaction` | context | 同轮两次恢复的来源去重和工具结果保留；context, sessions, execution | `check_compaction.py:check_repeated_compaction` | [check_repeated_compaction](checks/context/compaction.py) |
-| `context.compaction.unattempted_recovery_record` | context | 未尝试恢复与已调用摘要记录保持区分；context, recording | `check_compaction.py:check_unattempted_recovery_record` | [check_unattempted_recovery_record](checks/context/compaction.py) |
-| `context.compaction.session_isolation` | context | 并发摘要、来源、版本及记录查询会话隔离；context, sessions | `check_compaction.py:check_session_isolation` | [check_session_isolation](checks/context/compaction.py) |
-| `context.compaction.runtime_tracing` | context | 摘要正文过滤、追踪开关和上传失败业务等价性；context, recording | `check_compaction.py:check_runtime_tracing` | [check_runtime_tracing](checks/context/compaction.py) |
-| `context.compaction.history_admission_and_cli` | context | 失败历史摘要准入及 CLI 压缩后连续交互；context, sessions, execution | `check_compaction.py:check_history_admission_and_cli` | [check_history_admission_and_cli](checks/context/compaction.py) |
-| `context.compaction.checkpoint_boundaries` | context | 候选、激活、最终保存及工具后恢复保存失败；context, sessions, execution, recording | `check_compaction.py:check_checkpoint_boundaries` | [check_checkpoint_boundaries](checks/context/compaction.py) |
-| `context.compaction.log_boundaries` | context | 摘要和版本日志失败及模型失败的组合边界；context, execution, recording | `check_compaction.py:check_log_boundaries` | [check_log_boundaries](checks/context/compaction.py) |
+| `context.compaction.prefix_independent_long_run_recovers_current_prefix_and_protects_three_groups` | context | 独立长 Run 压缩当前前缀并保护最近三组；context, sessions, recording | 当前 Compact 约定 | [check_prefix_independent_long_run_recovers_current_prefix_and_protects_three_groups](checks/context/compaction.py) |
+| `context.compaction.prefix_session_first_long_run_originals_and_r_inherit_with_old_turn` | context | 会话首轮原始记录完整，旧 R 随所属轮次继承；context, sessions, recording | 当前 Compact 约定 | [check_prefix_session_first_long_run_originals_and_r_inherit_with_old_turn](checks/context/compaction.py) |
+| `context.compaction.prefix_original_call_ids_remain_reserved_after_prefix_compaction` | context | 移出前缀后的原工具调用身份仍被保留；context, sessions, recording | 当前 Compact 约定 | [check_prefix_original_call_ids_remain_reserved_after_prefix_compaction](checks/context/compaction.py) |
+| `context.compaction.prefix_summary_failure_keeps_active_originals_and_does_not_replay_tools` | context | 摘要失败保留旧活动正文且不重放业务工具；context, sessions, recording | 当前 Compact 约定 | [check_prefix_summary_failure_keeps_active_originals_and_does_not_replay_tools](checks/context/compaction.py) |
+| `context.compaction.prefix_history_and_current_prefix_generate_h_then_r_and_commit_together` | context | 历史 H 与当前 R 顺序生成并整体提交；context, sessions, recording | 当前 Compact 约定 | [check_prefix_history_and_current_prefix_generate_h_then_r_and_commit_together](checks/context/compaction.py) |
+| `context.compaction.prefix_h_success_r_failure_keeps_both_original_views` | context | H 成功而 R 失败时保留两路原活动视图；context, sessions, recording | 当前 Compact 约定 | [check_prefix_h_success_r_failure_keeps_both_original_views](checks/context/compaction.py) |
+| `context.compaction.prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted` | context | 首个业务模型失败的历史仍保留错误终态；context, sessions, recording | 当前 Compact 约定 | [check_prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted](checks/context/compaction.py) |
+| `context.compaction.prefix_three_group_protection_keeps_entire_boundary_old_turn` | context | 保护边界进入旧轮时保留整个有效轮次；context, sessions, recording | 当前 Compact 约定 | [check_prefix_three_group_protection_keeps_entire_boundary_old_turn](checks/context/compaction.py) |
+| `context.compaction.prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay` | context | 模型搜索并回读 R 遗漏细节且不重放工具；context, sessions, recording | 当前 Compact 约定 | [check_prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay](checks/context/compaction.py) |
+| `context.compaction.prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies` | context | 过大合法候选只缩短一次，不重新附上原文；context, sessions, recording | 当前 Compact 约定 | [check_prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies](checks/context/compaction.py) |
+| `context.compaction.prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view` | context | 无效摘要来源在一次调用后停止并保留旧视图；context, sessions, recording | 当前 Compact 约定 | [check_prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view](checks/context/compaction.py) |
+| `context.compaction.prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts` | context | 保存故障保留原活动正文和已发生的工具、摘要事实；context, sessions, recording | 当前 Compact 约定 | [check_prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts](checks/context/compaction.py) |
+| `context.compaction.prefix_two_complete_attempts_can_call_both_lanes_but_never_a_fifth_summary` | context | 两次完整尝试可调用两路，绝不发起第五次摘要；context, sessions, recording | 当前 Compact 约定 | [check_prefix_two_complete_attempts_can_call_both_lanes_but_never_a_fifth_summary](checks/context/compaction.py) |
+| `context.compaction.prefix_second_oversized_candidate_stops_without_reinitializing_attempts` | context | 第二个候选仍超限时停止，不重置恢复额度；context, sessions, recording | 当前 Compact 约定 | [check_prefix_second_oversized_candidate_stops_without_reinitializing_attempts](checks/context/compaction.py) |
+| `context.compaction.prefix_source_version_change_preserves_latest_confirmed_view` | context | 源版本变化时保持最近已确认的活动视图；context, sessions, recording | 当前 Compact 约定 | [check_prefix_source_version_change_preserves_latest_confirmed_view](checks/context/compaction.py) |
+| `context.compaction.prefix_protected_context_too_large_stops_without_reducing_three_groups` | context | 保护区过大时停止，不减少三组保护；context, sessions, recording | 当前 Compact 约定 | [check_prefix_protected_context_too_large_stops_without_reducing_three_groups](checks/context/compaction.py) |
+| `context.compaction.prefix_summary_request_preflight_refuses_without_sending_or_recursive_recovery` | context | 摘要预检拒绝不发起调用，也不递归恢复；context, sessions, recording | 当前 Compact 约定 | [check_prefix_summary_request_preflight_refuses_without_sending_or_recursive_recovery](checks/context/compaction.py) |
+| `context.compaction.prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_groups` | context | 同响应多工具与合法失败保持完整交互组；context, sessions, recording | 当前 Compact 约定 | [check_prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_groups](checks/context/compaction.py) |
+| `context.compaction.prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection` | context | 未闭合多工具组不进入已确认前缀来源；context, sessions, recording | 当前 Compact 约定 | [check_prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection](checks/context/compaction.py) |
+| `context.compaction.prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation` | context | 旧 H 复用不调用模型，先扣实际占用再分配 R；context, sessions, recording | 当前 Compact 约定 | [check_prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation](checks/context/compaction.py) |
+| `context.compaction.prefix_actual_summary_request_larger_than_window_is_not_sent` | context | 真实摘要候选超过窗口时不发送；context, sessions, recording | 当前 Compact 约定 | [check_prefix_actual_summary_request_larger_than_window_is_not_sent](checks/context/compaction.py) |
+| `context.compaction.boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options` | context | 预算检查副本与实际 SDK 请求相同，含末轮收尾选项；context | 当前 Compact 约定 | [check_boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options](checks/context/compaction.py) |
+| `context.compaction.boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery` | context | 摘要超过软目标但预算、净回收和余量合格时提交；context | 当前 Compact 约定 | [check_boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery](checks/context/compaction.py) |
+| `context.compaction.boundaries_private_final_save_failure_cannot_report_completed` | context | 独立 Run 最终保存失败不能报告完成；context | 当前 Compact 约定 | [check_boundaries_private_final_save_failure_cannot_report_completed](checks/context/compaction.py) |
+| `context.compaction.boundaries_activation_confirmation_failure_keeps_old_activity_and_paid_facts` | context | 激活确认失败保持原视图和已付调用事实；context | 当前 Compact 约定 | [check_boundaries_activation_confirmation_failure_keeps_old_activity_and_paid_facts](checks/context/compaction.py) |
+| `context.compaction.boundaries_summary_logging_boundaries_do_not_send_or_enable_unsaved_work` | context | 摘要日志故障不发送或启用未确认工作；context | 当前 Compact 约定 | [check_boundaries_summary_logging_boundaries_do_not_send_or_enable_unsaved_work](checks/context/compaction.py) |
+| `context.compaction.boundaries_short_run_has_no_summary_or_history_tools_executed` | context | 短任务不触发摘要或历史工具执行；context | 当前 Compact 约定 | [check_boundaries_short_run_has_no_summary_or_history_tools_executed](checks/context/compaction.py) |
+| `context.compaction.history_records_survive_active_input_replacement_and_fixed_snapshot` | context | 替换活动正文后原始记录和固定快照仍可读取；context | 当前 Compact 约定 | [check_history_records_survive_active_input_replacement_and_fixed_snapshot](checks/context/compaction.py) |
+| `context.compaction.history_original_record_creation_preserves_invalid_input_for_admission` | context | 原始记录保留无效输入事实供准入判断；context | 当前 Compact 约定 | [check_history_original_record_creation_preserves_invalid_input_for_admission](checks/context/compaction.py) |
+| `context.compaction.history_native_saved_non_json_opaque_values_do_not_poison_later_records` | context | 原生保存的非 JSON 不透明值不破坏后续记录；context | 当前 Compact 约定 | [check_history_native_saved_non_json_opaque_values_do_not_poison_later_records](checks/context/compaction.py) |
+| `context.compaction.history_missing_sequences_and_conflicting_immutable_identity_fail` | context | 记录序号缺失或不可变身份冲突时拒绝读取；context | 当前 Compact 约定 | [check_history_missing_sequences_and_conflicting_immutable_identity_fail](checks/context/compaction.py) |
+| `context.compaction.history_unconfirmed_checkpoints_and_released_cache_are_unreadable` | context | 未确认检查点和已释放缓存不可读取；context | 当前 Compact 约定 | [check_history_unconfirmed_checkpoints_and_released_cache_are_unreadable](checks/context/compaction.py) |
+| `context.compaction.history_scope_is_immutable_and_contains_unreferenced_originals` | context | 检索范围不可变且包含未被摘要引用的原文；context | 当前 Compact 约定 | [check_history_scope_is_immutable_and_contains_unreferenced_originals](checks/context/compaction.py) |
+| `context.compaction.history_read_unicode_escape_pagination_matches_fixed_projection` | context | Unicode 与转义分页与固定可读视图一致；context | 当前 Compact 约定 | [check_history_read_unicode_escape_pagination_matches_fixed_projection](checks/context/compaction.py) |
+| `context.compaction.history_search_pages_have_no_omissions_and_cursors_are_bound` | context | 关键词分页无遗漏，游标绑定范围及查询；context | 当前 Compact 约定 | [check_history_search_pages_have_no_omissions_and_cursors_are_bound](checks/context/compaction.py) |
+| `context.compaction.history_cross_session_reference_is_rejected` | context | 跨会话来源引用被拒绝；context | 当前 Compact 约定 | [check_history_cross_session_reference_is_rejected](checks/context/compaction.py) |
+| `context.compaction.history_native_history_recall_has_no_artifact_or_file_budget` | context | 原生历史召回不创建 Artifact 或消耗文件读取额度；context | 当前 Compact 约定 | [check_history_native_history_recall_has_no_artifact_or_file_budget](checks/context/compaction.py) |
+| `context.compaction.history_opaque_projection_omits_encrypted_and_unknown_content` | context | 可读投影省略加密字段和未知不透明内容；context | 当前 Compact 约定 | [check_history_opaque_projection_omits_encrypted_and_unknown_content](checks/context/compaction.py) |
+| `context.compaction.history_tool_facts_distinguish_execution_and_observation_failure` | context | 工具执行失败与观测失败事实分别记录；context | 当前 Compact 约定 | [check_history_tool_facts_distinguish_execution_and_observation_failure](checks/context/compaction.py) |
+| `context.compaction.history_interruption_keeps_actual_facts_without_fabricating_results` | context | 中断保留实际事实，不编造终态结果；context | 当前 Compact 约定 | [check_history_interruption_keeps_actual_facts_without_fabricating_results](checks/context/compaction.py) |
+| `context.compaction.settings_defaults_and_limits` | context | 组保护与恢复余量配置默认值及数值边界；context | 当前 Compact 约定 | [check_settings_defaults_and_limits](checks/context/compaction.py) |
+| `context.compaction.settings_old_turn_setting_is_rejected_in_constructor_and_environment` | context | 构造和环境加载均拒绝旧轮次保护配置；context | 当前 Compact 约定 | [check_settings_old_turn_setting_is_rejected_in_constructor_and_environment](checks/context/compaction.py) |
+| `context.compaction.settings_new_environment_values_are_loaded_without_old_field` | context | 新环境配置正确加载且不再使用旧字段；context | 当前 Compact 约定 | [check_settings_new_environment_values_are_loaded_without_old_field](checks/context/compaction.py) |
+| `context.compaction.summary_lane_and_byte_target_are_independent_of_api_cap` | context | H/R 和字节目标独立于实际 API 输出上限；context | 当前 Compact 约定 | [check_summary_lane_and_byte_target_are_independent_of_api_cap](checks/context/compaction.py) |
+| `context.compaction.summary_invalid_size_or_lane_never_prepares_a_request` | context | 无效目标大小或摘要路别不构造请求；context | 当前 Compact 约定 | [check_summary_invalid_size_or_lane_never_prepares_a_request](checks/context/compaction.py) |
+| `context.compaction.summary_machine_refs_need_explicit_allowed_origin` | context | 机器引用必须属于显式允许的来源；context | 当前 Compact 约定 | [check_summary_machine_refs_need_explicit_allowed_origin](checks/context/compaction.py) |
+| `context.compaction.summary_invalid_source_or_structure_does_not_pass` | context | 无效来源或摘要结构不能通过解析；context | 当前 Compact 约定 | [check_summary_invalid_source_or_structure_does_not_pass](checks/context/compaction.py) |
+| `context.compaction.summary_minimum_size_measures_complete_lane_message` | context | 最小摘要计量包含完整消息包装；context | 当前 Compact 约定 | [check_summary_minimum_size_measures_complete_lane_message](checks/context/compaction.py) |
+| `context.compaction.summary_complete_multi_tool_group_including_failure_is_allowed` | context | 包含合法失败的完整多工具组允许压缩；context | 当前 Compact 约定 | [check_summary_complete_multi_tool_group_including_failure_is_allowed](checks/context/compaction.py) |
+| `context.compaction.summary_known_encrypted_reasoning_is_whole_group_only` | context | 已知加密 reasoning 仅随完整交互组移出；context | 当前 Compact 约定 | [check_summary_known_encrypted_reasoning_is_whole_group_only](checks/context/compaction.py) |
+| `context.compaction.summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers` | context | 未知协议、多模态、权限消息与未闭合项阻止压缩；context | 当前 Compact 约定 | [check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers](checks/context/compaction.py) |
 | `recording.transport.projection` | recording | 字段投影、密钥及路径过滤、原对象不变与载荷上限。；recording | `check_tracing.py:check_projection` | [check_projection](checks/recording/transport.py) |
 | `recording.projection.redaction_boundaries` | recording | 引号、转义、跨文本及截断边界的凭据过滤与幂等性。；recording | `check_trace_data.py:check_redaction_boundaries` | [check_redaction_boundaries](checks/recording/projection.py) |
 | `recording.projection.capacity_and_rounds` | recording | 容量与遗漏元数据、完整工具批次保留、回答和用量投影。；recording, execution | `check_trace_data.py:check_capacity_and_rounds` | [check_capacity_and_rounds](checks/recording/projection.py) |

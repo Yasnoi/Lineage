@@ -2071,437 +2071,709 @@
       "script": "benchmarks/checks/context/compaction.py",
       "groups": [
         {
-          "group_id": "context.compaction.configuration",
-          "description": "摘要和历史保留配置边界",
+          "group_id": "context.compaction.prefix_independent_long_run_recovers_current_prefix_and_protects_three_groups",
+          "description": "当前前缀与双路恢复：independent long run recovers current prefix and protects three groups",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_configuration"
+            "symbol": "check_prefix_independent_long_run_recovers_current_prefix_and_protects_three_groups"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_session_first_long_run_originals_and_r_inherit_with_old_turn",
+          "description": "当前前缀与双路恢复：session first long run originals and r inherit with old turn",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_session_first_long_run_originals_and_r_inherit_with_old_turn"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_original_call_ids_remain_reserved_after_prefix_compaction",
+          "description": "当前前缀与双路恢复：original call ids remain reserved after prefix compaction",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_original_call_ids_remain_reserved_after_prefix_compaction"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_summary_failure_keeps_active_originals_and_does_not_replay_tools",
+          "description": "当前前缀与双路恢复：summary failure keeps active originals and does not replay tools",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_summary_failure_keeps_active_originals_and_does_not_replay_tools"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_history_and_current_prefix_generate_h_then_r_and_commit_together",
+          "description": "当前前缀与双路恢复：history and current prefix generate h then r and commit together",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_history_and_current_prefix_generate_h_then_r_and_commit_together"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_h_success_r_failure_keeps_both_original_views",
+          "description": "当前前缀与双路恢复：h success r failure keeps both original views",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_h_success_r_failure_keeps_both_original_views"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted",
+          "description": "当前前缀与双路恢复：failed first model call history keeps error outcome when compacted",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_three_group_protection_keeps_entire_boundary_old_turn",
+          "description": "当前前缀与双路恢复：three group protection keeps entire boundary old turn",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_three_group_protection_keeps_entire_boundary_old_turn"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay",
+          "description": "当前前缀与双路恢复：model searches and reads detail missing from r without tool replay",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies",
+          "description": "当前前缀与双路恢复：oversized valid candidate is shortened once without original bodies",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view",
+          "description": "当前前缀与双路恢复：invalid summary source stops after one call and keeps original view",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts",
+          "description": "当前前缀与双路恢复：checkpoint failures keep old activity and actual tool and summary facts",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_two_complete_attempts_can_call_both_lanes_but_never_a_fifth_summary",
+          "description": "当前前缀与双路恢复：two complete attempts can call both lanes but never a fifth summary",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_two_complete_attempts_can_call_both_lanes_but_never_a_fifth_summary"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_second_oversized_candidate_stops_without_reinitializing_attempts",
+          "description": "当前前缀与双路恢复：second oversized candidate stops without reinitializing attempts",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_second_oversized_candidate_stops_without_reinitializing_attempts"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_source_version_change_preserves_latest_confirmed_view",
+          "description": "当前前缀与双路恢复：source version change preserves latest confirmed view",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_source_version_change_preserves_latest_confirmed_view"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_protected_context_too_large_stops_without_reducing_three_groups",
+          "description": "当前前缀与双路恢复：protected context too large stops without reducing three groups",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_protected_context_too_large_stops_without_reducing_three_groups"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_summary_request_preflight_refuses_without_sending_or_recursive_recovery",
+          "description": "当前前缀与双路恢复：summary request preflight refuses without sending or recursive recovery",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_summary_request_preflight_refuses_without_sending_or_recursive_recovery"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_groups",
+          "description": "当前前缀与双路恢复：multiple tool calls and legal failures remain in whole groups",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_groups"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection",
+          "description": "当前前缀与双路恢复：unclosed multi tool group is excluded from confirmed prefix selection",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation",
+          "description": "当前前缀与双路恢复：previous h is reused without call and deducted before r allocation",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.prefix_actual_summary_request_larger_than_window_is_not_sent",
+          "description": "当前前缀与双路恢复：actual summary request larger than window is not sent",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_prefix_actual_summary_request_larger_than_window_is_not_sent"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context",
+            "sessions",
+            "recording"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options",
+          "description": "预算与保存确认边界：checked requests equal actual sdk requests including final call options",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options"
           },
           "primary_area": "context",
           "tags": [
             "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_configuration",
-            "group_id": "check_compaction/check_configuration"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.stable_history_and_records",
-          "description": "未压缩活动版本与运行记录拷贝隔离",
+          "group_id": "context.compaction.boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery",
+          "description": "预算与保存确认边界：summary above soft target can commit with margin and positive recovery",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_stable_history_and_records"
+            "symbol": "check_boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_stable_history_and_records",
-            "group_id": "check_compaction/check_stable_history_and_records"
-          }
-        },
-        {
-          "group_id": "context.compaction.selection_read_path",
-          "description": "轻量历史选择与完整记录等价及源读取失败",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_selection_read_path"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "sessions",
-            "recording"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_selection_read_path",
-            "group_id": "check_compaction/check_selection_read_path"
-          }
-        },
-        {
-          "group_id": "context.compaction.compaction_status_consumers",
-          "description": "压缩状态的 CLI 展示与追踪投影",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_compaction_status_consumers"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "recording"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_compaction_status_consumers",
-            "group_id": "check_compaction/check_compaction_status_consumers"
-          }
-        },
-        {
-          "group_id": "context.compaction.activation_and_stable_reuse",
-          "description": "摘要保存确认、活动版本切换与后续复用",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_activation_and_stable_reuse"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "sessions",
-            "recording"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_activation_and_stable_reuse",
-            "group_id": "check_compaction/check_activation_and_stable_reuse"
-          }
-        },
-        {
-          "group_id": "context.compaction.request_options_through_compaction",
-          "description": "请求选项贯穿选择、候选、真实保存和 SDK",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_request_options_through_compaction"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "sessions",
-            "execution"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_request_options_through_compaction",
-            "group_id": "check_compaction/check_request_options_through_compaction"
-          }
-        },
-        {
-          "group_id": "context.compaction.refusal_boundaries",
-          "description": "无可压缩历史或当前请求过大时保持旧版本",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_refusal_boundaries"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "sessions"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_refusal_boundaries",
-            "group_id": "check_compaction/check_refusal_boundaries"
-          }
-        },
-        {
-          "group_id": "context.compaction.summary_failure_cases",
-          "description": "摘要服务、协议、来源及大小失败停止业务请求",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_failure_cases"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "execution"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_summary_failure_cases",
-            "group_id": "check_compaction/check_summary_failure_cases"
-          }
-        },
-        {
-          "group_id": "context.compaction.usage_missing",
-          "description": "摘要与业务用量缺失分计及新轮重置",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_usage_missing"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "recording",
-            "sessions"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_usage_missing",
-            "group_id": "check_compaction/check_usage_missing"
-          }
-        },
-        {
-          "group_id": "context.compaction.summary_and_candidate_budget_boundaries",
-          "description": "摘要请求及候选预算和准备失败边界",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_and_candidate_budget_boundaries"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "execution"
-          ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_summary_and_candidate_budget_boundaries",
-            "group_id": "check_compaction/check_summary_and_candidate_budget_boundaries"
-          }
-        },
-        {
-          "group_id": "context.compaction.dynamic_summary_budgets",
-          "description": "实际请求的 W/O/F/P 动态目标及超过软目标的合法摘要",
-          "source": {
-            "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_dynamic_summary_budgets"
-          },
-          "primary_area": "context",
-          "tags": [
-            "context",
-            "execution"
+            "context"
           ],
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.bounded_recovery_passes",
-          "description": "同请求最多两次摘要、候选来源与请求归档及二次预检",
+          "group_id": "context.compaction.boundaries_private_final_save_failure_cannot_report_completed",
+          "description": "预算与保存确认边界：private final save failure cannot report completed",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_bounded_recovery_passes"
+            "symbol": "check_boundaries_private_final_save_failure_cannot_report_completed"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions",
-            "recording"
+            "context"
           ],
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.second_pass_checkpoint_boundaries",
-          "description": "重试与第二候选保存故障保持旧上下文及已发生消耗",
+          "group_id": "context.compaction.boundaries_activation_confirmation_failure_keeps_old_activity_and_paid_facts",
+          "description": "预算与保存确认边界：activation confirmation failure keeps old activity and paid facts",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_second_pass_checkpoint_boundaries"
+            "symbol": "check_boundaries_activation_confirmation_failure_keeps_old_activity_and_paid_facts"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions",
-            "recording"
+            "context"
           ],
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.opaque_barriers_and_omissions",
-          "description": "受保护历史阻止压缩及加密内容省略",
+          "group_id": "context.compaction.boundaries_summary_logging_boundaries_do_not_send_or_enable_unsaved_work",
+          "description": "预算与保存确认边界：summary logging boundaries do not send or enable unsaved work",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_opaque_barriers_and_omissions"
+            "symbol": "check_boundaries_summary_logging_boundaries_do_not_send_or_enable_unsaved_work"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_opaque_barriers_and_omissions",
-            "group_id": "check_compaction/check_opaque_barriers_and_omissions"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.real_file_and_failure_source",
-          "description": "真实文件及工具失败事实进入摘要来源",
+          "group_id": "context.compaction.boundaries_short_run_has_no_summary_or_history_tools_executed",
+          "description": "预算与保存确认边界：short run has no summary or history tools executed",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_real_file_and_failure_source"
+            "symbol": "check_boundaries_short_run_has_no_summary_or_history_tools_executed"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "filesystem",
-            "execution"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_real_file_and_failure_source",
-            "group_id": "check_compaction/check_real_file_and_failure_source"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.repeated_compaction",
-          "description": "同轮两次恢复的来源去重和工具结果保留",
+          "group_id": "context.compaction.history_records_survive_active_input_replacement_and_fixed_snapshot",
+          "description": "原始记录与历史召回：records survive active input replacement and fixed snapshot",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_repeated_compaction"
+            "symbol": "check_history_records_survive_active_input_replacement_and_fixed_snapshot"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions",
-            "execution"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_repeated_compaction",
-            "group_id": "check_compaction/check_repeated_compaction"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.unattempted_recovery_record",
-          "description": "未尝试恢复与已调用摘要记录保持区分",
+          "group_id": "context.compaction.history_original_record_creation_preserves_invalid_input_for_admission",
+          "description": "原始记录与历史召回：original record creation preserves invalid input for admission",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_unattempted_recovery_record"
+            "symbol": "check_history_original_record_creation_preserves_invalid_input_for_admission"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "recording"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_unattempted_recovery_record",
-            "group_id": "check_compaction/check_unattempted_recovery_record"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.session_isolation",
-          "description": "并发摘要、来源、版本及记录查询会话隔离",
+          "group_id": "context.compaction.history_native_saved_non_json_opaque_values_do_not_poison_later_records",
+          "description": "原始记录与历史召回：native saved non json opaque values do not poison later records",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_session_isolation"
+            "symbol": "check_history_native_saved_non_json_opaque_values_do_not_poison_later_records"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_session_isolation",
-            "group_id": "check_compaction/check_session_isolation"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.runtime_tracing",
-          "description": "摘要正文过滤、追踪开关和上传失败业务等价性",
+          "group_id": "context.compaction.history_missing_sequences_and_conflicting_immutable_identity_fail",
+          "description": "原始记录与历史召回：missing sequences and conflicting immutable identity fail",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_runtime_tracing"
+            "symbol": "check_history_missing_sequences_and_conflicting_immutable_identity_fail"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "recording"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_runtime_tracing",
-            "group_id": "check_compaction/check_runtime_tracing"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.history_admission_and_cli",
-          "description": "失败历史摘要准入及 CLI 压缩后连续交互",
+          "group_id": "context.compaction.history_unconfirmed_checkpoints_and_released_cache_are_unreadable",
+          "description": "原始记录与历史召回：unconfirmed checkpoints and released cache are unreadable",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_history_admission_and_cli"
+            "symbol": "check_history_unconfirmed_checkpoints_and_released_cache_are_unreadable"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions",
-            "execution"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_history_admission_and_cli",
-            "group_id": "check_compaction/check_history_admission_and_cli"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.checkpoint_boundaries",
-          "description": "候选、激活、最终保存及工具后恢复保存失败",
+          "group_id": "context.compaction.history_scope_is_immutable_and_contains_unreferenced_originals",
+          "description": "原始记录与历史召回：scope is immutable and contains unreferenced originals",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_checkpoint_boundaries"
+            "symbol": "check_history_scope_is_immutable_and_contains_unreferenced_originals"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "sessions",
-            "execution",
-            "recording"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_checkpoint_boundaries",
-            "group_id": "check_compaction/check_checkpoint_boundaries"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.log_boundaries",
-          "description": "摘要和版本日志失败及模型失败的组合边界",
+          "group_id": "context.compaction.history_read_unicode_escape_pagination_matches_fixed_projection",
+          "description": "原始记录与历史召回：read unicode escape pagination matches fixed projection",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_log_boundaries"
+            "symbol": "check_history_read_unicode_escape_pagination_matches_fixed_projection"
           },
           "primary_area": "context",
           "tags": [
-            "context",
-            "execution",
-            "recording"
+            "context"
           ],
-          "entry_module": "benchmarks.checks.context.compaction",
-          "legacy_source": {
-            "commit": "c97467ed41bcd3a0232033f9160d15199b30069b",
-            "path": "scripts/check_compaction.py",
-            "symbol": "check_log_boundaries",
-            "group_id": "check_compaction/check_log_boundaries"
-          }
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_search_pages_have_no_omissions_and_cursors_are_bound",
+          "description": "原始记录与历史召回：search pages have no omissions and cursors are bound",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_search_pages_have_no_omissions_and_cursors_are_bound"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_cross_session_reference_is_rejected",
+          "description": "原始记录与历史召回：cross session reference is rejected",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_cross_session_reference_is_rejected"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_native_history_recall_has_no_artifact_or_file_budget",
+          "description": "原始记录与历史召回：native history recall has no artifact or file budget",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_native_history_recall_has_no_artifact_or_file_budget"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_opaque_projection_omits_encrypted_and_unknown_content",
+          "description": "原始记录与历史召回：opaque projection omits encrypted and unknown content",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_opaque_projection_omits_encrypted_and_unknown_content"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_tool_facts_distinguish_execution_and_observation_failure",
+          "description": "原始记录与历史召回：tool facts distinguish execution and observation failure",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_tool_facts_distinguish_execution_and_observation_failure"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.history_interruption_keeps_actual_facts_without_fabricating_results",
+          "description": "原始记录与历史召回：interruption keeps actual facts without fabricating results",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_history_interruption_keeps_actual_facts_without_fabricating_results"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.settings_defaults_and_limits",
+          "description": "配置迁移：defaults and limits",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_settings_defaults_and_limits"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.settings_old_turn_setting_is_rejected_in_constructor_and_environment",
+          "description": "配置迁移：old turn setting is rejected in constructor and environment",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_settings_old_turn_setting_is_rejected_in_constructor_and_environment"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.settings_new_environment_values_are_loaded_without_old_field",
+          "description": "配置迁移：new environment values are loaded without old field",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_settings_new_environment_values_are_loaded_without_old_field"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_lane_and_byte_target_are_independent_of_api_cap",
+          "description": "摘要与协议约定：lane and byte target are independent of api cap",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_lane_and_byte_target_are_independent_of_api_cap"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_invalid_size_or_lane_never_prepares_a_request",
+          "description": "摘要与协议约定：invalid size or lane never prepares a request",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_invalid_size_or_lane_never_prepares_a_request"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_machine_refs_need_explicit_allowed_origin",
+          "description": "摘要与协议约定：machine refs need explicit allowed origin",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_machine_refs_need_explicit_allowed_origin"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_invalid_source_or_structure_does_not_pass",
+          "description": "摘要与协议约定：invalid source or structure does not pass",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_invalid_source_or_structure_does_not_pass"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_minimum_size_measures_complete_lane_message",
+          "description": "摘要与协议约定：minimum size measures complete lane message",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_minimum_size_measures_complete_lane_message"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_complete_multi_tool_group_including_failure_is_allowed",
+          "description": "摘要与协议约定：complete multi tool group including failure is allowed",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_complete_multi_tool_group_including_failure_is_allowed"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_known_encrypted_reasoning_is_whole_group_only",
+          "description": "摘要与协议约定：known encrypted reasoning is whole group only",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_known_encrypted_reasoning_is_whole_group_only"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers",
+          "description": "摘要与协议约定：unrecognized nontext authority and incomplete items are barriers",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
         }
       ],
       "module": "context"

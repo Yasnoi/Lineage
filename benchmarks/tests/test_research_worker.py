@@ -382,8 +382,8 @@ class ResearchWorkerTests(unittest.TestCase):
         background_bytes = 6144 if current_profile else 12288
         background.write_text("b" * background_bytes, encoding="utf-8")
         self.spec["case_id"] = "compaction-fixture"
-        self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288, "pressure_max_bytes": 32768}
-        self.spec["prompts"] = ["read initial files", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
+        self.spec["mechanism"] = {"kind": "compaction", "source_turn": 1, "pressure_turn": 5, "follow_up_turn": 6, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288, "pressure_max_bytes": 32768}
+        self.spec["prompts"] = ["read initial files", "ack only", "ack only", "ack only", "padding no facts: ", "report old facts without tools"]
         # Raw background is archived before entering context. Allow bounded
         # pressure to compensate for the shorter observation while retaining
         # the real compaction/source/version checks below.
@@ -416,14 +416,14 @@ class ResearchWorkerTests(unittest.TestCase):
         with patch.object(worker, "compaction_coverage", wraps=original_coverage) as coverage_spy:
             result, code, captured = self.execute(respond)
         self.assertEqual(code, 0, result["issues"])
-        self.assertEqual(len(result["turns"]), 5)
+        self.assertEqual(len(result["turns"]), 6)
         self.assertTrue(all(c["status"] == "verified" for c in result["coverage"]), result["coverage"])
         self.assertEqual(result["verdict"], "pending_review")
         self.assertEqual(result["metrics"]["sdk_requests"]["value"], len(captured))
         self.assertEqual(result["metrics"]["summary_requests"]["value"], 2 if second_pass else 1)
         self.assertEqual(result["metrics"]["total_tokens"]["value"], len(captured) * 12)
         if current_profile:
-            pressure = result["turns"][3]["pressure"]
+            pressure = result["turns"][4]["pressure"]
             self.assertEqual(pressure["max_padding_bytes"], 32768)
             self.assertGreater(pressure["padding_bytes"], 16384)
             self.assertFalse(pressure["capped"])
@@ -433,10 +433,10 @@ class ResearchWorkerTests(unittest.TestCase):
             self.assertTrue(all("payload" not in item for item in summaries[1]["sources"]))
             args = list(coverage_spy.call_args.args)
             original_record = deepcopy(args[-1])
-            for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("sources", {})):
+            for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("document", {})):
                 with self.subTest(corrupted_binding=field):
                     args[-1] = deepcopy(original_record)
-                    args[-1]["summary_results"][1]["compaction"][field] = value
+                    args[-1]["summary_results"][1]["compaction"]["lanes"]["H"][field] = value
                     coverage = original_coverage(*args)
                     self.assertEqual(next(item for item in coverage if item["name"] == "summary_saved_and_activated")["status"], "gap")
 
@@ -448,13 +448,64 @@ class ResearchWorkerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SUMMARY_TARGET_PERCENT"):
                     worker.make_settings(spec)
 
+    def test_single_run_recalls_small_original_omitted_from_summary(self):
+        from benchmarks.core.files import ROOT
+        from benchmarks.suites.wechat_reporting.suite import definition
+        task = next(task for task in definition()["units"] if task["case_id"] == "history-recall")
+        for fixture in task["fixtures"]:
+            path = self.material / fixture["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((ROOT / fixture["text_path"]).read_bytes())
+        self.spec.update(case_id=task["case_id"], prompts=task["turns"], mechanism=task["mechanism"])
+        self.spec["profile"].update(task["settings_overrides"], max_model_calls=30)
+        count = 0
+        def native_call(name, arguments):
+            return {"status": "completed", "output": [{"type": "function_call", "call_id": f"native-{count}",
+                    "name": name, "arguments": json.dumps(arguments), "status": "completed"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}
+        def respond(request):
+            nonlocal count
+            if is_summary_request(request):
+                sources = json.loads(request["input"][0]["content"])["sources"]
+                document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
+                # Deliberately omit the target number/negation to prove original recall,
+                # independently from the real model's semantic quality checks.
+                document["facts"] = [{"text": "Early chain was read; use original history for details.",
+                                      "source_ids": [sources[0]["source_id"]]}]
+                return message(json.dumps(document))
+            count += 1
+            if count <= 16:
+                return call(task["mechanism"]["chain_paths"][count - 1], f"chain-{count}")
+            if count == 17:
+                for item in request["input"]:
+                    if item.get("role") == "assistant" and isinstance(item.get("content"), str):
+                        try:
+                            summary = json.loads(item["content"])
+                        except ValueError:
+                            continue
+                        if summary.get("lane") == "R":
+                            return native_call("history_search", {"history_ref": summary["history"]["history_ref"],
+                                               "keywords": ["LARCH-17"], "cursor": None})
+                self.fail("expected current prefix summary and discoverable scope")
+            if count == 18:
+                output = next(item for item in reversed(request["input"]) if item.get("type") == "function_call_output")
+                result = json.loads(json.loads(output["output"])["observation"]["raw_result"])
+                return native_call("history_read", {"source_ref": result["hits"][0]["source_ref"], "start": 0, "end": None})
+            return message("Original recalled; semantic answer is not scored by this fixture.")
+        result, code, captured = self.execute(respond)
+        self.assertEqual(code, 0, result["issues"])
+        self.assertEqual(result["agent_outcome"]["value"], "completed")
+        self.assertTrue(all(check["status"] == "verified" for check in result["coverage"]), result["coverage"])
+        self.assertGreater(result["metrics"]["summary_requests"]["value"], 0)
+        self.assertEqual(result["turns"][0]["metrics"]["recall_calls"]["value"]["history_read"], 1)
+
     def test_compaction_missing_mechanism_and_reread_cannot_pass(self):
         observer = Observer(RequestBudget(self.root / "ledger", "run", "case"), self.output, self.material)
-        result = worker.compaction_coverage(observer, [], None, None, ["a"] * 5, {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
+        result = worker.compaction_coverage(observer, [], None, None, ["a"] * 6, {"kind": "compaction", "source_turn": 1, "pressure_turn": 5, "follow_up_turn": 6, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
         self.assertTrue(all(check["status"] == "gap" for check in result))
-        states = [{"summary_calls": 0, "tool_calls": 0} for _ in range(5)]
-        states[4]["tool_calls"] = 1
-        result = worker.compaction_coverage(observer, states, None, None, ["a"] * 5, {"kind": "compaction", "source_turn": 1, "pressure_turn": 4, "follow_up_turn": 5, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
+        states = [{"summary_calls": 0, "tool_calls": 0} for _ in range(6)]
+        states[5]["tool_calls"] = 1
+        result = worker.compaction_coverage(observer, states, None, None, ["a"] * 6, {"kind": "compaction", "source_turn": 1, "pressure_turn": 5, "follow_up_turn": 6, "no_tools_from_turn": 2, "source_path": "code/miniprogram/domain/form.ts", "background_path": "evaluation-fixtures/background.txt", "background_bytes": 12288})
         self.assertEqual(next(check for check in result if check["name"] == "no_recent_tool_reads")["status"], "gap")
 
 

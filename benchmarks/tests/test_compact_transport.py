@@ -15,6 +15,7 @@ from lineage_agent.models.budget import annotate_context_risks, check_context_bu
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import (
     SUMMARY_INSTRUCTIONS, is_summary_request, prepare_summary_request, summary_budget_settings,
+    summary_request_lane,
 )
 
 
@@ -68,23 +69,25 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
 
         client, http = self.make_client(capture)
         async with client:
-            for target in (640, 1379):
-                with self.subTest(target=target):
-                    request = prepare_summary_request(SETTINGS, MATERIAL, target_tokens=target)
+            for lane, target in (("H", 640), ("R", 1379)):
+                with self.subTest(lane=lane, target=target):
+                    request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=target, lane=lane)
                     measured = deepcopy(request)
                     risks = annotate_context_risks(
                         request["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline-run",
                     )
-                    budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, target))
+                    budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS))
                     self.assertEqual(budget["decision"], "allow")
-                    self.assertEqual(budget["output_reserve_tokens"], target)
+                    self.assertEqual(budget["output_reserve_tokens"], SETTINGS.max_output_tokens)
                     self.assertEqual(budget["transparent_tokens"], len(json.dumps(
                         measured, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
                     ).encode("utf-8")))
                     result = await responses.send_prepared_response(client, request, purpose="summary")
                     self.assertEqual(request, measured)
                     self.assertEqual(bodies[-1], measured)
-                    self.assertEqual(bodies[-1]["max_output_tokens"], target)
+                    self.assertEqual(bodies[-1]["max_output_tokens"], SETTINGS.max_output_tokens)
+                    self.assertIn(f"at most {target} UTF-8 bytes", bodies[-1]["instructions"])
+                    self.assertEqual(summary_request_lane(bodies[-1]), lane)
                     self.assertEqual(bodies[-1]["reasoning"], {"effort": "none"})
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
                     self.assertNotIn("tools", bodies[-1])
@@ -115,7 +118,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
             }})
 
         client, http = self.make_client(reject)
-        request = prepare_summary_request(SETTINGS, MATERIAL, target_tokens=900)
+        request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=900)
         async with client:
             with self.assertRaises(responses.ModelError) as raised:
                 await responses.send_prepared_response(client, request, purpose="summary")
@@ -144,10 +147,11 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
 
     def test_summary_recognition_requires_canonical_dynamic_protocol(self):
         for target in (1, 900, 4000):
-            request = prepare_summary_request(SETTINGS, MATERIAL, target_tokens=target)
+            request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=target)
             self.assertTrue(is_summary_request(request))
             for change in (
-                {"max_output_tokens": target + 1}, {"reasoning": {"effort": "low"}},
+                {"max_output_tokens": SETTINGS.max_output_tokens + 1}, {"reasoning": {"effort": "low"}},
+                {"max_output_tokens": float(SETTINGS.max_output_tokens)},
                 {"instructions": SUMMARY_INSTRUCTIONS},
                 {"tools": [{"type": "function", "name": "unexpected", "parameters": {}}]},
             ):

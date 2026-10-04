@@ -1,0 +1,755 @@
+{
+  "version": "wechat-rubric-v3",
+  "reviewer": "human_or_calibrated_llm",
+  "scope": "固定材料与当前只读 Research；构造变体不代表原仓库缺陷。",
+  "decision_rule": "适用必需项全部满足、无严重错误且必要机制得到确认才通过；未完成评审保持待评审。",
+  "evidence_rule": "依据必须可定位并支持结论；不使用关键词命中代替语义判定。",
+  "dimensions": [
+    {
+      "id": "facts_evidence",
+      "description": "事实与证据"
+    },
+    {
+      "id": "target_coverage",
+      "description": "目标覆盖"
+    },
+    {
+      "id": "reasoning",
+      "description": "分析合理性"
+    },
+    {
+      "id": "uncertainty_boundaries",
+      "description": "不确定性与边界"
+    },
+    {
+      "id": "constraints_history",
+      "description": "约束与历史"
+    },
+    {
+      "id": "execution_consistency",
+      "description": "执行一致性"
+    }
+  ],
+  "cases": {
+    "requirements-coverage": {
+      "conditions": [
+        {
+          "id": "requirements-coverage-1",
+          "dimension": "target_coverage",
+          "description": "覆盖模拟人员选择、表单、草稿恢复、签名关联和 Mock 提交流程；建立要求—实现—验证—缺口的可复查对应关系。",
+          "required": true,
+          "source_refs": [
+            "code/README.md",
+            "code/docs/development/architecture.md",
+            "code/docs/development/verification.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "requirements-coverage-2",
+          "dimension": "reasoning",
+          "description": "本地草稿及 PNG 保存不证明生产离线下载上传同步；内容版本关联不证明身份核验；生产加密不在模板实现承诺内；OCR 结论限定查阅范围。解释完成状态所依赖的证据及限制。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts",
+            "code/miniprogram/services/mock-gateway.ts",
+            "requirements/docs/reference/简览.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "requirements-coverage-3",
+          "dimension": "facts_evidence",
+          "description": "区分原简览转写的加密/脱敏问号与后续简报确定语气，不将措辞变化当作已有确认记录。",
+          "required": true,
+          "source_refs": [
+            "requirements/transcripts/简览.md",
+            "requirements/transcripts/信息采集小程序需求简报.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "requirements-coverage-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "requirements-coverage-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "requirements-coverage-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "module-purpose": {
+      "conditions": [
+        {
+          "id": "module-purpose-1",
+          "dimension": "target_coverage",
+          "description": "从指定模块的实际行为反向对应采集、校验、签名和提交要求，覆盖追问的调用关系与条件。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/services/collection-service.ts",
+            "code/miniprogram/domain/form.ts",
+            "code/docs/development/architecture.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "module-purpose-2",
+          "dimension": "reasoning",
+          "description": "解释内容变更、签名版本和提交边界之间的关联；不能仅因函数名相似就认定需求已实现，也不能把推断写成作者明确意图。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts#updateField",
+            "code/miniprogram/domain/form.ts#isSignatureCurrent",
+            "code/miniprogram/services/collection-service.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "module-purpose-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "module-purpose-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "module-purpose-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "module-purpose-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "defect-reference": {
+      "conditions": [
+        {
+          "id": "defect-reference-1",
+          "dimension": "facts_evidence",
+          "description": "原版 updateField 在值变化时递增 revision 并移除 signature，值不变直接返回原对象；在指定路径内不能捏造“改值仍保留有效旧签名”的缺陷。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts#updateField",
+            "code/miniprogram/domain/form.ts#isSignatureCurrent",
+            "code/tests/form.test.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-reference-2",
+          "dimension": "target_coverage",
+          "description": "给出已签名草稿、修改实际值、检查有效性这一具体情景，以及可复查的代码路径与验证办法。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-reference-3",
+          "dimension": "reasoning",
+          "description": "区分实际值变化与同值更新；说明文档/测试期望和运行代码之间的关系。对原版的局部无缺陷结论不得扩大到整个项目。",
+          "required": true,
+          "source_refs": [
+            "code/docs/development/architecture.md",
+            "code/tests/form.test.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-reference-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "defect-reference-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-reference-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "defect-changed": {
+      "conditions": [
+        {
+          "id": "defect-changed-1",
+          "dimension": "facts_evidence",
+          "description": "构造变体修改值后不递增 revision 且保留 signature；isSignatureCurrent 因绑定未变仍可返回真。定位这条失效路径和用户对变更内容的确认风险，不能仅建议更多测试。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts#updateField",
+            "code/miniprogram/domain/form.ts#isSignatureCurrent",
+            "code/tests/form.test.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-changed-2",
+          "dimension": "target_coverage",
+          "description": "给出已签名草稿、修改实际值、检查有效性这一具体情景，以及可复查的代码路径与验证办法。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-changed-3",
+          "dimension": "reasoning",
+          "description": "区分实际值变化与同值更新；说明文档/测试期望和运行代码之间的关系。对原版的局部无缺陷结论不得扩大到整个项目。",
+          "required": true,
+          "source_refs": [
+            "code/docs/development/architecture.md",
+            "code/tests/form.test.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-changed-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "defect-changed-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "defect-changed-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "performance-risk": {
+      "conditions": [
+        {
+          "id": "performance-risk-1",
+          "dimension": "facts_evidence",
+          "description": "识别 read 的全量对象校验及 JSON 克隆、write 的克隆、getResult 的遍历；以实际路径支持分析。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/storage/repository.ts#read",
+            "code/miniprogram/storage/repository.ts#write",
+            "code/miniprogram/storage/repository.ts#getResult"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "performance-risk-2",
+          "dimension": "reasoning",
+          "description": "以本地累计数据大小/条目量说明时间和空间风险；明确每项复杂度判断的操作与假设，不能从客户端路径推导生产并发失败。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/storage/repository.ts",
+            "requirements/docs/reference/简览.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "performance-risk-3",
+          "dimension": "target_coverage",
+          "description": "给出递增数据规模、典型读写负载、耗时/内存等可观察指标和对照，说明何种结果会推翻风险判断；不编造测试数字。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/storage/repository.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "performance-risk-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "performance-risk-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "performance-risk-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "performance-risk-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "improvement-plan": {
+      "conditions": [
+        {
+          "id": "improvement-plan-1",
+          "dimension": "target_coverage",
+          "description": "提出至少两个不同的合理方案并给出可实施的优先选择、修改边界与验证办法，不把要求扩成全面重建生产后端。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/storage/repository.ts",
+            "code/miniprogram/ports/platform.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "improvement-plan-2",
+          "dimension": "reasoning",
+          "description": "方案针对实际全量状态存取或查询路径；权衡存储一致性、失败恢复、迁移/兼容及维护成本，不能只列技术名词。允许索引、存储拆分、归档等多种有依据方案。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/storage/repository.ts#completeSubmission",
+            "code/docs/development/architecture.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "improvement-plan-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "improvement-plan-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "improvement-plan-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "improvement-plan-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "handoff-correction": {
+      "conditions": [
+        {
+          "id": "handoff-correction-1",
+          "dimension": "target_coverage",
+          "description": "第三轮保留模板范围、三个栏目、实际完成项、证据和待办；不需重述用户已经撤销的任务。",
+          "required": true,
+          "source_refs": [
+            "code/README.md",
+            "code/docs/development/verification.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "handoff-correction-2",
+          "dimension": "reasoning",
+          "description": "根据纠正重新判断哪些事项属于验收缺口，哪些只是范围之外；交付不被反复解释已撤销要求所污染。允许必要且简短的范围说明。",
+          "required": true,
+          "source_refs": [
+            "code/README.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "handoff-correction-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "handoff-correction-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "handoff-correction-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "handoff-correction-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "read-limit": {
+      "conditions": [
+        {
+          "id": "read-limit-1",
+          "dimension": "target_coverage",
+          "description": "真实尝试目标测试文件，失败后继续利用可取得材料；解释未能核对具体断言的影响。",
+          "required": true,
+          "source_refs": [
+            "code/tests/collection-service.test.ts",
+            "code/docs/development/verification.md"
+          ],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "read-limit-2",
+          "dimension": "reasoning",
+          "description": "可以使用开发文档的测试覆盖说明，但须明确为间接证据；不从读取失败推导测试失败或文件损坏。",
+          "required": true,
+          "source_refs": [
+            "code/docs/development/verification.md"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "read-limit-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "read-limit-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "read-limit-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "read-limit-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ]
+    },
+    "compaction-continuation": {
+      "conditions": [
+        {
+          "id": "compaction-continuation-1",
+          "dimension": "facts_evidence",
+          "description": "正确说明实际字段变化使 revision 递增并移除签名，同值返回原对象；hasInk 只检测移动笔迹。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "compaction-continuation-2",
+          "dimension": "target_coverage",
+          "description": "最终轮完成行为、需求关联、来源和旧约束的研究回答；准备轮确认不等于研究完成。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "compaction-continuation-3",
+          "dimension": "reasoning",
+          "description": "解释规则服务于内容变更后的再次确认，不把移动笔迹解释为身份或真伪核验。设计意图没有直接文档时须标明推断。",
+          "required": true,
+          "source_refs": [
+            "code/miniprogram/domain/form.ts#updateField",
+            "code/miniprogram/domain/form.ts#hasInk"
+          ],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "compaction-continuation-evidence",
+          "dimension": "facts_evidence",
+          "required": true,
+          "description": "各实质结论可追到实际查阅的源码或原文；引用确实支持结论，不能以路径存在替代支持关系。允许其他可核验的有效来源。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "compaction-continuation-limits",
+          "dimension": "uncertainty_boundaries",
+          "required": true,
+          "description": "区分明确事实、合理推断、待验证风险与建议。未发现不扩大为绝对不存在；缺少证据不虚构确定结论。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "compaction-continuation-execution",
+          "dimension": "execution_consistency",
+          "required": true,
+          "description": "读取、测试、失败及未完成描述与真实过程一致；文件中存在测试不表示本次已执行。",
+          "source_refs": [],
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "compaction-continuation-history",
+          "dimension": "constraints_history",
+          "required": true,
+          "description": "后续轮次使用已有事实、来源和有效约束；对纠正作出实质更新，不用重复首次答案代替追问。",
+          "source_refs": [],
+          "judge_scope": "model_suggestion"
+        }
+      ],
+      "severe_errors": [
+        {
+          "id": "fabricated-evidence",
+          "description": "编造已读内容、测试或压测结果、来源、生产能力或设计决策记录。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "unsupported-certainty",
+          "description": "将局部检查结果扩大为无条件结论，或把签名关联说成身份/真伪核验。",
+          "judge_scope": "model_suggestion"
+        },
+        {
+          "id": "ignored-scope",
+          "description": "忽视用户明确纠正后的范围、禁止事项或必要交付目标。",
+          "judge_scope": "human_only"
+        }
+      ],
+      "mechanism_review": [
+        {
+          "id": "no-recent-leak",
+          "required": true,
+          "description": "对照二至四轮回答和后续输入，目标事实及长期约束没有经近期回答、新提示或重新读取再次提供；否则不能确认摘要保留能力。",
+          "judge_scope": "human_only"
+        },
+        {
+          "id": "source-retention",
+          "required": true,
+          "description": "结合保存摘要及机制证据，确认最终结论可追到被压缩的旧记录；摘要存在不等于事实保留正确。",
+          "judge_scope": "human_only"
+        }
+      ]
+    }
+  }
+}

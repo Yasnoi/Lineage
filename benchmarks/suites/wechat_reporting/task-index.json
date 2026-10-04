@@ -1,5 +1,5 @@
 {
-  "version": "2",
+  "version": "3",
   "tasks": [
     "requirements-coverage",
     "module-purpose",
@@ -9,6 +9,7 @@
     "improvement-plan",
     "handoff-correction",
     "read-limit",
-    "compaction-continuation"
+    "compaction-continuation",
+    "history-recall"
   ]
 }
