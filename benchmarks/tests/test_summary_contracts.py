@@ -44,6 +44,9 @@ class SummaryContractsTests(unittest.TestCase):
         self.assertIn("Do not attribute historical work", current["instructions"])
         self.assertIn("截至覆盖范围", current["instructions"])
         self.assertIn("Missing from these sources does not mean", current["instructions"])
+        self.assertIn("Every progress entry, including facts", current["instructions"])
+        self.assertIn("Output this five-field document itself", current["instructions"])
+        self.assertIn("actual result or execution-fact source", current["instructions"])
         self.assertNotEqual(historical["instructions"], current["instructions"])
 
     def test_invalid_size_or_lane_never_prepares_a_request(self):
@@ -70,6 +73,12 @@ class SummaryContractsTests(unittest.TestCase):
     def test_invalid_source_or_structure_does_not_pass(self):
         value = result()
         document = json.loads(value["text"])
+        for wrapped in ({"document": document},
+                        {"kind": "derived_context_summary", "summary_id": "made-up", "document": document},
+                        {"derived_context_summary": document},
+                        {**document, "summary_id": "made-up"}):
+            with self.subTest(wrapped=list(wrapped)), self.assertRaises(SummaryError):
+                parse_summary({**value, "text": json.dumps(wrapped)}, allowed_source_ids={SOURCE}, summary_id="summary")
         for sources in ([], [SOURCE, SOURCE], ["history://record/forged/2"]):
             document["facts"][0]["source_ids"] = sources
             with self.subTest(sources=sources), self.assertRaises(SummaryError):

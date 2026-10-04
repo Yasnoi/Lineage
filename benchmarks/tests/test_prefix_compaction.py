@@ -14,6 +14,7 @@ from benchmarks.checks.support.runtime import LocalClient, TOOL, call, message, 
 from lineage_agent.agent import runtime
 from lineage_agent.agent.checkpointing import SessionCheckpointer
 from lineage_agent.agent.context import ContextRecords, json_bytes
+from lineage_agent.agent.records import record_projection
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
@@ -102,7 +103,23 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["stop_reason"], "completed", (state.get("error_code"), state.get("error"), state.get("compaction")))
 
     async def test_independent_long_run_recovers_current_prefix_and_protects_three_groups(self):
-        state, client = await self.standalone()
+        original_material = ContextRecords.material
+        materials = []
+        async def audit_material(records, compaction, lane, state):
+            material = await original_material(records, compaction, lane, state)
+            self.assertNotIn("allowed_source_ids", material)
+            expected = []
+            for ref in compaction["lanes"][lane]["source_refs"]:
+                record = await records.store.get(ref, checkpoint_id=compaction["snapshot"]["source_checkpoint_id"])
+                projection, opaque = record_projection(record)
+                expected.append({"source_id": ref, "kind": record["kind"], "group_id": record.get("group_id"),
+                                 "payload": json.loads(projection), "opaque_omitted": opaque})
+            self.assertEqual(material["sources"], expected)
+            materials.append(deepcopy(material))
+            return material
+        with patch.object(ContextRecords, "material", new=audit_material):
+            state, client = await self.standalone()
+        self.assertEqual([unpack_summary_material(request) for request in client.summary_requests], materials)
         self.assert_complete(state)
         self.assertGreater(state["summary_calls"], 0)
         self.assertEqual(state["model_calls"], 11)

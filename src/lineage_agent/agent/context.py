@@ -261,8 +261,7 @@ class ContextRecords:
             sources.append({"source_id": source_ref, "kind": record["kind"],
                             "group_id": record.get("group_id"), "payload": json.loads(projection),
                             "opaque_omitted": opaque})
-        material = {"sources": sources, "previous_summary": documents,
-                    "turn_outcomes": [], "allowed_source_ids": selected["allowed_source_ids"]}
+        material = {"sources": sources, "previous_summary": documents, "turn_outcomes": []}
         if lane == "R":
             active = state["active_context"]
             start = active["turn_start"]
