@@ -7,7 +7,7 @@ from benchmarks.core.contracts import known, unknown
 from benchmarks.core.evidence import digest
 from benchmarks.core.files import atomic_write_json
 from lineage_agent.models.budget import check_context_budget
-from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.models.summarization import is_summary_request, unpack_summary_material
 from lineage_agent.tools.types import serialize_tool_output
 
 
@@ -20,8 +20,7 @@ HISTORY_CHECKS = (
 
 def material(request):
     try:
-        value = json.loads(request["input"][0]["content"])
-        return value if isinstance(value, dict) else {}
+        return unpack_summary_material(request)
     except (KeyError, IndexError, TypeError, ValueError):
         return {}
 
@@ -75,18 +74,27 @@ def covered(source_ref, ranges):
         return False
 
 
-def _tool_pairs(requests):
-    """Unique calls and their actual terminal results visible to the transport."""
+def _tool_pairs(requests, final_items=None):
+    """Unique actual protocol results, including a terminal unsent tool batch."""
     calls, outputs = {}, {}
+    inputs = []
     for request in requests:
         if is_summary_request(request):
             continue
-        for item in request.get("input", []):
+        inputs.append(request.get("input", []))
+    if final_items is not None:
+        inputs.append(final_items)
+    for items in inputs:
+        for item in items:
             if item.get("type") == "function_call":
                 calls.setdefault(item.get("call_id"), item)
             elif item.get("type") == "function_call_output":
                 outputs.setdefault(item.get("call_id"), item)
     return [(call, outputs[call_id]) for call_id, call in calls.items() if call_id in outputs]
+
+
+def _pair_sources(requests):
+    return {call["call_id"]: "sdk_input" for call, _ in _tool_pairs(requests)}
 
 
 def _matching_recall_pages(reads, targets, text):
@@ -131,7 +139,8 @@ def history_coverage(observer, states, mechanism):
     used = [event for event in events if event.get("status") == "used"]
     ranges = [part for event in used for scope in event.get("history_scopes", []) for part in scope.get("ranges", [])]
     target_covered = any(covered(ref, ranges) for ref in target_refs if isinstance(ref, str))
-    pairs = _tool_pairs(requests)
+    pairs = _tool_pairs(requests, [item for state in states for item in state.get("input", [])])
+    pair_sources = _pair_sources(requests)
     reads = [(call, output) for call, output in pairs if call.get("name") == "read_text_file"]
     paths = [(_json(call.get("arguments")) or {}).get("path") for call, _ in reads]
     all_inline = bool(reads) and all((_json(output.get("output")) or {}).get("observation", {}).get("mode") == "inline"
@@ -147,10 +156,12 @@ def history_coverage(observer, states, mechanism):
     # must be absent while the derived/recall form is permitted.
     old_call_ids = {call["call_id"] for call, _ in reads
                     if (_json(call.get("arguments")) or {}).get("path") == mechanism["target_path"]}
+    active_inputs = [request.get("input", []) for request in requests if not is_summary_request(request)]
+    active_inputs.extend(state.get("input", []) for state in states)
     removed = any(not any(item.get("type") == "function_call_output" and item.get("call_id") in old_call_ids
-                          for item in request.get("input", []))
-                  and any(item.get("name") in {"history_read", "history_search"} for item in request.get("input", []))
-                  for request in requests if not is_summary_request(request))
+                          for item in items)
+                  and any(item.get("name") in {"history_read", "history_search"} for item in items)
+                  for items in active_inputs)
     proofs = {
         "complete_chain_read_once": paths == mechanism["chain_paths"],
         "all_chain_results_inline": len(reads) == len(mechanism["chain_paths"]) and all_inline,
@@ -166,14 +177,16 @@ def history_coverage(observer, states, mechanism):
     documents = [entry for entry in observer.response_outputs if entry["purpose"] == "summary"]
     key_retained = any(mechanism["record_key"] in json.dumps(entry["output"], ensure_ascii=False) for entry in documents)
     details = {"checks": proofs, "target_source_refs": sorted(ref for ref in target_refs if isinstance(ref, str)),
-               "calls": [{"call": call, "output": output} for call, output in recalls],
+               "calls": [{"call": call, "output": output,
+                          "evidence_source": pair_sources.get(call["call_id"], "final_state_input")}
+                         for call, output in recalls],
                "target_original_call_ids": sorted(old_call_ids),
                "summary_record_key_retained": key_retained,
                "summary_omission_condition": "requires_semantic_review",
                "semantic_boundary": "Exact recall is mechanical evidence; answer use and omitted meaning require source review."}
     path = observer.output_dir / "mechanism.json"
     atomic_write_json(path, details)
-    evidence = {"kind": "mechanism", "path": str(path.absolute()), "source": "actual SDK inputs and confirmed Compact events",
+    evidence = {"kind": "mechanism", "path": str(path.absolute()), "source": "actual SDK inputs, final Agent protocol and confirmed Compact events",
                 "availability": "available"}
     return [{"name": name, "status": "verified" if passed else "gap",
              "reason": "observed original/source/recall binding satisfied" if passed else "required binding not observed",
@@ -188,7 +201,9 @@ def turn_compact_evidence(observer, state, turn, settings):
     current_call_ids = {item.get("call_id") for response in observer.response_outputs
                         if response["turn"] == turn and response["purpose"] == "business"
                         for item in response["output"] if item.get("type") == "function_call"}
-    pairs = [(call, output) for call, output in _tool_pairs(requests) if call.get("call_id") in current_call_ids]
+    pairs = [(call, output) for call, output in _tool_pairs(requests, state.get("input", []))
+             if call.get("call_id") in current_call_ids]
+    pair_sources = _pair_sources(requests)
     recalls = {name: [(call, output) for call, output in pairs if call.get("name") == name]
                for name in ("history_read", "history_search", "artifact_read", "artifact_search")}
     metrics = {"compact_events": known(events), "record_storage": known(state["record_metrics"])
@@ -200,12 +215,15 @@ def turn_compact_evidence(observer, state, turn, settings):
     metrics["compact_attempts"] = known(len({(event.get("request_no"), event.get("attempt_no")) for event in events}))
     metrics["compact_successes"] = known(sum(event.get("status") == "used" for event in events))
     if business:
-        request = business[0]
+        # Isolate the actual schema overhead. The previous Run can contain opaque
+        # reasoning whose admission risks are not part of this transport observer.
+        request = {**business[0], "input": []}
         without = {**request, "tools": [tool for tool in request.get("tools", [])
                                         if tool.get("name") not in {"history_read", "history_search"}]}
         full = check_context_budget(request, [None] * len(request.get("input", [])), settings)
         old = check_context_budget(without, [None] * len(request.get("input", [])), settings)
         metrics["history_tool_fixed_budget_overhead"] = known(full["required_tokens"] - old["required_tokens"])
+        metrics["history_tool_fixed_budget_overhead_basis"] = known("actual request fields with identical empty input")
     else:
         metrics["history_tool_fixed_budget_overhead"] = unknown("no actual business request")
     path = observer.output_dir / f"turn-{turn:02d}-compact-evidence.json"
@@ -217,6 +235,8 @@ def turn_compact_evidence(observer, state, turn, settings):
         "summary_requests": [{"lane": summary_lane(request), "request_sha256": digest(request),
                               "material": material(request)} for request in summaries],
         "summary_outputs": [entry for entry in observer.response_outputs if entry["turn"] == turn and entry["purpose"] == "summary"],
-        "recalls": {name: [{"call": call, "output": output} for call, output in items] for name, items in recalls.items()},
+        "recalls": {name: [{"call": call, "output": output,
+                            "evidence_source": pair_sources.get(call["call_id"], "final_state_input")}
+                           for call, output in items] for name, items in recalls.items()},
         "record_metrics": state.get("record_metrics")})
     return metrics, path

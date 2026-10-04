@@ -10,7 +10,7 @@ import unittest
 from benchmarks.core.compact_evidence import covered, history_coverage, turn_compact_evidence
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import prepare_summary_request
+from lineage_agent.models.summarization import prepare_summary_request, unpack_summary_material
 from lineage_agent.tools.types import inline_tool_output, serialize_tool_output
 
 
@@ -69,10 +69,10 @@ class CompactEvidenceTests(unittest.TestCase):
         self.assertEqual(next(check["status"] for check in checks if check["name"] == "history_read_used"), "gap")
 
     def test_structured_source_payload_matches_same_original_projection(self):
-        source_material = json.loads(self.summary["input"][0]["content"])
+        source_material = unpack_summary_material(self.summary)
         source = source_material["sources"][0]
         source["payload"] = json.loads(source["payload"])
-        self.summary["input"][0]["content"] = json.dumps(source_material, ensure_ascii=False)
+        self.summary.update(prepare_summary_request(self.settings, source_material, target_bytes=2048, lane="R"))
         checks = history_coverage(self.observer, [self.state], self.mechanism)
         self.assertTrue(all(check["status"] == "verified" for check in checks), checks)
 
@@ -103,6 +103,27 @@ class CompactEvidenceTests(unittest.TestCase):
         self.assertEqual(shapes[1]["field_types"]["content"], "NoneType")
         self.assertIn("extension", shapes[1]["keys"])
         self.assertNotIn("PRIVATE_", path.read_text(encoding="utf-8"))
+
+    def test_unsent_terminal_recall_result_is_counted_with_honest_provenance(self):
+        self.observer.requests[1].pop()
+        self.state["input"] = self.recall
+        metrics, path = turn_compact_evidence(self.observer, self.state, 1, self.settings)
+        self.assertEqual(metrics["recall_calls"]["value"]["history_search"], 1)
+        self.assertEqual(metrics["recall_calls"]["value"]["history_read"], 1)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["recalls"]["history_read"][0]["evidence_source"], "final_state_input")
+        coverage = history_coverage(self.observer, [self.state], self.mechanism)
+        for name in ("history_search_used", "history_read_used", "history_result_matches_original", "target_original_removed"):
+            self.assertEqual(next(check["status"] for check in coverage if check["name"] == name), "verified")
+
+    def test_schema_overhead_is_measured_without_inventing_opaque_risks(self):
+        from lineage_agent.tools.history import HISTORY_TOOLS
+        self.observer.requests[1] = [prepare_request("test", [{"type": "reasoning", "id": "r1",
+            "encrypted_content": "opaque", "summary": []}], tools=HISTORY_TOOLS)]
+        metrics, _ = turn_compact_evidence(self.observer, self.state, 1, self.settings)
+        self.assertGreater(metrics["history_tool_fixed_budget_overhead"]["value"], 0)
+        self.assertEqual(metrics["history_tool_fixed_budget_overhead_basis"]["value"],
+                         "actual request fields with identical empty input")
 
 
 if __name__ == "__main__":

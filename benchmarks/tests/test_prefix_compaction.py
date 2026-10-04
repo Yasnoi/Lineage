@@ -18,7 +18,7 @@ from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import is_summary_request, summary_request_lane
+from lineage_agent.models.summarization import is_summary_request, summary_request_lane, unpack_summary_material
 from lineage_agent.tools.types import ToolExecutionError
 
 
@@ -36,7 +36,7 @@ def _ids(value):
 
 
 def _summary(request, text="Earlier tool observations are available through history recall."):
-    material = json.loads(request["input"][0]["content"])
+    material = unpack_summary_material(request)
     refs = _ids(material)
     if not refs:
         refs = [ref for entries in material.get("candidate_input", {}).get("document", {}).values()
@@ -118,7 +118,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             if not is_summary_request(request):
                 business_count += 1
                 continue
-            material = json.loads(request["input"][0]["content"])
+            material = unpack_summary_material(request)
             source_calls = [(source["payload"].get("item") or {}).get("call_id")
                             for source in material.get("sources", []) if isinstance(source.get("payload"), dict)]
             self.assertTrue(source_calls)
@@ -180,8 +180,8 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lanes[:2], ["H", "R"])
             self.assertIsNotNone(turn.state["active_context"]["history_summary"])
             self.assertIsNotNone(turn.state["active_context"]["run_summary"])
-            history = json.loads(client.summary_requests[0]["input"][0]["content"])
-            current = json.loads(client.summary_requests[1]["input"][0]["content"])
+            history = unpack_summary_material(client.summary_requests[0])
+            current = unpack_summary_material(client.summary_requests[1])
             self.assertTrue(all(old.state["run_id"] in ref for ref in _ids(history)))
             self.assertTrue(all(turn.state["run_id"] in ref for ref in _ids(current)))
             self.assertEqual(turn.state["summary_calls"], len(client.summary_requests))
@@ -220,7 +220,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
                 turn = await manager.run_turn(sid, "current task")
             self.assert_complete(turn.state)
             historical = next(request for request in client.summary_requests if summary_request_lane(request) == "H")
-            material = json.loads(historical["input"][0]["content"])
+            material = unpack_summary_material(historical)
             outcomes = [source["payload"]["outcome"] for source in material["sources"] if source["kind"] == "outcome"]
             self.assertEqual(len(outcomes), 1)
             self.assertEqual(outcomes[0]["stop_reason"], "error")
@@ -299,8 +299,8 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assert_complete(state)
         self.assertEqual(len(requests), 2)
         self.assertEqual(state["compaction"]["attempt_no"], 2)
-        first = json.loads(requests[0]["input"][0]["content"])
-        second = json.loads(requests[1]["input"][0]["content"])
+        first = unpack_summary_material(requests[0])
+        second = unpack_summary_material(requests[1])
         self.assertTrue(any("payload" in item for item in first["sources"]))
         self.assertIn("candidate_input", second)
         self.assertFalse(any("payload" in item for item in second["sources"]))
@@ -361,7 +361,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(turn.state["summary_calls"], 4)
             self.assertEqual(turn.state["compaction"]["attempt_no"], 2)
             for request in requests[2:]:
-                material = json.loads(request["input"][0]["content"])
+                material = unpack_summary_material(request)
                 self.assertIn("candidate_input", material)
                 self.assertTrue(all("payload" not in source for source in material["sources"]))
 
@@ -448,7 +448,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             outputs = {item["call_id"] for item in request["input"] if item.get("type") == "function_call_output"}
             for index in range(6):
                 self.assertEqual(f"g{index}a" in outputs, f"g{index}b" in outputs)
-        material = json.loads(client.summary_requests[0]["input"][0]["content"])
+        material = unpack_summary_material(client.summary_requests[0])
         originals = [source["payload"] for source in material["sources"]]
         outputs = {record["item"]["call_id"] for record in originals if record["item"].get("type") == "function_call_output"}
         self.assertIn("g0a", outputs)

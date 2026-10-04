@@ -217,6 +217,7 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 selected["status"] = "reused" if ("document" in selected and
                     json_bytes(_message(lane, selected, selected["document"])) <= selected["target_bytes"]) else "prepared"
                 selected["model_called"] = False
+                selected.pop("summary_call", None)
             reusable = {lane: selected for lane, selected in lanes.items() if selected["status"] == "reused"}
             updating = {lane: selected for lane, selected in lanes.items() if selected["status"] != "reused"}
             if reusable and updating:
@@ -301,11 +302,11 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         except Exception:
             return stop(state, compaction, "context_measurement_error", failed=True)
         count = state["summary_calls"] + 1
-        compaction.update(summary_call=count, summary_lane=lane, summary_id=selected["summary_id"])
-        selected.update(summary_call=count, model_called=True)
         if not emit("summary.started", step_id, lane=lane, summary_call=count, summary_id=selected["summary_id"],
                     request_no=compaction["request_no"], attempt_no=compaction["attempt_no"]):
             return stop(state, compaction, "logging_error", failed=True)
+        compaction.update(summary_call=count, summary_lane=lane, summary_id=selected["summary_id"])
+        selected.update(summary_call=count, model_called=True)
         budget["request_sent"] = True
         failure = None
         try:

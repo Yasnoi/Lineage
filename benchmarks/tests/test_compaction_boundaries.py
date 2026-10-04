@@ -9,7 +9,9 @@ from benchmarks.tests import test_prefix_compaction as fixtures
 from benchmarks.checks.support.runtime import message, response, recording_failure
 from lineage_agent.agent import compaction, graph, runtime
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
-from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.agent.sessions import SessionManager
+from lineage_agent.models.summarization import is_summary_request, summary_request_lane
+from lineage_agent.recording.recorder import RunRecorder
 
 
 class CompactionBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +88,58 @@ class CompactionBoundaryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["summary_calls"], expected_calls)
             self.assertEqual(state["error_code"], "logging_error")
             self.assertEqual(len(client.business_requests), 6)
+            self.assertEqual(len(client.summary_requests), expected_calls)
+            if event == "summary.started":
+                self.assertFalse(state["compaction"]["lanes"]["R"]["model_called"])
+                self.assertNotIn("summary_call", state["compaction"]["lanes"]["R"])
+                self.assertNotIn("summary_call", state["compaction"])
+                self.assertIsNone(state["active_context"]["run_summary"])
+
+        # A failed R start must preserve actual H facts, including on a retry.
+        for failed_call in (2, 4):
+            with self.subTest(failed_call=failed_call), SessionManager() as manager:
+                fixture = self.fixture
+                fixture.executed.clear()
+                sid = manager.create_session(fixture.settings, tools=[fixtures.TOOL], execute_tool=fixture.tool)
+                seed = fixtures._Client([response(message("historical source " + "h" * 4200))])
+                with patch.object(runtime, "create_client", return_value=seed):
+                    await manager.run_turn(sid, "previous task")
+                sent = []
+                def summarize(request):
+                    sent.append(request)
+                    text = "L" * 11000 if failed_call == 4 and len(sent) <= 2 else "facts from the covered prefix"
+                    return fixtures._summary(request, text)
+                client = fixtures._Client(fixture.replies(6), summarize)
+                native_emit = RunRecorder.emit
+                faults = []
+                def fail_start(recorder, event, **details):
+                    if event == "summary.started" and details.get("summary_call") == failed_call:
+                        faults.append(details)
+                        recorder._fail("write")
+                        return False
+                    return native_emit(recorder, event, **details)
+                with patch.object(runtime, "create_client", return_value=client), patch.object(RunRecorder, "emit", new=fail_start):
+                    turn = await manager.run_turn(sid, "current task")
+                state = turn.state
+                self.assertEqual(len(faults), 1)
+                self.assertEqual(state["summary_calls"], failed_call - 1)
+                self.assertEqual(len(client.summary_requests), failed_call - 1)
+                self.assertEqual(state["compaction"]["summary_call"], failed_call - 1)
+                self.assertEqual(state["compaction"]["summary_lane"], "H")
+                self.assertTrue(state["compaction"]["lanes"]["H"]["model_called"])
+                self.assertFalse(state["compaction"]["lanes"]["R"]["model_called"])
+                self.assertNotIn("summary_call", state["compaction"]["lanes"]["R"])
+                self.assertIsNone(state["active_context"]["history_summary"])
+                self.assertIsNone(state["active_context"]["run_summary"])
+                self.assertEqual(fixture.executed, [f"c{index}" for index in range(state["tool_calls"])])
+                self.assertEqual(len(client.business_requests), len(fixture.executed))
+                record = await manager.get_record(sid, state["run_id"])
+                self.assertEqual([value["summary_call"] for value in record["summary_results"]], list(range(1, failed_call)))
+                for saved, actual in zip(record["summary_results"], client.summary_requests, strict=True):
+                    lane = summary_request_lane(actual)
+                    self.assertEqual(saved["compaction"]["summary_lane"], lane)
+                    self.assertEqual(saved["compaction"]["summary_id"], saved["compaction"]["lanes"][lane]["summary_id"])
+                    self.assertIsNotNone(saved["result"])
 
     async def test_short_run_has_no_summary_or_history_tools_executed(self):
         state, client = await self.fixture.standalone(count=1)

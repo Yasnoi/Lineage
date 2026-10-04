@@ -15,7 +15,7 @@ from openai import APIStatusError
 from benchmarks.core.budgets import BudgetRecordError, RequestBudget, WorkerAbort, read_ledger
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from benchmarks.core.executors import agent_worker as worker
-from lineage_agent.models.summarization import is_summary_request
+from lineage_agent.models.summarization import is_summary_request, unpack_summary_material
 from lineage_agent.recording import tracing
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.types import ToolArgumentError
@@ -253,6 +253,45 @@ class ResearchWorkerTests(unittest.TestCase):
             self.assertEqual(snapshot["upload_state"], "disabled")
             self.assertEqual(snapshot["counts"]["generated"], 0)
 
+    def test_inherited_opaque_protocol_keeps_schema_metrics_and_worker_running(self):
+        self.spec["prompts"] = ["first-round", "follow-up"]
+        def respond(_):
+            result = message("saved-response")
+            result["output"].insert(0, {"type": "reasoning", "id": "reasoning",
+                "encrypted_content": "opaque-synthetic", "summary": [], "content": None})
+            result["output"][-1]["phase"] = "final_answer"
+            return result
+        result, code, captured = self.execute(respond)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(captured), 2)
+        self.assertEqual([turn["execution_status"] for turn in result["turns"]], ["completed", "completed"])
+        second = result["turns"][1]["metrics"]
+        self.assertGreater(second["history_tool_fixed_budget_overhead"]["value"], 0)
+
+    def test_terminal_recall_is_recorded_when_next_sdk_request_is_budget_refused(self):
+        (self.material / "large.txt").write_text("evidence-" * 2000, encoding="utf-8")
+        self.spec["profile"]["context_budget_tokens"] = 35000
+        sent = 0
+        def respond(kwargs):
+            nonlocal sent
+            sent += 1
+            if sent == 1:
+                return call("large.txt")
+            self.assertEqual(sent, 2, "The next business request must fail local budget precheck.")
+            envelope = json.loads(next(item["output"] for item in kwargs["input"]
+                if item.get("type") == "function_call_output"))
+            reference = envelope["observation"]["artifact_ref"]
+            return {"status": "completed", "output": [{"type": "function_call", "status": "completed",
+                "call_id": "recall", "name": "artifact_read", "arguments": json.dumps(
+                    {"artifact_ref": reference, "start": 0, "end": None})}]}
+        result, code, captured = self.execute(respond)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(result["agent_outcome"]["value"], "context_budget_exceeded")
+        self.assertEqual(result["turns"][0]["metrics"]["recall_calls"]["value"]["artifact_read"], 1)
+        saved = json.loads((self.output / "turn-01-compact-evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["recalls"]["artifact_read"][0]["evidence_source"], "final_state_input")
+
     def test_production_trace_binding_and_disabled_override(self):
         uploaded = []
         class Upload:
@@ -400,7 +439,7 @@ class ResearchWorkerTests(unittest.TestCase):
         def respond(kwargs):
             nonlocal business_count
             if is_summary_request(kwargs):
-                material = json.loads(kwargs["input"][0]["content"])
+                material = unpack_summary_material(kwargs)
                 summaries.append(material)
                 document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
                 text = "x" * 20000 if second_pass and len(summaries) == 1 else "signature fact"
@@ -466,7 +505,7 @@ class ResearchWorkerTests(unittest.TestCase):
         def respond(request):
             nonlocal count
             if is_summary_request(request):
-                sources = json.loads(request["input"][0]["content"])["sources"]
+                sources = unpack_summary_material(request)["sources"]
                 document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
                 # Deliberately omit the target number/negation to prove original recall,
                 # independently from the real model's semantic quality checks.

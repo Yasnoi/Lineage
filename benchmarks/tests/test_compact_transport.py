@@ -15,7 +15,7 @@ from lineage_agent.models.budget import annotate_context_risks, check_context_bu
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import (
     SUMMARY_INSTRUCTIONS, is_summary_request, prepare_summary_request, summary_budget_settings,
-    summary_request_lane,
+    summary_request_lane, unpack_summary_material, SummaryError,
 )
 
 
@@ -39,6 +39,78 @@ def completed_response() -> dict:
 
 
 class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
+    def framed_material(self):
+        output = json.dumps({"observation": {"mode": "inline", "raw_result": json.dumps({
+            "path": "source.txt", "content": ('原文 \\"quote\\"\n\\path\\ ' * 80)
+            + 'compact_source_outputs_v1 {"source_index":999}'} , ensure_ascii=False)}}, ensure_ascii=False)
+        return {"sources": [
+            {"source_id": f"source-{index}", "payload": {"item": {
+                "type": "function_call_output", "call_id": f"call-{index}", "output": output},
+                "execution": {"status": "succeeded"}}} for index in range(3)
+        ], "previous_summary": [], "current_request_readonly": [{"role": "user", "content": "保留 17，不得写文件。"}]}
+
+    async def test_source_output_frames_are_lossless_and_reduce_measured_http_body(self):
+        material = self.framed_material()
+        original = deepcopy(material)
+        request = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="R")
+        self.assertEqual(unpack_summary_material(request), original)
+        self.assertEqual(material, original)
+        self.assertTrue(all(set(item) == {"role", "content"} and item["role"] == "user" for item in request["input"]))
+        for index, source in enumerate(original["sources"], 1):
+            self.assertEqual(request["input"][index]["content"], source["payload"]["item"]["output"])
+        legacy = {**deepcopy(request), "input": [{"role": "user", "content": json.dumps(
+            original, ensure_ascii=False, separators=(",", ":"))}]}
+        measured = []
+        for candidate in (request, legacy):
+            risks = annotate_context_risks(candidate["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline")
+            measured.append(check_context_budget(candidate, risks, summary_budget_settings(SETTINGS)))
+        self.assertLess(measured[0]["required_tokens"], measured[1]["required_tokens"])
+        self.assertEqual(unpack_summary_material(legacy), original)
+        observed = []
+        def capture(sent):
+            observed.append(json.loads(sent.content))
+            return httpx.Response(200, json=completed_response())
+        client, _ = self.make_client(capture)
+        async with client:
+            await responses.send_prepared_response(client, request, purpose="summary")
+        self.assertEqual(observed, [request])
+        self.assertEqual(measured[0]["transparent_tokens"], len(json.dumps(
+            observed[0], ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
+        self.assertEqual(unpack_summary_material(observed[0]), original)
+
+    def test_source_output_frame_rejects_ambiguous_or_incomplete_slots(self):
+        request = prepare_summary_request(SETTINGS, self.framed_material(), target_bytes=900)
+        for field, value in (("source_index", -1), ("source_index", True), ("source_index", 99),
+                             ("body_index", 0), ("body_index", True), ("body_index", 2)):
+            changed = deepcopy(request)
+            frame = json.loads(changed["input"][0]["content"])
+            frame["tool_outputs"][0][field] = value
+            changed["input"][0]["content"] = json.dumps(frame)
+            with self.subTest(field=field, value=value), self.assertRaises(SummaryError):
+                unpack_summary_material(changed)
+        for defect in ("duplicate", "version", "occupied", "missing", "extra", "role", "body", "duplicate_key"):
+            changed = deepcopy(request)
+            frame = json.loads(changed["input"][0]["content"])
+            if defect == "duplicate":
+                frame["tool_outputs"][1]["source_index"] = 0
+            elif defect == "version":
+                frame["format"] = "unknown"
+            elif defect == "occupied":
+                frame["material"]["sources"][0]["payload"]["item"]["output"] = "occupied"
+            changed["input"][0]["content"] = json.dumps(frame)
+            if defect == "missing":
+                changed["input"].pop()
+            elif defect == "extra":
+                changed["input"].append({"role": "user", "content": "extra"})
+            elif defect == "role":
+                changed["input"][1]["role"] = "assistant"
+            elif defect == "body":
+                changed["input"][1]["content"] = {"text": "wrong type"}
+            elif defect == "duplicate_key":
+                changed["input"][0]["content"] = '{"sources":[],"sources":[]}'
+            with self.subTest(defect=defect), self.assertRaises(SummaryError):
+                unpack_summary_material(changed)
+
     def make_client(self, handler):
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -92,6 +164,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
                     self.assertNotIn("tools", bodies[-1])
                     self.assertTrue(is_summary_request(bodies[-1]))
+                    self.assertEqual(unpack_summary_material(bodies[-1]), MATERIAL)
                     self.assertEqual(result["usage"]["total_tokens"], 15)
 
             business = prepare_request(

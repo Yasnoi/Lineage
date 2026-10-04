@@ -7,7 +7,7 @@ import unittest
 from lineage_agent.models.responses import compactable_group_items
 from lineage_agent.models.summarization import (
     SUMMARY_FIELDS, SummaryError, minimum_summary_message_bytes, parse_summary,
-    prepare_summary_request, summary_request_lane,
+    prepare_summary_request, summary_request_lane, unpack_summary_material,
 )
 from lineage_agent.config.settings import ModelSettings
 
@@ -35,13 +35,15 @@ class SummaryContractsTests(unittest.TestCase):
                     request = prepare_summary_request(SETTINGS, material, target_bytes=target, lane=lane)
                     self.assertEqual(summary_request_lane(request), lane)
                     self.assertEqual(request["max_output_tokens"], SETTINGS.max_output_tokens)
-                    self.assertEqual(json.loads(request["input"][0]["content"]), material)
+                    self.assertEqual(unpack_summary_material(request), material)
                     self.assertEqual(material, original)
                     self.assertNotEqual(summary_request_lane({**request, "instructions": request["instructions"] + "x"}), lane)
         historical = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="H")
         current = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="R")
         self.assertIn("task ending from a task succeeding", historical["instructions"])
         self.assertIn("Do not attribute historical work", current["instructions"])
+        self.assertIn("截至覆盖范围", current["instructions"])
+        self.assertIn("Missing from these sources does not mean", current["instructions"])
         self.assertNotEqual(historical["instructions"], current["instructions"])
 
     def test_invalid_size_or_lane_never_prepares_a_request(self):
