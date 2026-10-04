@@ -16,13 +16,13 @@ from benchmarks.core.files import atomic_write_json, atomic_write_text, sha256_f
 from benchmarks.core.processes import require_local_agent as _require_local_agent
 from benchmarks.core.contracts import known, not_applicable, unknown
 from benchmarks.core.budgets import RequestBudget, WorkerAbort
+from benchmarks.core.configuration import RETIRED_COMPACT_KEYS
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from benchmarks.core.compact_evidence import HISTORY_CHECKS, history_coverage, material, source_has_text, summary_lane, turn_compact_evidence
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.budget import check_context_budget
-from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.recording.tracing import trace_scope
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
@@ -35,6 +35,7 @@ COMPACTION_CHECKS = (
     "setup_without_compaction", "summary_saved_and_activated", "old_record_selected", "old_user_requirements_selected",
     "following_uses_saved_version", "old_tool_originals_removed", "old_user_originals_removed", "following_keeps_selected_version",
     "no_recent_tool_reads", "original_record_unchanged", "first_turn_requested_files_read", "first_turn_background_read",
+    "all_prior_turns_selected", "pressure_has_no_current_summary", "completed_registered_without_summary",
 )
 
 
@@ -60,12 +61,13 @@ def value_or_unknown(value, reason="not observed") -> dict:
 
 def make_settings(spec: dict) -> ModelSettings:
     profile = spec["profile"]
-    retired = set(profile) & {"context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes", "context_keep_recent_turns"}
+    retired = set(profile) & RETIRED_COMPACT_KEYS
     if retired:
-        raise ConfigurationError("请移除旧 Compact 配置；组保护使用 CONTEXT_KEEP_RECENT_GROUPS，摘要比例使用 SUMMARY_TARGET_PERCENT：" + ", ".join(sorted(retired)))
-    allowed = {field.name for field in fields(ModelSettings)} - {"log_dir", "project_root"}
+        raise ConfigurationError("请移除旧 Compact 配置；H/R 上限使用 SUMMARY_HISTORY_MAX_OUTPUT_TOKENS / SUMMARY_RUN_MAX_OUTPUT_TOKENS：" + ", ".join(sorted(retired)))
+    allowed = {field.name for field in fields(ModelSettings)} - {"log_dir", "project_root", "application_root"}
     values = {key: value for key, value in profile.items() if key in allowed}
     return ModelSettings(**values, project_root=Path(spec["material_root"]),
+                         application_root=Path(spec.get("application_root", Path.cwd())).resolve(),
                          log_dir=Path(spec["output_dir"]) / "agent-logs")
 
 
@@ -107,23 +109,35 @@ def pressure_prompt(base: str, previous: dict, requests: list[dict], settings: M
     business = [request for request in requests if not is_summary_request(request)]
     if not business:
         raise WorkerAbort("pressure_request_evidence_missing")
-    history_end = previous["history_end"]
-    history = previous["input"][:history_end]
-    prepared = prepare_request(settings.model_name, history + [{"role": "user", "content": base}],
-                               tools=business[-1].get("tools", TOOL_DEFINITIONS),
-                               instructions=business[-1].get("instructions"),
-                               max_output_tokens=settings.max_output_tokens)
-    risks = previous["context_risks"][:history_end] + [None]
-    measured = check_context_budget(prepared, risks, settings)
-    if measured["decision"] == "error":
-        raise WorkerAbort("pressure_measurement_failed")
-    desired = max(1, measured["limit_tokens"] - measured["required_tokens"] + 512)
-    actual = min(max_bytes, desired)
-    return base + "p" * actual, {"formula_version": "utf8-window-v3", "desired_bytes": desired,
-                                "max_padding_bytes": max_bytes,
-                                "padding_bytes": actual, "capped": desired > actual,
-                                "trigger_tokens": measured["trigger_tokens"],
-                                "required_tokens": measured["required_tokens"]}
+    def measure(padding):
+        inherited = runtime.inherit_context(previous, [{"role": "user", "content": base + "p" * padding}],
+                                            [None], run_id="benchmark-pressure")
+        prepared = {**deepcopy(business[-1]), "input": inherited["input"]}
+        measured = check_context_budget(prepared, inherited["context_risks"], settings)
+        if measured["decision"] == "error":
+            raise WorkerAbort("pressure_measurement_failed")
+        return measured
+
+    initial = measure(0)
+    largest = measure(max_bytes)
+    capped = largest["decision"] != "exceeded"
+    low, high = 0, max_bytes
+    if capped:
+        low = max_bytes
+    else:
+        while low < high:
+            middle = (low + high) // 2
+            if measure(middle)["decision"] == "exceeded":
+                high = middle
+            else:
+                low = middle + 1
+    final = measure(low)
+    return base + "p" * low, {"formula_version": "actual-inherited-request-v4",
+                              "max_padding_bytes": max_bytes, "padding_bytes": low, "capped": capped,
+                              "base_required_tokens": initial["required_tokens"],
+                              "required_tokens": final["required_tokens"], "decision": final["decision"],
+                              "limit_tokens": final["limit_tokens"],
+                              "preceding_required_tokens": measure(low - 1)["required_tokens"] if low else None}
 
 
 def context_projection(state: dict) -> dict:
@@ -134,8 +148,8 @@ def context_projection(state: dict) -> dict:
             "run_summary": known(active["run_summary"]) if active.get("run_summary") else not_applicable("no current summary"),
             "compaction": {key: deepcopy(compaction[key]) for key in (
                 "status", "reason", "request_no", "attempt_no", "old_version_id", "candidate_version_id",
-                "removed_items", "removed_turns", "confirmed_checkpoint_id", "recovery_budget",
-                "candidate_budget", "net_reclaimed", "recovery_margin", "lanes",
+                "removed_items", "removed_turns", "confirmed_checkpoint_id",
+                "candidate_budget", "net_reclaimed", "remaining_budget", "lanes",
             ) if key in compaction}}
 
 
@@ -174,8 +188,8 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
             and entry.get("request_no") == compaction.get("request_no") and identity not in seen
             and value.get("summary_request_sha256") == digest(summary_requests[index]))
         try:
-            lineage_valid = lineage_valid and json.loads(attempt["result"]["text"]) == value.get("document")
-        except (KeyError, TypeError, ValueError):
+            lineage_valid = lineage_valid and attempt["result"]["text"] == value.get("body")
+        except (KeyError, TypeError):
             lineage_valid = False
         seen.add(identity)
         if entry.get("attempt_no") == 2:
@@ -183,7 +197,7 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
             retry = material(summary_requests[index])
             candidate = retry.get("candidate_input", {})
             lineage_valid = lineage_valid and bool(previous) and (
-                candidate.get("document") == previous.get("document")
+                candidate.get("body") == previous.get("body")
                 and candidate.get("summary_id") == previous.get("summary_id")
                 and candidate.get("checkpoint_id")
                 and candidate == value.get("candidate_input")
@@ -197,6 +211,18 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
         and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
     source_items = [source for request in summary_requests if summary_lane(request) == "H"
                     for source in material(request).get("sources", []) if "payload" in source]
+    prior_runs = {state.get("run_id") for state in states[:pressure_turn - 1] if state.get("run_id")}
+    proofs["all_prior_turns_selected"] = bool(prior_runs) and all(
+        any(str(source.get("source_id", "")).startswith(f"history://record/{run_id}/") for source in source_items)
+        for run_id in prior_runs)
+    proofs["pressure_has_no_current_summary"] = bool(summary_requests) and all(
+        summary_lane(request) == "H" for request in summary_requests)
+    proofs["completed_registered_without_summary"] = len(states) >= pressure_turn - 1 and all(
+        state.get("summary_calls") == 0
+        and (state.get("active_context") or {}).get("current_run_id") is None
+        and any(turn.get("run_id") == state.get("run_id") for turn in
+                (state.get("active_context") or {}).get("turns", []))
+        for state in states[:pressure_turn - 1])
     first_run = states[source_turn - 1].get("run_id") if len(states) >= source_turn else None
     selected = [source for source in source_items if str(source.get("source_id", "")).startswith(f"history://record/{first_run}/")]
     admitted = (old_record or {}).get("admitted_input", [])
@@ -216,12 +242,10 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
     following = [r for r in observer.requests.get(follow_up_turn, []) if not is_summary_request(r)]
     h_spans = [span for span in active.get("summary_spans", [])
                if span.get("lane") == "H" and span.get("summary_id") == ref.get("summary_id")]
-    message = compacted["input"][h_spans[0]["index"]] if len(h_spans) == 1 else None
+    message = compacted.get("input", [])[h_spans[0]["index"]] if len(h_spans) == 1 else None
     try:
-        inserted = json.loads(message["content"])
-        proofs["summary_saved_and_activated"] &= (
-            inserted["document"] == last_h.get("document") and inserted["summary_id"] == ref.get("summary_id")
-            and inserted["history"]["history_ref"] == ref.get("history_ref"))
+        from lineage_agent.agent.compaction import _message
+        proofs["summary_saved_and_activated"] &= message == _message("H", last_h, last_h["body"])
     except (KeyError, TypeError, ValueError):
         proofs["summary_saved_and_activated"] = False
     proofs["following_uses_saved_version"] = bool(
@@ -386,6 +410,7 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                     current["answer_evidence"] = evidence(answer_path, "answer", f"Agent run {state['run_id']}")
                     current["answer_sha256"] = sha256_file(answer_path)
                 process = {"run_id": state["run_id"], "session_id": sid, "checkpoint_id": current["checkpoint_id"],
+                           "conversation_id": state.get("conversation_id"), "record_files": state.get("record_files", {}),
                            "checkpoint_complete": checkpoint_complete, "log_complete": state.get("log_complete"),
                            "stop_reason": state.get("stop_reason"), "error_code": state.get("error_code"),
                            "context": current["context"], "metrics": current["metrics"],
@@ -396,10 +421,12 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
                         key: list(dict.fromkeys(event[key] for event in log_events if key in event))
                         for key in ("step_id", "call_id")}
                 compaction = state.get("compaction") or {}
-                if compaction.get("document"):
-                    summary_path = output / f"turn-{index:02d}-summary.json"
-                    atomic_write_json(summary_path, {"summary_id": compaction.get("summary_id"), "document": compaction["document"]})
-                    current["process_evidence"].append(evidence(summary_path, "summary", "validated saved summary candidate"))
+                for lane, selected in compaction.get("lanes", {}).items():
+                    if lane in {"H", "R"} and isinstance(selected.get("body"), str):
+                        summary_path = output / f"turn-{index:02d}-summary-{lane}.txt"
+                        atomic_write_text(summary_path, selected["body"])
+                        current["process_evidence"].append(evidence(
+                            summary_path, "summary", "actual summary candidate body; activation is checked separately"))
                 process_path = output / f"turn-{index:02d}-process.json"
                 atomic_write_json(process_path, process)
                 current["process_evidence"].append(evidence(process_path, "process", "returned Agent facts and transport observation"))

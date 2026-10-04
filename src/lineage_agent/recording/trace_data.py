@@ -695,11 +695,11 @@ class TraceSanitizer:
             if identifier is not None:
                 result[key] = identifier
         for key in ("request_no", "pass_no", "attempt_no", "source_bytes", "summary_bytes", "message_bytes", "summary_call",
-                    "original_required", "candidate_required", "removed_items", "removed_turns"):
+                    "original_required", "candidate_required", "removed_items", "removed_turns", "max_output_tokens"):
             number = value.get(key)
             if type(number) is int and 0 <= number <= 2**63 - 1:
                 result[key] = number
-        for key in ("net_reclaimed", "recovery_margin"):
+        for key in ("net_reclaimed", "remaining_budget"):
             number = value.get(key)
             if type(number) is int and -(2**63) <= number <= 2**63 - 1:
                 result[key] = number
@@ -716,26 +716,17 @@ class TraceSanitizer:
         reason = value.get("reason")
         if type(reason) is str and reason in {
             "no_eligible_history", "protected_history", "protected_context_too_large",
-            "summary_budget_exceeded", "summary_too_large", "summary_not_effective",
+            "summary_budget_exceeded", "summary_not_effective",
             "recovery_exhausted", "summary_refusal", "summary_tool_request", "invalid_summary",
             "context_measurement_error", "summary_model_error", "logging_error", "checkpoint_error",
-            "source_changed", "candidate_budget_exceeded", "recovery_margin_insufficient",
-            "history_record_missing", "history_reference_invalid", "invalid_source_reference",
-            "no_shortening_space", "unsupported_protocol_boundary", "no_compressible_range",
+            "source_changed", "candidate_budget_exceeded",
+            "history_record_missing", "history_reference_invalid",
+            "unsupported_protocol_boundary", "no_compressible_range",
         }:
             result["reason"] = reason
         sources = value.get("sources")
         if isinstance(value.get("candidate_input"), dict):
             result["candidate_input"] = cls._reference(value["candidate_input"])
-        recovery = value.get("recovery_budget")
-        if isinstance(recovery, dict):
-            result["recovery_budget"] = {
-                key: recovery[key] for key in (
-                    "input_budget_tokens", "fixed_tokens", "preserved_tokens", "available_tokens", "target_tokens",
-                    "margin_required", "target_bytes", "retained_required", "available_bytes",
-                    "base_required", "hard_capacity", "soft_target",
-                ) if type(recovery.get(key)) is int and -(2**63) <= recovery[key] <= 2**63 - 1
-            }
         if isinstance(sources, dict):
             source_view: dict[str, Any] = {}
             previous = sources.get("previous_summary")
@@ -760,7 +751,7 @@ class TraceSanitizer:
                     projected["status"] = source["status"]
                 if type(source.get("model_called")) is bool:
                     projected["model_called"] = source["model_called"]
-                for key in ("target_bytes", "summary_bytes", "summary_call"):
+                for key in ("max_output_tokens", "summary_bytes", "summary_call"):
                     number = source.get(key)
                     if type(number) is int and 0 <= number <= 2**63 - 1:
                         projected[key] = number

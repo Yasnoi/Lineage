@@ -33,7 +33,7 @@ class CompactEvidenceTests(unittest.TestCase):
         self.original = pair("read_text_file", "file-2", {"path": self.path}, {"path": self.path, "content": self.text})
         self.summary = prepare_summary_request(self.settings, {"sources": [
             {"source_id": self.source_ref, "payload": json.dumps({"item": self.original[1]}, ensure_ascii=False)}]},
-            target_bytes=2048, lane="R")
+            lane="R")
         projection = json.dumps({"item": self.original[1]}, ensure_ascii=False)
         self.recall = pair("history_search", "search", {"history_ref": "scope", "keywords": ["37"], "cursor": None},
                            {"hits": [{"source_ref": self.source_ref}]})
@@ -72,7 +72,7 @@ class CompactEvidenceTests(unittest.TestCase):
         source_material = unpack_summary_material(self.summary)
         source = source_material["sources"][0]
         source["payload"] = json.loads(source["payload"])
-        self.summary.update(prepare_summary_request(self.settings, source_material, target_bytes=2048, lane="R"))
+        self.summary.update(prepare_summary_request(self.settings, source_material, lane="R"))
         checks = history_coverage(self.observer, [self.state], self.mechanism)
         self.assertTrue(all(check["status"] == "verified" for check in checks), checks)
 

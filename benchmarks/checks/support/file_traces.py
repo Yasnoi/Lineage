@@ -20,7 +20,7 @@ from uuid import uuid4
 CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 
 SETTINGS = ModelSettings(
-    base_url="https://unused.invalid/v1", model_name="text-tracing-check", log_dir=CHECK_DIR,
+    base_url="https://unused.invalid/v1", model_name="text-tracing-check", log_dir=CHECK_DIR, application_root=CHECK_DIR,
 )
 
 BODY = "正文标记 TEXT_TOOL_BODY_PRIVATE_59af\r\n第二行\r第三行\n"

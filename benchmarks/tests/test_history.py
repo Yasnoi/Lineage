@@ -3,6 +3,8 @@
 import asyncio
 from copy import deepcopy
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -11,6 +13,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
 from lineage_agent.agent.records import RecordStore, make_record_batch, record_projection
+from lineage_agent.agent.record_journal import JournalError, RecordJournal
 from lineage_agent.observations.manager import ObservationManager
 from lineage_agent.tools.execution import execute_calls
 from lineage_agent.tools.history import HISTORY_TOOLS, HISTORY_TOOL_NAMES, HistoryExecutor
@@ -28,13 +31,22 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.saver = SessionCheckpointer()
         self.sid, self.run = str(uuid4()), str(uuid4())
+        self.temporary = TemporaryDirectory(prefix="history-files-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.journal = RecordJournal(Path(self.temporary.name) / ".lineage" / self.sid / "history")
+        self.saver.bind_history(self.sid, self.journal)
         self.records = RecordStore(self.saver, self.sid)
         self.config = {"configurable": {"thread_id": self.sid, "checkpoint_ns": ""}}
-        self.values = {"run_id": self.run, "record_batch": [], "history_scopes": {}}
+        self.values = {"run_id": self.run, "record_batch": [], "record_files": {}, "record_sequence": 0, "history_scopes": {}}
         self.version = 0
 
     async def save(self, **updates):
         self.version += 1
+        if "record_batch" in updates:
+            receipts, watermark = self.journal.append(self.run, updates["record_batch"])
+            updates["record_batch"] = receipts
+            updates["record_files"] = {**self.values["record_files"], self.run: watermark}
+            updates["record_sequence"] = watermark["record_count"]
         self.values.update(deepcopy(updates))
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = deepcopy(self.values)
@@ -92,15 +104,12 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         batch, _ = await self.seed(["original"])
         changed = deepcopy(batch)
         changed[0]["item"]["content"] = "changed"
-        await self.save(record_batch=changed)
-        with self.assertRaises(CheckpointError):
-            await self.records.records()
-        self.saver.release(self.sid)
-        self.records.clear_index()
-        self.config = {"configurable": {"thread_id": self.sid, "checkpoint_ns": ""}}
-        await self.save(record_batch=make_record_batch(self.run, 1, [{"role": "user", "content": "gap"}]), history_scopes={})
-        with self.assertRaises(CheckpointError):
-            await self.records.records()
+        with self.assertRaises(JournalError):
+            await self.save(record_batch=changed)
+        self.assertEqual((await self.records.records())[0]["item"]["content"], "original")
+        self.run = str(uuid4())
+        with self.assertRaises(JournalError):
+            await self.save(record_batch=make_record_batch(self.run, 1, [{"role": "user", "content": "gap"}]))
 
     async def test_unconfirmed_checkpoints_and_released_cache_are_unreadable(self):
         checkpoint = empty_checkpoint()
@@ -125,9 +134,8 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result["hits"]), 1)
         altered = deepcopy(scope)
         altered["ranges"][0]["end"] = 4
-        await self.save(history_scopes={scope["history_ref"]: altered})
         with self.assertRaises(CheckpointError):
-            await self.records.scope(scope["history_ref"])
+            await self.save(history_scopes={scope["history_ref"]: altered})
 
     async def test_read_unicode_escape_pagination_matches_fixed_projection(self):
         batch, _ = await self.seed(['中😀"\\\t\nKEY' * 4000])

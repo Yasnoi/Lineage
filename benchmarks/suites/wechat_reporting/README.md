@@ -27,15 +27,15 @@
 
 [签名构造变体](variants/signature-staleness.json) 仅在评测副本中停止递增表单 revision 并保留旧签名，原版文档和测试期望保持不变。材料索引标注它是评测构造版本，不提示具体缺陷；其问题不能归因于目标原仓库。`defect-reference` 是原版对照，不预设整个项目没有缺陷。
 
-读取受限任务将单文件上限覆盖为 4 KiB，并要求实际观察到目标测试文件被拒绝。跨轮摘要任务 v3 使用 65536 的窗口、明确标为评测构造的 6 KiB 无事实背景，保护最近三个完整业务交互组；第五轮按 `max(1, W-required+512)` 生成最多 32 KiB 的 ASCII 压力。切点进入旧轮次时保留该轮次整体；归档组不展开计数。第六轮检查旧事实、来源和约束是否实际经过 H 保存并用于回答。[旧 v2.3 定义](history/compaction-continuation-v2.3.json) 与[旧 v2.2 定义](history/compaction-continuation-v2.2.json) 保留供历史结果回访。
+读取受限任务将单文件上限覆盖为 4 KiB，并要求实际观察到目标测试文件被拒绝。跨轮摘要任务 v4 使用 65536 的窗口和明确标为评测构造的 6 KiB 无事实背景。第五轮复用运行入口的上下文继承函数，按完整业务候选的预算结果，在 0–32 KiB 范围内二分选择使请求刚好超限的 ASCII 压力长度；达到上限仍放得下时记录机制缺口。保护窗口只覆盖当前 Run 最近三个完整业务组，全部已结束旧轮次可进入 H，因此第五轮应选择前四轮而不产生 R。第六轮检查旧事实、来源和约束是否实际经过 H 保存并用于回答。[旧 v3 定义](history/compaction-continuation-v3.json)、[旧 v2.3 定义](history/compaction-continuation-v2.3.json) 与[旧 v2.2 定义](history/compaction-continuation-v2.2.json) 保留供历史结果回访。
 
 `history-recall` 使用[版本化静态资料链](fixtures/history-chain-v1/)，每份 2301–3301 UTF-8 字节，完整 Observation envelope 在 4 KiB 内，避免用小结果 Artifact 代替原始记录回读。资料不描述目标项目；第 16 份才指出需要回查的记录键。模型应先按顺序读取各份资料，再通过 `history_search` 和 `history_read` 回查已被 R 覆盖的原始记录，不能重新打开旧文件。任务要求保留数字、否定条件和修正，并提供原文证据。
 
-两项机制例使用小窗口，使固定任务能覆盖压缩路径。摘要 H/R 合计生成软目标为扣除保留内容后可用空间的 40%，输出 token 上限沿用独立的 `max_output_tokens`；提交还须满足完整请求预算、正净回收和默认 10% 恢复余量。每个业务请求最多两次完整尝试，每次 H/R 各至多一次调用。实际触发、提交及原文回读都以真实请求和保存事实核验，不能由配置数字直接宣布通过。
+两项机制例使用小窗口，使固定任务能覆盖压缩路径。H/R 摘要请求分别使用 16384/8192 的输出 token 上限和预算预留，不分配生成软目标，不要求额外百分比恢复余量。完整业务候选预算允许、净回收为正并确认保存后提交。每个业务请求最多两次完整尝试，每次 H/R 各至多一次调用；只有完整有效候选仍超限才允许第二次，候选预算允许但净回收非正时直接停止。实际触发、提交及原文回读都以真实请求和保存事实核验，不能由配置数字直接宣布通过。
 
 跨轮机制同时检查原始记录不变、旧正文移出、后续真实调用参数使用已保存摘要和禁止重读。单 Run 机制检查完整资料链、inline 返回、R 覆盖、目标原文移出、历史检索与读取的引用绑定及准确原文。正确答案不单独证明机制有效；摘要遗漏、数字/否定/修正是否保持、回答是否正确使用证据仍需来源复核。若目标细节仍在真实摘要中，报告回读已观察但遗漏恢复条件未覆盖，不修改摘要制造通过。
 
-每轮额外保存本地 `turn-XX-compact-evidence.json`，包括所有 Compact 尝试事件、实际摘要来源、摘要输出和历史召回；这些是本地评审资料，不改变生产追踪过滤。指标单列历史工具固定 schema 占用、H/R 调用、压缩前后占用、净回收、恢复余量、召回次数/字节和可获得的记录存储量。逻辑字节与保存点序列化字节不代表进程实际内存。
+每轮额外保存本地 `turn-XX-compact-evidence.json`，包括所有 Compact 尝试事件、实际摘要来源、摘要输出和历史召回；这些是本地评审资料，不改变生产追踪过滤。指标单列历史工具固定 schema 占用、H/R 调用、压缩前后占用、净回收、候选剩余预算、召回次数/字节和可获得的记录存储量。逻辑字节与保存点序列化字节不代表进程实际内存。
 
 ## 配置继承与任务选择
 
@@ -45,8 +45,8 @@
 | --- | --- |
 | 普通研究任务预算 | 按生产配置和显式 `model_overrides` 解析，不重复维护一套研究默认值 |
 | 单文件读取受限 4 KiB | 仅 `read-limit` 保留，其他读取限制按生产配置继承 |
-| 摘要小窗口与压力 | 两项 Compact 机制例固定窗口 65536、最近三组与 40% 软目标；跨轮例第五轮压力最多 32 KiB |
-| 旧触发比例、目标比例、固定摘要输出/字节上限 | 生产配置已移除 `context_trigger_percent`、`context_target_percent`、`summary_max_output_tokens`、`summary_max_bytes`、`context_keep_recent_turns`；组保护用 `context_keep_recent_groups`，不用旧字段复建压力配置，动态摘要目标由 `summary_target_percent` 控制 |
+| 摘要小窗口与压力 | 两项 Compact 机制例固定窗口 65536、当前 Run 最近三组；H/R API 输出上限为 16384/8192；跨轮例第五轮压力最多 32 KiB |
+| 已移除的 Compact 配置 | `context_trigger_percent`、`context_target_percent`、`summary_max_output_tokens`、`summary_max_bytes`、`context_keep_recent_turns`、`summary_target_percent`、`context_recovery_margin_percent` 均须删除，不能映射为新配置；组保护用 `context_keep_recent_groups`，分路输出上限用 `summary_history_max_output_tokens` 和 `summary_run_max_output_tokens` |
 | 批次与实例上限 | 独立于生产模型额度显式填写，不随生产默认值扩大；硬上限 400 次请求、7200 秒累计、每实例 1200 秒 |
 
 在项目根目录执行 `uv run --locked python -m benchmarks list wechat-reporting`，可查看可选任务 ID、标题和轮次。必填的 `units` 决定本次任务范围和顺序；`repeats` 决定重复次数。批次请求、累计时间及样本时间在运行配置中指定，所有选定样本共用批次记账，不自动重试。任务数和轮次以本次计划为准，不要求执行全部任务。

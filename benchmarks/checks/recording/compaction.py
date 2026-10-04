@@ -26,16 +26,14 @@ async def main():
         sanitizer = TraceSanitizer([], None)
         refs = [{"run_id": str(uuid4()), "checkpoint_id": str(uuid4()), "item_count": 3} for _ in range(300)]
         retry_ref = {"summary_id": str(uuid4()), "checkpoint_id": str(uuid4())}
-        recovery = {"input_budget_tokens": 9000, "fixed_tokens": 500,
-                    "preserved_tokens": 6500, "available_tokens": 2000, "target_tokens": 800}
         metadata = {"sources": {"added_turns": refs}, "material": BODY, "message": DERIVED,
-                    "attempt_no": 2, "candidate_input": {**retry_ref, "document": DERIVED},
-                    "recovery_budget": {**recovery, "private": BODY}}
+                    "attempt_no": 2, "candidate_input": {**retry_ref, "body": DERIVED},
+                    "remaining_budget": 2000, "private": BODY}
         projected = sanitizer.compaction(metadata)
         assert len(projected["sources"]["added_turns"]) == 32
         assert projected["sources"]["turns_omitted"] == 268
         assert projected["attempt_no"] == 2 and projected["candidate_input"] == retry_ref
-        assert projected["recovery_budget"] == recovery
+        assert projected["remaining_budget"] == 2000
         assert BODY not in json.dumps(projected) and DERIVED not in json.dumps(projected)
         payload = sanitizer.cap_payload({"inputs": {"metadata": projected}, "outputs": {"content_omitted": True}})
         assert len(json.dumps(payload).encode()) < 65536 and len(refs) == 300
@@ -43,7 +41,7 @@ async def main():
         plain = sanitizer.model_inputs("m", [{"role": "assistant", "content": DERIVED}], [])
         assert DERIVED in json.dumps(plain) and "summary_content_omitted" not in plain
         spans = [{"index": index, "lane": "R", "summary_id": str(uuid4()), "run_id": str(uuid4()),
-                  "document": BODY} for index in range(300)]
+                  "body": BODY} for index in range(300)]
         active = {"summary_spans": spans}
         projected_active = sanitizer.active_context(active)
         assert len(projected_active["summary_spans"]) == 32

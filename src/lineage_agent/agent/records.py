@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.record_journal import JournalError
 from lineage_agent.tools.types import (
     MAX_RECALL_BYTES, ToolArgumentError, ToolExecutionError, inline_tool_output,
     serialize_tool_output, tool_output_bytes,
@@ -147,9 +148,8 @@ def _fits(value: dict[str, Any]) -> bool:
 
 @dataclass(frozen=True)
 class _Location:
-    checkpoint_id: str
-    slot: int
-    digest: str
+    run_id: str
+    watermark: dict[str, Any]
 
 
 @dataclass
@@ -160,7 +160,7 @@ class _Index:
 
 
 class RecordStore:
-    """Trusted scope binding and body-free indices over confirmed checkpoints."""
+    """File-backed bodies admitted by one exact confirmed checkpoint."""
 
     def __init__(self, saver: SessionCheckpointer, scope_id: str) -> None:
         self.saver, self.scope_id = saver, scope_id
@@ -170,13 +170,6 @@ class RecordStore:
     def clear_index(self) -> None:
         self._indices.clear()
 
-    def _record_digest(self, record: dict[str, Any]) -> str:
-        # Originals preserve even protocol values later rejected by admission
-        # or request serialization. Use the same native encoding that confirmed
-        # their storage; JSON hashing would poison history for NaN or sets.
-        encoding, payload = self.saver.serde.dumps_typed(record)
-        return hashlib.sha256(encoding.encode("utf-8") + b"\0" + payload).hexdigest()
-
     def _head(self, checkpoint_id: str | None) -> str:
         head = checkpoint_id or self.saver.last_confirmed(self.scope_id)
         if head is None:
@@ -185,46 +178,28 @@ class RecordStore:
 
     async def _index(self, checkpoint_id: str | None = None) -> _Index:
         head = self._head(checkpoint_id)
-        if head in self._indices:
-            # Access after releasing private storage must not work from cache.
-            await self.saver.read_confirmed(self.scope_id, head)
-            return self._indices[head]
-        locations: dict[str, _Location] = {}
-        scopes: dict[str, dict[str, Any]] = {}
-        runs: list[str] = []
-        visited: set[str] = set()
-        cursor = head
         try:
-            while cursor is not None:
-                if cursor in visited:
-                    raise ValueError("checkpoint cycle")
-                visited.add(cursor)
-                saved = await self.saver.read_confirmed(self.scope_id, cursor)
-                values = saved.checkpoint["channel_values"]
-                for slot, record in enumerate(values.get("record_batch", [])):
-                    ref = record["source_ref"]
-                    run_id, sequence = parse_source_ref(ref)
-                    if record["run_id"] != run_id or record["sequence"] != sequence:
-                        raise ValueError("record identity mismatch")
-                    checksum = self._record_digest(record)
-                    if ref in locations:
-                        if locations[ref].digest != checksum:
-                            raise ValueError("record identity conflict")
-                        continue
-                    locations[ref] = _Location(cursor, slot, checksum)
-                    if run_id not in runs:
-                        runs.append(run_id)
-                for ref, metadata in values.get("history_scopes", {}).items():
-                    if ref in scopes and scopes[ref] != metadata:
-                        raise ValueError("history scope changed")
-                    scopes[ref] = deepcopy(metadata)
-                cursor = saved.parent_config["configurable"]["checkpoint_id"] if saved.parent_config else None
+            saved = await self.saver.read_confirmed(self.scope_id, head)
+            values = saved.checkpoint["channel_values"]
+            journal = self.saver.history_journal(self.scope_id)
+            files = values.get("record_files", {})
+            if type(files) is not dict:
+                raise ValueError("invalid file manifest")
+            # A cached metadata index never bypasses fresh file integrity checks.
+            for run_id, watermark in files.items():
+                journal.verify(run_id, watermark)
+            if head in self._indices:
+                return self._indices[head]
+            locations: dict[str, _Location] = {}
             ordered: list[str] = []
-            for run_id in reversed(runs):
-                sequences = sorted(parse_source_ref(ref)[1] for ref in locations if parse_source_ref(ref)[0] == run_id)
-                if sequences != list(range(len(sequences))):
-                    raise ValueError("original record gap")
-                ordered.extend(source_ref(run_id, sequence) for sequence in sequences)
+            for run_id, watermark in files.items():
+                for sequence in range(watermark["record_count"]):
+                    ref = source_ref(run_id, sequence)
+                    ordered.append(ref)
+                    locations[ref] = _Location(run_id, deepcopy(watermark))
+            scopes = deepcopy(values.get("history_scopes", {}))
+        except JournalError as error:
+            raise CheckpointError(error.code) from None
         except CheckpointError:
             raise
         except Exception:
@@ -238,11 +213,9 @@ class RecordStore:
     async def _load(self, ref: str, index: _Index) -> dict[str, Any]:
         try:
             location = index.locations[ref]
-            saved = await self.saver.read_confirmed(self.scope_id, location.checkpoint_id)
-            record = saved.checkpoint["channel_values"]["record_batch"][location.slot]
-            if record["source_ref"] != ref or self._record_digest(record) != location.digest:
-                raise ValueError("original record changed")
-            return deepcopy(record)
+            return self.saver.history_journal(self.scope_id).get(ref, location.watermark)
+        except JournalError as error:
+            raise CheckpointError(error.code) from None
         except CheckpointError:
             raise
         except Exception:

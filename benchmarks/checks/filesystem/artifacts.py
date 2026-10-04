@@ -36,7 +36,8 @@ SETTINGS = replace(SETTINGS, context_budget_tokens=250000)
 def fixture():
     with TemporaryDirectory(prefix="lineage-artifact-contract-") as temporary:
         root = Path(temporary)
-        with patch.object(paths, "ARTIFACT_CACHE_ROOT", root / "artifact-cache"):
+        with patch.object(paths, "ARTIFACT_CACHE_ROOT", root / "artifact-cache"), \
+                patch("lineage_agent.artifacts.store.Path.cwd", return_value=root):
             yield root
 
 
@@ -277,13 +278,13 @@ async def check_isolation():
                 try:
                     await executor("read_text_file", {"path": relative})
                 except ToolArgumentError as exc:
-                    assert exc.reason_code == "artifact_path_forbidden"
+                    assert exc.reason_code == "storage_path_forbidden"
                 else:
                     raise AssertionError("ordinary text tool bypassed session isolation")
             try:
                 await directory("list_directory", {"path": store._directory.relative_to(root).as_posix(), "after": None})
             except ToolArgumentError as exc:
-                assert exc.reason_code == "artifact_path_forbidden"
+                assert exc.reason_code == "storage_path_forbidden"
             else:
                 raise AssertionError("directory tool entered artifact storage")
             for factory in (create_text_executor, create_directory_executor, create_filesystem_executor):
@@ -305,14 +306,15 @@ def check_lifecycle():
             retained = second.bind_session(str(uuid4())).put("other", tool_name="custom_tool")
             second_path = raw_path(second, retained)
             first.close()
-            assert not directory.exists() and second_path.read_bytes() == b"other"
+            assert directory.exists() and second_path.read_bytes() == b"other"
+            assert raw_path(first, descriptor).read_bytes() == b"snapshot"
             first.close()  # Explicit shutdown is idempotent.
             for action in (lambda: view.read(descriptor["artifact_ref"], 0),
                            lambda: view.search(descriptor["artifact_ref"], ["snapshot"]),
                            lambda: view.put("new", tool_name="custom_tool")):
                 with error("artifact_store_closed"):
                     action()
-        assert not second_path.exists()
+        assert second_path.read_bytes() == b"other"
 
 
 def check_faults():
@@ -354,10 +356,9 @@ def check_faults():
         saved.unlink()
         with error("artifact_read_error"):
             view.read(good["artifact_ref"], 0)
-        with patch("lineage_agent.artifacts.store.shutil.rmtree", side_effect=OSError(PRIVATE)), error("artifact_cleanup_error"):
-            store.close()
+        store.close()
         with error("artifact_store_closed"):
-            view.put("closed after cleanup failure", tool_name="custom_tool")
+            view.put("closed handle", tool_name="custom_tool")
         store.close()
 
 

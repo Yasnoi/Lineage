@@ -3,6 +3,7 @@
 import asyncio
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -428,8 +429,12 @@ class ResearchWorkerTests(unittest.TestCase):
         # the real compaction/source/version checks below.
         self.spec["profile"].update(
             context_budget_tokens=32768, max_output_tokens=4096,
-            context_safety_margin_tokens=1024, summary_target_percent=40,
+            context_safety_margin_tokens=1024,
         )
+        if second_pass:
+            # Keep this small-window fixture's candidate-only retry request
+            # sendable under its independently configured H output reservation.
+            self.spec["profile"]["summary_history_max_output_tokens"] = 4096
         if current_profile:
             self.spec["profile"].update(context_budget_tokens=65536, max_output_tokens=16384,
                                         context_safety_margin_tokens=8192)
@@ -441,10 +446,8 @@ class ResearchWorkerTests(unittest.TestCase):
             if is_summary_request(kwargs):
                 material = unpack_summary_material(kwargs)
                 summaries.append(material)
-                document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
                 text = "x" * 20000 if second_pass and len(summaries) == 1 else "signature fact"
-                document["facts"] = [{"text": text, "source_ids": [material["sources"][0]["source_id"]]}]
-                return message(json.dumps(document))
+                return message(text)
             business_count += 1
             if business_count == 1:
                 response = call("code/miniprogram/domain/form.ts", "form-call")
@@ -461,18 +464,26 @@ class ResearchWorkerTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["sdk_requests"]["value"], len(captured))
         self.assertEqual(result["metrics"]["summary_requests"]["value"], 2 if second_pass else 1)
         self.assertEqual(result["metrics"]["total_tokens"]["value"], len(captured) * 12)
+        self.assertEqual((self.output / "turn-05-summary-H.txt").read_text(encoding="utf-8"), "signature fact")
+        process = json.loads((self.output / "turn-05-process.json").read_text(encoding="utf-8"))
+        self.assertTrue(process["conversation_id"])
+        self.assertTrue(process["record_files"])
+        pressure = result["turns"][4]["pressure"]
+        self.assertEqual(pressure["formula_version"], "actual-inherited-request-v4")
+        self.assertEqual(pressure["decision"], "exceeded")
+        self.assertGreater(pressure["required_tokens"], pressure["limit_tokens"])
+        self.assertLessEqual(pressure["preceding_required_tokens"], pressure["limit_tokens"])
+        self.assertEqual(result["turns"][4]["metrics"]["summary_lanes"]["value"]["R"], 0)
         if current_profile:
-            pressure = result["turns"][4]["pressure"]
             self.assertEqual(pressure["max_padding_bytes"], 32768)
-            self.assertGreater(pressure["padding_bytes"], 16384)
             self.assertFalse(pressure["capped"])
         if second_pass:
-            self.assertEqual(summaries[1]["candidate_input"]["document"]["facts"][0]["text"], "x" * 20000)
+            self.assertEqual(summaries[1]["candidate_input"]["body"], "x" * 20000)
             self.assertNotIn("previous_summary", summaries[1])
             self.assertTrue(all("payload" not in item for item in summaries[1]["sources"]))
             args = list(coverage_spy.call_args.args)
             original_record = deepcopy(args[-1])
-            for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("document", {})):
+            for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("body", "foreign")):
                 with self.subTest(corrupted_binding=field):
                     args[-1] = deepcopy(original_record)
                     args[-1]["summary_results"][1]["compaction"]["lanes"]["H"][field] = value
@@ -480,12 +491,38 @@ class ResearchWorkerTests(unittest.TestCase):
                     self.assertEqual(next(item for item in coverage if item["name"] == "summary_saved_and_activated")["status"], "gap")
 
     def test_retired_profile_fields_are_not_silently_filtered(self):
-        for name in ("context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"):
+        for name in ("context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes",
+                     "summary_target_percent", "context_recovery_margin_percent", "context_keep_recent_turns"):
             with self.subTest(name=name):
                 spec = deepcopy(self.spec)
                 spec["profile"][name] = 1
-                with self.assertRaisesRegex(ValueError, "SUMMARY_TARGET_PERCENT"):
+                with self.assertRaisesRegex(ValueError, "SUMMARY_HISTORY_MAX_OUTPUT_TOKENS"):
                     worker.make_settings(spec)
+
+    def test_pressure_cap_reports_mechanism_gap_without_faking_rejection(self):
+        previous = {
+            "run_id": "old", "input": [{"role": "user", "content": "old question"}],
+            "context_risks": [None], "history_end": 1, "record_sequence": 1,
+            "active_context": {"turn_start": 1, "current_run_id": None, "groups": [],
+                "turns": [{"run_id": "old", "item_count": 1, "group_count": 0, "record_end": 1}],
+                "version_id": "old-version", "item_refs": ["history://record/old/0"], "summary_spans": []},
+        }
+        original = deepcopy(previous)
+        settings = worker.make_settings(self.spec)
+        from lineage_agent.models.requests import prepare_request
+        request = prepare_request(settings.model_name, previous["input"], max_output_tokens=settings.max_output_tokens)
+        prompt, details = worker.pressure_prompt("new", previous, [request], settings, 32)
+        self.assertEqual(prompt, "new" + "p" * 32)
+        self.assertTrue(details["capped"])
+        self.assertEqual(details["decision"], "allow")
+        self.assertEqual(previous, original)
+
+    def test_settings_application_root_is_trusted_program_path(self):
+        self.spec["application_root"] = str(self.root / "application")
+        settings = worker.make_settings(self.spec)
+        self.assertEqual(settings.application_root, (self.root / "application").resolve())
+        self.assertEqual(settings.project_root, self.material)
+        self.assertEqual(settings.log_dir, self.output / "agent-logs")
 
     def test_single_run_recalls_small_original_omitted_from_summary(self):
         from benchmarks.core.files import ROOT
@@ -505,25 +542,18 @@ class ResearchWorkerTests(unittest.TestCase):
         def respond(request):
             nonlocal count
             if is_summary_request(request):
-                sources = unpack_summary_material(request)["sources"]
-                document = {key: [] for key in ("requirements", "facts", "proposals", "corrections", "open_items")}
                 # Deliberately omit the target number/negation to prove original recall,
                 # independently from the real model's semantic quality checks.
-                document["facts"] = [{"text": "Early chain was read; use original history for details.",
-                                      "source_ids": [sources[0]["source_id"]]}]
-                return message(json.dumps(document))
+                return message("Early chain was read; use original history for details.")
             count += 1
             if count <= 16:
                 return call(task["mechanism"]["chain_paths"][count - 1], f"chain-{count}")
             if count == 17:
                 for item in request["input"]:
                     if item.get("role") == "assistant" and isinstance(item.get("content"), str):
-                        try:
-                            summary = json.loads(item["content"])
-                        except ValueError:
-                            continue
-                        if summary.get("lane") == "R":
-                            return native_call("history_search", {"history_ref": summary["history"]["history_ref"],
+                        scope = re.search(r"history://scope/[a-zA-Z0-9-]+", item["content"])
+                        if scope:
+                            return native_call("history_search", {"history_ref": scope.group(),
                                                "keywords": ["LARCH-17"], "cursor": None})
                 self.fail("expected current prefix summary and discoverable scope")
             if count == 18:

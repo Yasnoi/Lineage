@@ -3,7 +3,6 @@
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 import json
-import math
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -12,11 +11,12 @@ from langgraph.types import Overwrite
 
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords, json_bytes
+from lineage_agent.agent.record_journal import JournalError
 from lineage_agent.agent.state import AgentState
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
 from lineage_agent.models.responses import ModelError
 from lineage_agent.models.summarization import (
-    SUMMARY_FIELDS, SummaryError, parse_summary, prepare_summary_request, summary_budget_settings,
+    SummaryError, parse_summary, prepare_summary_request, summary_budget_settings,
 )
 from lineage_agent.models.types import ModelResult
 from lineage_agent.recording.recorder import LOG_FAILURE_MESSAGE
@@ -30,22 +30,23 @@ def safe_compaction_error(reason: str) -> str:
     return "上下文恢复未通过检查，已保留原活动视图与实际执行记录。原因：" + reason
 
 
-def _document_ids(document: dict) -> set[str]:
-    return {ref for entries in document.values() for entry in entries for ref in entry["source_ids"]}
-
-
-def _message(lane: str, selected: dict, document: dict) -> dict:
-    # All machine entry points are supplied by the program, never by the summary model.
-    content = {"kind": "derived_context_summary", "lane": lane,
-               "summary_id": selected["summary_id"], "document": document,
-               "history": {"history_ref": selected["scope"]["history_ref"],
-                           "read_tool": "history_read", "search_tool": "history_search",
-                           "scope": "compressed original interactions; includes uncited records"}}
-    references = {ref: selected["source_metadata"][ref] for ref in _document_ids(document)
-                  if ref in selected.get("source_metadata", {})}
-    if references:
-        content["source_references"] = references
-    return {"role": "assistant", "content": json.dumps(content, ensure_ascii=False, separators=(",", ":"))}
+def _message(lane: str, selected: dict, body: str) -> dict:
+    """Render range provenance only from trusted metadata, never from model text."""
+    ranges = selected["scope"]["ranges"]
+    runs = list(dict.fromkeys(bounds["run_id"] for bounds in ranges))
+    coverage = ("覆盖旧轮次：" + "、".join(runs) if lane == "H" else
+                "覆盖当前 Run：" + "、".join(runs) + "；完整交互组：" + "、".join(selected["covered_groups"]))
+    files = [f"- {entry['path']}：记录序号 [{entry['start']}, {entry['end']})"
+             for entry in selected["source_files"]]
+    note = "\n".join([
+        "来源与回读〔程序添加〕", coverage,
+        "本次整理使用覆盖范围的有效上下文，其中可能包含已有摘要。以下为范围级溯源，不代表逐句事实已验证。",
+        "原文文件（记录序号从 0 开始，每行一条记录）：", *files,
+        "检索入口：" + selected["scope"]["history_ref"],
+        "需要细节时使用 history_search(history_ref, keywords, cursor)，再用命中的 source_ref 调用 history_read(source_ref, start, end)。",
+        "检索覆盖该范围内全部原始记录，包括摘要未提及的细节。回读返回资料，不重放工具。",
+    ])
+    return {"role": "assistant", "content": f"{'历史摘要 H' if lane == 'H' else '当前进展摘要 R'}\n\n{body}\n\n---\n{note}"}
 
 
 def _compose(state: AgentState, compaction: dict, documents: dict, checkpoint_id: str = "") -> tuple[list, dict]:
@@ -106,9 +107,9 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
     def event_for(compaction):
         return {key: deepcopy(compaction.get(key)) for key in (
             "request_no", "attempt_no", "status", "reason", "original_required", "candidate_required",
-            "net_reclaimed", "recovery_margin", "recovery_budget",
+            "net_reclaimed", "remaining_budget",
         )} | {"lanes": {lane: {key: selected.get(key) for key in (
-            "summary_id", "status", "model_called", "target_bytes", "summary_bytes", "summary_call",
+            "summary_id", "status", "model_called", "max_output_tokens", "summary_bytes", "summary_call",
         )} for lane, selected in compaction.get("lanes", {}).items()},
               "history_scopes": [deepcopy(selected["scope"]) for selected in compaction.get("lanes", {}).values()
                                  if "scope" in selected]}
@@ -146,14 +147,15 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         return (state["run_id"] == saved.get("run_id") == snapshot["run_id"]
                 and state["record_revision"] == saved.get("record_revision") == snapshot["record_revision"]
                 and state["active_context"]["version_id"] == saved.get("active_context", {}).get("version_id")
-                == snapshot["active_version_id"])
+                == snapshot["active_version_id"]
+                and state["record_files"] == saved.get("record_files") == snapshot["record_files"])
 
     async def source_changed(state, compaction):
         # A newer confirmed view wins. Paid summary facts still belong to this Run.
         latest = await records.snapshot(records.confirmed())
         update = {field: deepcopy(latest[field]) for field in (
             "context_risks", "active_context", "history_end", "record_revision", "record_sequence",
-            "record_admitted_through", "execution_facts", "run_call_ids", "history_scopes",
+            "record_admitted_through", "execution_facts", "run_call_ids", "history_scopes", "record_files",
         )}
         update["input"] = Overwrite(deepcopy(latest["input"]))
         return stop(state, compaction, "source_changed", failed=True, update=update)
@@ -169,14 +171,15 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 if compaction["attempt_no"] != 1 or not await unchanged(state, compaction):
                     return await source_changed(state, compaction)
                 compaction["attempt_no"] = 2
-                for lane, selected in compaction["lanes"].items():
+                for selected in compaction["lanes"].values():
                     if selected["status"] == "empty":
                         continue
-                    selected["candidate_input"] = {"document": deepcopy(selected["document"]),
-                        "summary_id": selected["summary_id"], "checkpoint_id": records.confirmed()}
+                    selected["candidate_input"] = {
+                        "body": selected["body"], "summary_id": selected["summary_id"],
+                        "checkpoint_id": records.confirmed(),
+                    }
                     selected["summary_id"] = str(uuid4())
-                    selected["allowed_source_ids"] = sorted(_document_ids(selected["document"]))
-                    selected["model_called"] = False
+                    selected["status"] = "prepared"
             else:
                 selected, reason = await records.select(state, settings)
                 if selected is None:
@@ -186,58 +189,28 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 compaction.update(selected)
                 compaction["original_required"] = state["context_budget"]["required_tokens"]
                 compaction["candidate_version_id"] = str(uuid4())
-            lanes = {lane: selected for lane, selected in compaction["lanes"].items() if selected["status"] != "empty"}
-            empty = {lane: {field: [] for field in SUMMARY_FIELDS} for lane in lanes}
-            base = measure(state, compaction, empty)[0]["required_tokens"]
-            margin = math.ceil(settings.context_budget_tokens * settings.context_recovery_margin_percent / 100)
-            capacity = min(settings.context_budget_tokens - margin - base, compaction["original_required"] - base - 1)
-            soft = (settings.context_budget_tokens - base) * settings.summary_target_percent // 100
-            minima, weights = {}, {}
-            for lane, selected in lanes.items():
-                if not selected["allowed_source_ids"]:
-                    return stop(state, compaction, "invalid_summary", failed=True)
-                doc = deepcopy(empty[lane])
-                doc["facts"] = [{"text": "x", "source_ids": [min(selected["allowed_source_ids"], key=len)]}]
-                minima[lane] = json_bytes(_message(lane, selected, doc)) - json_bytes(_message(lane, selected, empty[lane]))
-                weights[lane] = max(1, selected["source_bytes"])
-            if capacity < sum(minima.values()):
+            lanes = {lane: selected for lane, selected in compaction["lanes"].items()
+                     if selected["status"] != "empty"}
+            # This is only an impossibility precheck: no generation target or headroom policy.
+            base = measure(state, compaction, {lane: "" for lane in lanes})[0]
+            if base["required_tokens"] + len(lanes) > settings.context_budget_tokens:
                 return stop(state, compaction, "protected_context_too_large")
-            total = min(capacity, max(sum(minima.values()), soft))
-            if retry:
-                total = min(total, max(sum(minima.values()), sum(
-                    json_bytes(_message(lane, selected, selected["document"])) - json_bytes(_message(lane, selected, empty[lane]))
-                    for lane, selected in lanes.items()) * 3 // 4))
-            remaining = total - sum(minima.values())
-            allocations = {lane: minima[lane] + remaining * weights[lane] // sum(weights.values()) for lane in lanes}
-            allocations["R" if "R" in allocations else "H"] += total - sum(allocations.values())
             for lane, selected in lanes.items():
-                selected["target_bytes"] = allocations[lane] + json_bytes(_message(lane, selected, empty[lane]))
-                if not retry and not selected["source_refs"] and len(selected["previous"]) == 1:
-                    selected["document"] = await records.summary(selected["previous"][0])
-                selected["status"] = "reused" if ("document" in selected and
-                    json_bytes(_message(lane, selected, selected["document"])) <= selected["target_bytes"]) else "prepared"
+                selected["max_output_tokens"] = summary_budget_settings(settings, lane).max_output_tokens
+                if not retry:
+                    if not selected["source_refs"] and len(selected["previous"]) == 1:
+                        selected["body"] = await records.summary(selected["previous"][0])
+                        selected["status"] = "reused"
+                        selected["summary_bytes"] = json_bytes(_message(lane, selected, selected["body"]))
+                    else:
+                        selected["status"] = "prepared"
                 selected["model_called"] = False
                 selected.pop("summary_call", None)
-            reusable = {lane: selected for lane, selected in lanes.items() if selected["status"] == "reused"}
-            updating = {lane: selected for lane, selected in lanes.items() if selected["status"] != "reused"}
-            if reusable and updating:
-                reused_cost = sum(json_bytes(_message(lane, selected, selected["document"]))
-                                  - json_bytes(_message(lane, selected, empty[lane])) for lane, selected in reusable.items())
-                left = max(0, total - reused_cost - sum(minima[lane] for lane in updating))
-                denominator = sum(weights[lane] for lane in updating)
-                shares = {lane: minima[lane] + left * weights[lane] // denominator for lane in updating}
-                shares["R" if "R" in updating else "H"] += total - reused_cost - sum(shares.values())
-                for lane, selected in updating.items():
-                    selected["target_bytes"] = shares[lane] + json_bytes(_message(lane, selected, empty[lane]))
-            if retry and all(selected["status"] == "reused" for selected in lanes.values()):
-                return stop(state, compaction, "no_shortening_space")
-            compaction.update(status="preparing", pass_no=compaction["attempt_no"],
-                              recovery_budget={"base_required": base, "hard_capacity": capacity, "soft_target": soft,
-                                               "margin_required": margin, "target_bytes": total})
+            compaction.update(status="preparing", pass_no=compaction["attempt_no"])
             scopes = deepcopy(state["history_scopes"])
             scopes.update({selected["scope"]["history_ref"]: selected["scope"] for selected in lanes.values()})
             emit("compaction.started", compaction["step_id"], request_no=compaction["request_no"],
-                 attempt_no=compaction["attempt_no"], recovery_budget=compaction["recovery_budget"])
+                 attempt_no=compaction["attempt_no"])
             return finish(state, {"compaction": compaction, "history_scopes": scopes},
                           "prepare_compaction", compaction["step_id"])
         except CheckpointError:
@@ -258,34 +231,14 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             return finish(state, {"compaction": compaction}, "summarize_" + lane, step_id)
         try:
             if compaction["attempt_no"] == 2:
-                material = {"candidate_input": selected["candidate_input"],
-                            "sources": [{"source_id": ref, "kind": "prior_candidate_reference"}
-                                        for ref in selected["allowed_source_ids"]]}
+                material = {"candidate_input": selected["candidate_input"], "sources": [],
+                            "coverage_readonly": deepcopy(selected["scope"]["ranges"])}
             else:
                 material = await records.material(compaction, lane, state)
-            # Optional H background is made only of whole entries, never evidence for R.
-            if lane == "R" and compaction["lanes"]["H"]["status"] != "empty":
-                hdoc = compaction["lanes"]["H"]["document"]
-                background = {field: [] for field in SUMMARY_FIELDS}
-                for field, entries in hdoc.items():
-                    for entry in entries:
-                        proposed = deepcopy(background); proposed[field].append(entry)
-                        if json_bytes(proposed) <= 8192:
-                            background = proposed
-                material["history_background_readonly"] = {"document": background, "complete": background == hdoc}
-            request = prepare_summary_request(settings, material, target_bytes=selected["target_bytes"], lane=lane)
+            request = prepare_summary_request(settings, material, lane=lane, attempt_no=compaction["attempt_no"])
             risks = annotate_context_risks(request["input"], fallback_tokens=settings.opaque_fallback_tokens,
                                            run_id=state["run_id"])
-            budget = check_context_budget(request, risks, summary_budget_settings(settings), step_id=step_id)
-            if budget["decision"] == "exceeded" and "history_background_readonly" in material:
-                # Background is optional; remove whole entries until the actual request fits.
-                background = material["history_background_readonly"]
-                for field in reversed(SUMMARY_FIELDS):
-                    while background["document"][field] and budget["decision"] == "exceeded":
-                        background["document"][field].pop(); background["complete"] = False
-                        request = prepare_summary_request(settings, material, target_bytes=selected["target_bytes"], lane=lane)
-                        risks = annotate_context_risks(request["input"], fallback_tokens=settings.opaque_fallback_tokens, run_id=state["run_id"])
-                        budget = check_context_budget(request, risks, summary_budget_settings(settings), step_id=step_id)
+            budget = check_context_budget(request, risks, summary_budget_settings(settings, lane), step_id=step_id)
             selected["summary_request_sha256"] = sha256(json.dumps(
                 request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
             ).encode("utf-8")).hexdigest()
@@ -324,18 +277,13 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             emit("summary.failed", step_id, lane=lane, summary_call=count, error_code=failure)
             return stop(state, compaction, failure, failed=True, update=update)
         try:
-            parsed = parse_summary(result, allowed_source_ids=set(selected["allowed_source_ids"]),
-                                   summary_id=selected["summary_id"], lane=lane)
-            for source in _document_ids(parsed["document"]):
-                await records.store.get(source, checkpoint_id=compaction["snapshot"]["source_checkpoint_id"])
-        except CheckpointError:
-            return stop(state, compaction, "invalid_summary", failed=True, update=update)
+            body = parse_summary(result)
         except SummaryError as exc:
             return stop(state, compaction, exc.code, failed=True, update=update)
         except Exception:
             return stop(state, compaction, "invalid_summary", failed=True, update=update)
-        selected.update(document=parsed["document"], status="generated",
-                        summary_bytes=json_bytes(_message(lane, selected, parsed["document"])))
+        selected.update(body=body, status="generated",
+                        summary_bytes=json_bytes(_message(lane, selected, body)))
         compaction["status"] = next_status
         emit("summary.returned", step_id, summary_id=selected["summary_id"], lane=lane,
              summary_call=count, usage=usage, summary_bytes=selected["summary_bytes"])
@@ -348,7 +296,7 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         compaction = deepcopy(state["compaction"])
         if not await unchanged(state, compaction):
             return await source_changed(state, compaction)
-        docs = {lane: selected["document"] for lane, selected in compaction["lanes"].items() if selected["status"] != "empty"}
+        docs = {lane: selected["body"] for lane, selected in compaction["lanes"].items() if selected["status"] != "empty"}
         try:
             budget, items, _, _ = measure(state, compaction, docs)
             if validate_input(items) is not None:
@@ -358,13 +306,12 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         required = budget["required_tokens"]
         compaction.update(candidate_budget=budget, candidate_required=required,
                           net_reclaimed=compaction["original_required"] - required,
-                          recovery_margin=settings.context_budget_tokens - required)
+                          remaining_budget=settings.context_budget_tokens - required)
         reason = ("candidate_budget_exceeded" if budget["decision"] != "allow" else
-                  "summary_not_effective" if compaction["net_reclaimed"] <= 0 else
-                  "recovery_margin_insufficient" if compaction["recovery_margin"] < compaction["recovery_budget"]["margin_required"] else None)
+                  "summary_not_effective" if compaction["net_reclaimed"] <= 0 else None)
         emit("context_budget.checked", compaction.get("step_id"), purpose="candidate",
              **{key: value for key, value in budget.items() if key != "step_id"})
-        if reason and compaction["attempt_no"] == MAX_COMPACT_PASSES:
+        if reason and (reason != "candidate_budget_exceeded" or compaction["attempt_no"] == MAX_COMPACT_PASSES):
             return stop(state, compaction, reason)
         compaction.update(status="retry_pending" if reason else "validated", reason=reason)
         return finish(state, {"compaction": compaction,
@@ -382,9 +329,13 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         for selected in compaction["lanes"].values():
             if selected["status"] != "empty":
                 await records.store.scope(selected["scope"]["history_ref"], checkpoint_id=checkpoint_id)
-                for source in selected["allowed_source_ids"]:
-                    await records.store.get(source, checkpoint_id=compaction["snapshot"]["source_checkpoint_id"])
-        docs = {lane: selected["document"] for lane, selected in compaction["lanes"].items() if selected["status"] != "empty"}
+                for bounds in selected["scope"]["ranges"]:
+                    try:
+                        records.saver.history_journal(records.session_id).verify(
+                            bounds["run_id"], compaction["snapshot"]["record_files"][bounds["run_id"]])
+                    except JournalError as exc:
+                        raise CheckpointError(exc.code) from exc
+        docs = {lane: selected["body"] for lane, selected in compaction["lanes"].items() if selected["status"] != "empty"}
         _, _, risks, _ = measure(state, compaction, docs)
         items, active = _compose(state, compaction, docs, checkpoint_id)
         delta = len(items) - len(state["input"])

@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 import json
-import re
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
@@ -29,7 +28,7 @@ class TurnSlice(TypedDict):
 def new_context() -> ActiveContext:
     return {"version_id": str(uuid4()), "parent_version_id": None,
             "history_summary": None, "run_summary": None, "turns": [], "turn_start": 0,
-            "initial_input_count": 0, "groups": [], "item_refs": [], "summary_spans": []}
+            "current_run_id": None, "initial_input_count": 0, "groups": [], "item_refs": [], "summary_spans": []}
 
 
 def json_bytes(value: Any) -> int:
@@ -46,6 +45,13 @@ async def _read_final_turn(
         raise CheckpointError("checkpoint_read_error")
     active = final.get("active_context")
     start = active.get("turn_start") if isinstance(active, dict) else None
+    if isinstance(active, dict) and active.get("current_run_id") is None:
+        offset = 1 if active.get("history_summary") else 0
+        for turn in active["turns"]:
+            if turn["run_id"] == ref["run_id"]:
+                start = offset
+                break
+            offset += turn["item_count"]
     boundary, items = final.get("history_end"), final.get("input")
     if (type(start) is not int or type(boundary) is not int or not isinstance(items, list)
             or not 0 <= start <= boundary <= len(items)):
@@ -122,10 +128,6 @@ async def read_record(
     })
 
 
-def _source_ids(document: dict) -> set[str]:
-    return {source for section in document.values() for entry in section for source in entry["source_ids"]}
-
-
 class ContextRecords:
     """Confirmed original facts and effective views, bound to one storage scope."""
 
@@ -145,36 +147,31 @@ class ContextRecords:
         saved = await self.saver.read_confirmed(self.session_id, checkpoint_id)
         return saved.checkpoint["channel_values"]
 
-    async def summary(self, ref: SummaryReference | None) -> dict | None:
+    async def summary(self, ref: SummaryReference | None) -> str | None:
         if ref is None:
             return None
         values = await self.snapshot(ref["checkpoint_id"])
         lane = (values.get("compaction") or {}).get("lanes", {}).get(ref["lane"], {})
-        if lane.get("summary_id") != ref["summary_id"] or not isinstance(lane.get("document"), dict):
+        if lane.get("summary_id") != ref["summary_id"] or not isinstance(lane.get("body"), str) or not lane["body"].strip():
             raise CheckpointError("checkpoint_read_error")
-        return deepcopy(lane["document"])
+        return lane["body"]
 
     async def select(self, state: AgentState, settings: ModelSettings) -> tuple[dict | None, str | None]:
         from lineage_agent.models.responses import compactable_group_items
         active = state["active_context"]
         checkpoint_id = self.confirmed()
         saved = await self.snapshot(checkpoint_id)
-        if (saved.get("record_revision") != state["record_revision"]
+        if (saved.get("run_id") != state["run_id"]
+                or saved.get("record_files") != state["record_files"]
+                or saved.get("record_revision") != state["record_revision"]
                 or saved.get("active_context", {}).get("version_id") != active["version_id"]):
             return None, "source_changed"
-        groups = active["groups"]
+        groups = active["groups"] if active["current_run_id"] is not None else []
         closed = [g for g in groups if g["closed"]]
         protected = settings.context_keep_recent_groups
         remove_groups = closed[:-protected] if len(closed) > protected else []
-        need = max(0, protected - len(closed))
-        keep_turn_at = len(active["turns"])
-        if need:
-            for i in range(len(active["turns"]) - 1, -1, -1):
-                keep_turn_at = i
-                need -= active["turns"][i]["group_count"]
-                if need <= 0:
-                    break
-        turns = active["turns"][:keep_turn_at]
+        # Historical turns never participate in the current Run's protection window.
+        turns = active["turns"]
         old_start = 1 if active["history_summary"] else 0
         history_end = old_start + sum(turn["item_count"] for turn in turns)
         history_indices = list(range(old_start, history_end))
@@ -214,26 +211,25 @@ class ContextRecords:
                 r["run_id"] == bounds["run_id"] and bounds["start"] <= r["sequence"] < bounds["end"]
                 for bounds in ranges))
             covered.update(visible)
-            documents = [await self.summary(ref) for ref in prior]
-            allowed = set(visible)
-            for document in documents:
-                allowed.update(_source_ids(document))
-            if not allowed.issubset(covered) or not covered.issubset(by_ref):
+            bodies = [await self.summary(ref) for ref in prior]
+            if not covered.issubset(by_ref):
                 raise CheckpointError("checkpoint_read_error")
             if not covered:
-                lanes[lane] = {"status": "empty", "source_refs": [], "previous": [], "allowed_source_ids": []}
+                lanes[lane] = {"status": "empty", "source_refs": [], "previous": []}
                 continue
             scope = await self.store.register_scope(sorted(covered), checkpoint_id=checkpoint_id)
             visible_refs = set(visible)
             lanes[lane] = {
                 "status": "selected", "source_refs": [r["source_ref"] for r in all_records
                                                        if r["source_ref"] in visible_refs], "previous": prior,
-                "allowed_source_ids": sorted(allowed), "scope": scope,
+                "scope": scope,
                 "summary_id": str(uuid4()),
-                "source_metadata": {ref: _artifact_metadata(by_ref[ref]) for ref in allowed
-                                    if _artifact_metadata(by_ref[ref])},
+                "source_files": [{**bounds, "path": str(self.saver.history_journal(self.session_id).path(bounds["run_id"]))}
+                                 for bounds in scope["ranges"]],
+                "covered_groups": list(dict.fromkeys(by_ref[ref]["group_id"] for ref in by_ref
+                                                     if ref in covered and by_ref[ref].get("group_id") is not None)),
                 "source_bytes": sum(len(record_projection(by_ref[ref])[0].encode("utf-8")) for ref in visible_refs)
-                    + sum(json_bytes(doc) for doc in documents),
+                    + sum(len(body.encode("utf-8")) for body in bodies),
             }
         if all(lane["status"] == "empty" for lane in lanes.values()):
             return None, "no_compressible_range"
@@ -245,7 +241,8 @@ class ContextRecords:
                            if span["run_id"] == state["run_id"] and span["lane"] == "R")
         return {
             "snapshot": {"run_id": state["run_id"], "source_checkpoint_id": checkpoint_id,
-                         "record_revision": state["record_revision"], "active_version_id": active["version_id"]},
+                         "record_revision": state["record_revision"], "active_version_id": active["version_id"],
+                         "record_files": deepcopy(state["record_files"])},
             "lanes": lanes, "removed_indices": sorted(removed), "removed_turns": len(turns),
             "removed_groups": [g["group_id"] for g in remove_groups],
         }, None
@@ -253,7 +250,8 @@ class ContextRecords:
     async def material(self, compaction: dict, lane: str, state: AgentState) -> dict:
         selected = compaction["lanes"][lane]
         checkpoint_id = compaction["snapshot"]["source_checkpoint_id"]
-        documents = [await self.summary(ref) for ref in selected["previous"]]
+        previous = [{"lane": ref["lane"], "body": await self.summary(ref), "ranges": deepcopy(ref["ranges"])}
+                    for ref in selected["previous"]]
         sources = []
         for source_ref in selected["source_refs"]:
             record = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
@@ -261,28 +259,9 @@ class ContextRecords:
             sources.append({"source_id": source_ref, "kind": record["kind"],
                             "group_id": record.get("group_id"), "payload": json.loads(projection),
                             "opaque_omitted": opaque})
-        material = {"sources": sources, "previous_summary": documents, "turn_outcomes": []}
+        material = {"sources": sources, "previous_summary": previous, "turn_outcomes": []}
         if lane == "R":
             active = state["active_context"]
             start = active["turn_start"]
             material["current_request_readonly"] = deepcopy(state["input"][start:start + active["initial_input_count"]])
         return material
-
-
-def _artifact_metadata(record: dict) -> dict:
-    """Only program-created observation/recall fields confer Artifact identity."""
-    item = record.get("item") or {}
-    if item.get("type") != "function_call_output" or not isinstance(item.get("output"), str):
-        return {}
-    try:
-        envelope = json.loads(item["output"])
-        observation = envelope.get("observation", {})
-        value = observation
-        if observation.get("mode") == "inline" and (record.get("execution") or {}).get("name") in {"artifact_read", "artifact_search"}:
-            value = json.loads(observation["raw_result"])
-        ref = value.get("artifact_ref")
-        if not isinstance(ref, str) or re.fullmatch(r"artifact://tool/[0-9a-f]{32}", ref) is None:
-            return {}
-        return {key: deepcopy(value[key]) for key in ("artifact_ref", "view_kind", "total_chars", "complete", "start", "end") if key in value}
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return {}

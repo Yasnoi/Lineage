@@ -34,7 +34,7 @@ CHECK_ID = str(uuid4())
 CHECK_DIR = ROOT / "logs" / "checks" / CHECK_ID
 
 SETTINGS = ModelSettings(
-    base_url="https://unused.invalid/v1", model_name="filesystem-check", log_dir=CHECK_DIR,
+    base_url="https://unused.invalid/v1", model_name="filesystem-check", log_dir=CHECK_DIR, application_root=CHECK_DIR,
 )
 
 SKIPPED = []

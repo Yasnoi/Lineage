@@ -238,5 +238,5 @@ def turn_compact_evidence(observer, state, turn, settings):
         "recalls": {name: [{"call": call, "output": output,
                             "evidence_source": pair_sources.get(call["call_id"], "final_state_input")}
                            for call, output in items] for name, items in recalls.items()},
-        "record_metrics": state.get("record_metrics")})
+        "record_metrics": state.get("record_metrics"), "record_files": state.get("record_files", {})})
     return metrics, path

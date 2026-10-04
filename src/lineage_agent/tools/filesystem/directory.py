@@ -22,7 +22,7 @@ DIRECTORY_TOOL: ToolDefinition = {
     "name": "list_directory",
     "description": (
         "列举绑定项目中指定相对目录的直接子项；path='.' 表示根目录。"
-        "包含隐藏项，不递归、不读取文件正文、不进入链接。"
+        "包含隐藏项，但不公开应用保留目录；不递归、不读取文件正文、不进入链接。"
         "第一页 after=null；truncated=true 时用 next_after 继续列举同一目录。"
         "按名称排序分页，未返回条目不代表不存在；目录变化时需从第一页重新发现。"
         "目录名称和结构不代表已经理解代码。"
@@ -92,7 +92,8 @@ def directory_executor(project_root: Path, *, max_entries: int) -> ToolExecutor:
             with os.scandir(target) as iterator:
                 candidates = nsmallest(
                     max_entries + 1,
-                    (entry for entry in iterator if cursor is None or (entry.name.casefold(), entry.name) > cursor),
+                    (entry for entry in iterator if entry.name.casefold() != ".lineage"
+                     and (cursor is None or (entry.name.casefold(), entry.name) > cursor)),
                     key=lambda entry: (entry.name.casefold(), entry.name),
                 )
                 truncated = len(candidates) > max_entries

@@ -34,7 +34,7 @@ from uuid import uuid4
 CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 
 SETTINGS = ModelSettings(
-    base_url="https://unused.invalid/v1", model_name="text-check", log_dir=CHECK_DIR,
+    base_url="https://unused.invalid/v1", model_name="text-check", log_dir=CHECK_DIR, application_root=CHECK_DIR,
 )
 
 TOOLS = [DIRECTORY_TOOL, TEXT_TOOL]

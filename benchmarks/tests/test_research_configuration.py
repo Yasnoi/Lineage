@@ -163,7 +163,8 @@ class ResearchConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     configuration.resolve_run_config(V2, self.root)
                 self.assertEqual(dict(os.environ), {})
-        for overrides in ({"API_KEY": "private"}, {"log_dir": "elsewhere"}, {"project_root": "elsewhere"}):
+        for overrides in ({"API_KEY": "private"}, {"log_dir": "elsewhere"}, {"project_root": "elsewhere"},
+                          {"application_root": "elsewhere"}):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 configuration.checked_config({**V2, "model_overrides": overrides})
         (self.root / ".env").write_text(self.env_text, encoding="utf-8")
@@ -178,6 +179,18 @@ class ResearchConfigurationTests(unittest.TestCase):
         self.assertTrue(all(any(item["code"] == "configuration_recording_unavailable" for item in unit["issues"])
                             for unit in result["units"]))
         self.assertFalse(any(item["kind"] == "resolved_configuration" for unit in result["units"] for item in unit["evidence"]))
+
+    def test_lane_caps_are_model_settings_but_application_root_is_program_owned(self):
+        values = configuration.checked_model({**MODEL, "summary_history_max_output_tokens": 16384,
+                                               "summary_run_max_output_tokens": 8192})
+        self.assertEqual(values["summary_history_max_output_tokens"], 16384)
+        self.assertEqual(values["summary_run_max_output_tokens"], 8192)
+        self.assertNotIn("application_root", values)
+        for name in ("summary_target_percent", "context_recovery_margin_percent"):
+            with self.subTest(name=name), self.assertRaises(ConfigurationError) as error:
+                configuration.checked_config({**V2, "model_overrides": {name: 10}})
+            self.assertEqual(error.exception.diagnostic["code"], "retired_compact_setting")
+            self.assertEqual(error.exception.diagnostic["path"], f"model_overrides.{name}")
 
     def test_ordered_selection_and_explicit_unselected_scope(self):
         suite = deepcopy(SUITE)

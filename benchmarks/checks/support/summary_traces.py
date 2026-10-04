@@ -9,7 +9,7 @@ from benchmarks.core.files import ROOT
 from copy import deepcopy
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import prepare_summary_request, is_summary_request
+from lineage_agent.models.summarization import prepare_summary_request, is_summary_request, summary_budget_settings
 from lineage_agent.models.responses import ModelError, send_prepared_response
 from lineage_agent.recording.tracing import start_trace
 from uuid import uuid4
@@ -17,7 +17,7 @@ from uuid import uuid4
 CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 
 SETTINGS = ModelSettings(
-    base_url="https://unused.invalid/v1", model_name="summary-trace-check", log_dir=CHECK_DIR,
+    base_url="https://unused.invalid/v1", model_name="summary-trace-check", log_dir=CHECK_DIR, application_root=CHECK_DIR,
 )
 
 BODY = "SUMMARY_SOURCE_BODY_PRIVATE_e748"
@@ -37,15 +37,15 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
         "summary_id": summary_id, "candidate_version_id": version_id,
         "confirmed_checkpoint_id": checkpoint_id, "step_id": "step-0002",
         "request_no": 2, "attempt_no": 1, "summary_call": 1, "source_bytes": len(BODY), "lane": lane,
-        "recovery_budget": {"input_budget_tokens": 10000, "fixed_tokens": 500,
-                            "preserved_tokens": 7500, "available_tokens": 2000, "target_tokens": 800},
+        "remaining_budget": 2000,
         "status": "candidate",
         "sources": {"previous_summary": None, "added_turns": [
             {"run_id": source_run, "checkpoint_id": checkpoint_id, "item_count": 2},
         ]},
         "material": BODY, "message": DERIVED,
         "lanes": {lane: {"summary_id": summary_id, "status": "generated", "model_called": True,
-                         "target_bytes": 800, "summary_bytes": 700, "summary_call": 1, "document": DERIVED}},
+                         "max_output_tokens": summary_budget_settings(SETTINGS, lane).max_output_tokens,
+                         "summary_bytes": 700, "summary_call": 1, "body": DERIVED}},
     }
     h_ref = {"summary_id": str(uuid4()), "checkpoint_id": checkpoint_id, "lane": "H"}
     r_ref = {"summary_id": str(uuid4()), "checkpoint_id": checkpoint_id, "lane": "R"}
@@ -61,10 +61,10 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
     summary_request = prepare_summary_request(
         SETTINGS, {"sources": [{"source_id": "fixture:0", "role": "user", "kind": "message",
                                 "payload": {"role": "user", "content": BODY}}]},
-        target_bytes=metadata["recovery_budget"]["target_tokens"], lane=lane,
+        lane=lane,
     )
     assert is_summary_request(summary_request) and summary_request["reasoning"] == {"effort": "none"}
-    assert summary_request["max_output_tokens"] == SETTINGS.max_output_tokens
+    assert summary_request["max_output_tokens"] == summary_budget_settings(SETTINGS, lane).max_output_tokens
     business_request = prepare_request(
         SETTINGS.model_name, [
             {"role": "assistant", "content": DERIVED + " H"},
@@ -131,7 +131,8 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
         assert span["extra"]["metadata"]["attempt_no"] == 1
         assert span["extra"]["metadata"]["lane"] == lane
         assert span["extra"]["metadata"]["lanes"][lane]["model_called"] is True
-        assert span["extra"]["metadata"]["recovery_budget"] == metadata["recovery_budget"]
+        assert span["extra"]["metadata"]["remaining_budget"] == metadata["remaining_budget"]
+        assert span["extra"]["metadata"]["lanes"][lane]["max_output_tokens"] == summary_request["max_output_tokens"]
         assert span["extra"]["metadata"]["outcome"] == ("failed" if error else "returned")
         assert business[0]["inputs"]["summary_content_omitted"] is True
         assert business[0]["inputs"]["summary_items_omitted"] == 3

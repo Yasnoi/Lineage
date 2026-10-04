@@ -60,9 +60,9 @@ def format_run_summary(state: AgentState) -> str:
             for lane, value in lanes.items():
                 details.append(f"{lane}：{labels.get(value.get('status'), '未确认')}")
             summary += "\n摘要分路：" + "，".join(details)
-        if "net_reclaimed" in compaction and "recovery_margin" in compaction:
+        if "net_reclaimed" in compaction and "remaining_budget" in compaction:
             summary += (f"\n上下文净回收：{compaction['net_reclaimed']}；"
-                        f"恢复余量：{compaction['recovery_margin']}（本地预算估算单位）")
+                        f"剩余额度：{compaction['remaining_budget']}（观测值；本地预算估算单位）")
         if compaction.get("confirmed_checkpoint_id"):
             summary += f"\n版本确认检查点：{compaction['confirmed_checkpoint_id']}"
     budget = TraceSanitizer.context_budget(state.get("context_budget"))

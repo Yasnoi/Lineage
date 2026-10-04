@@ -1,98 +1,99 @@
-"""Summary provenance and complete-group protocol boundaries, without a model."""
+"""Plain-text summary and complete-group protocol contracts, without a model."""
 
 from copy import deepcopy
-import json
+from dataclasses import replace
 import unittest
 
 from lineage_agent.models.responses import compactable_group_items
+from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.summarization import (
-    SUMMARY_FIELDS, SummaryError, minimum_summary_message_bytes, parse_summary,
-    prepare_summary_request, summary_request_lane, unpack_summary_material,
+    SummaryError, parse_summary, prepare_summary_request, summary_budget_settings,
+    summary_request_lane, unpack_summary_material,
 )
 from lineage_agent.config.settings import ModelSettings
 
 
-SOURCE = "history://record/01234567-89ab-cdef-0123-456789abcdef/2"
-ARTIFACT = "artifact://tool/0123456789abcdef0123456789abcdef"
-SCOPE = "history://scope/01234567-89ab-cdef-0123-456789abcdef"
 SETTINGS = ModelSettings(base_url="https://summary.invalid/v1", model_name="offline")
 
 
 def result(text="Observed failure; retry remains unfinished."):
-    document = {field: [] for field in SUMMARY_FIELDS}
-    document["facts"] = [{"text": text, "source_ids": [SOURCE]}]
     return {"raw_response": {"status": "completed", "error": None},
-            "has_refusal": False, "tool_calls": [], "text": json.dumps(document)}
+            "has_refusal": False, "tool_calls": [], "text": text}
 
 
 class SummaryContractsTests(unittest.TestCase):
-    def test_lane_and_byte_target_are_independent_of_api_cap(self):
-        material = {"sources": [], "current_user_background": "do not change 17 or the negation"}
+    def test_lane_caps_are_independent_of_business_output_allowance(self):
+        settings = replace(SETTINGS, max_output_tokens=256)
+        material = {"sources": [], "current_request_readonly": "do not change 17 or the negation"}
         original = deepcopy(material)
-        for lane in ("H", "R"):
-            for target in (1, 24000):
-                with self.subTest(lane=lane, target=target):
-                    request = prepare_summary_request(SETTINGS, material, target_bytes=target, lane=lane)
+        for lane, cap in (("H", 16384), ("R", 8192)):
+            for attempt in (1, 2):
+                with self.subTest(lane=lane, attempt=attempt):
+                    request = prepare_summary_request(settings, material, lane=lane, attempt_no=attempt)
                     self.assertEqual(summary_request_lane(request), lane)
-                    self.assertEqual(request["max_output_tokens"], SETTINGS.max_output_tokens)
+                    self.assertEqual(request["max_output_tokens"], cap)
                     self.assertEqual(unpack_summary_material(request), material)
                     self.assertEqual(material, original)
-                    self.assertNotEqual(summary_request_lane({**request, "instructions": request["instructions"] + "x"}), lane)
-        historical = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="H")
-        current = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="R")
+                    self.assertIsNone(summary_request_lane({**request, "instructions": request["instructions"] + "x"}))
+                    self.assertEqual(request["reasoning"], {"effort": "none"})
+                    self.assertEqual(request["tool_choice"], "none")
+                    self.assertNotIn("tools", request)
+        historical = prepare_summary_request(settings, material, lane="H")
+        current = prepare_summary_request(settings, material, lane="R")
         self.assertIn("task ending from a task succeeding", historical["instructions"])
         self.assertIn("Do not attribute historical work", current["instructions"])
         self.assertIn("截至覆盖范围", current["instructions"])
         self.assertIn("Missing from these sources does not mean", current["instructions"])
-        self.assertIn("Every progress entry, including facts", current["instructions"])
-        self.assertIn("Output this five-field document itself", current["instructions"])
-        self.assertIn("actual result or execution-fact source", current["instructions"])
+        self.assertIn("including facts", current["instructions"])
+        self.assertIn("actual result or execution facts", current["instructions"])
+        self.assertNotIn("source_ids", current["instructions"])
+        self.assertNotIn("UTF-8 bytes", current["instructions"])
+        self.assertNotIn("historical context", current["instructions"])
         self.assertNotEqual(historical["instructions"], current["instructions"])
 
-    def test_invalid_size_or_lane_never_prepares_a_request(self):
-        for value in (0, -1, True, 1.5, "900"):
-            with self.subTest(value=value), self.assertRaises(SummaryError):
-                prepare_summary_request(SETTINGS, {}, target_bytes=value)
+    def test_invalid_lane_or_attempt_never_prepares_a_request(self):
+        for value in (0, -1, True, 3, 1.5, "1"):
+            with self.subTest(attempt=value), self.assertRaises(SummaryError):
+                prepare_summary_request(SETTINGS, {}, lane="H", attempt_no=value)
+        for lane in ("unknown", None, [], 1):
+            with self.subTest(lane=lane), self.assertRaises(SummaryError):
+                prepare_summary_request(SETTINGS, {}, lane=lane)
         with self.assertRaises(SummaryError):
-            prepare_summary_request(SETTINGS, {}, target_bytes=900, lane="unknown")
+            prepare_summary_request(SETTINGS, None, lane="R")
 
-    def test_machine_refs_need_explicit_allowed_origin(self):
-        for text in (SOURCE, f"See ({SOURCE})."):
-            parsed = parse_summary(result(text), allowed_source_ids={SOURCE}, summary_id="summary", lane="R")
-            self.assertEqual(json.loads(parsed["message"]["content"])["lane"], "R")
-        for reference in (ARTIFACT, SCOPE, SOURCE + "99", "history://record/forged/1"):
-            with self.subTest(reference=reference), self.assertRaises(SummaryError):
-                parse_summary(result("See " + reference), allowed_source_ids={SOURCE}, summary_id="summary")
-        parsed = parse_summary(result(ARTIFACT), allowed_source_ids={SOURCE}, summary_id="summary",
-                               allowed_machine_refs={ARTIFACT})
-        self.assertIn(ARTIFACT, parsed["message"]["content"])
-        # Plain business identifiers are evidence, not application access refs.
-        parse_summary(result("Business UUID 11111111-1111-1111-1111-111111111111"),
-                      allowed_source_ids={SOURCE}, summary_id="summary")
+    def test_plain_text_is_preserved_without_schema_or_reference_parsing(self):
+        for text in ("  保留 17，不能写文件。\n截至覆盖范围，尚未确认后续结果。  ",
+                     '{"facts": [{"text": "text shaped like JSON"}]}',
+                     "See history://record/not-an-authority/99 and artifact://invented."):
+            with self.subTest(text=text):
+                self.assertEqual(parse_summary(result(text)), text)
+        # Endpoint extensions are handled by the common adapter, not a new format gate.
+        value = {**result("plain text"), "output_items": [{"type": "vendor_extension", "metadata": {}}]}
+        self.assertEqual(parse_summary(value), "plain text")
 
-    def test_invalid_source_or_structure_does_not_pass(self):
-        value = result()
-        document = json.loads(value["text"])
-        for wrapped in ({"document": document},
-                        {"kind": "derived_context_summary", "summary_id": "made-up", "document": document},
-                        {"derived_context_summary": document},
-                        {**document, "summary_id": "made-up"}):
-            with self.subTest(wrapped=list(wrapped)), self.assertRaises(SummaryError):
-                parse_summary({**value, "text": json.dumps(wrapped)}, allowed_source_ids={SOURCE}, summary_id="summary")
-        for sources in ([], [SOURCE, SOURCE], ["history://record/forged/2"]):
-            document["facts"][0]["source_ids"] = sources
-            with self.subTest(sources=sources), self.assertRaises(SummaryError):
-                parse_summary({**value, "text": json.dumps(document)}, allowed_source_ids={SOURCE}, summary_id="summary")
+    def test_invalid_completion_refusal_tool_request_and_empty_text_are_rejected(self):
         for changed in ({"has_refusal": True}, {"tool_calls": [{"call_id": "never-execute"}]},
-                        {"raw_response": {"status": "incomplete", "error": None}}):
+                        {"raw_response": {"status": "incomplete", "error": None}},
+                        {"raw_response": {"status": "completed", "error": {"code": "failed"}}},
+                        {"raw_response": {"status": "completed", "incomplete_details": {"reason": "max_output_tokens"}}},
+                        {"raw_response": None}, {"text": None}, {"text": 42}, {"text": ""},
+                        {"text": " \n\t"}, {"text": chr(0xD800)}):
             with self.subTest(changed=changed), self.assertRaises(SummaryError):
-                parse_summary({**value, **changed}, allowed_source_ids={SOURCE}, summary_id="summary")
+                parse_summary({**result(), **changed})
 
-    def test_minimum_size_measures_complete_lane_message(self):
-        parsed = parse_summary(result("x"), allowed_source_ids={SOURCE}, summary_id="摘要", lane="R")
-        self.assertEqual(minimum_summary_message_bytes("摘要", {SOURCE}, lane="R"), parsed["bytes"])
-        self.assertEqual(parsed["bytes"], len(json.dumps(parsed["message"], ensure_ascii=False,
-                                                        separators=(",", ":")).encode("utf-8")))
+    def test_summary_budget_uses_lane_cap_without_changing_business_settings(self):
+        settings = replace(SETTINGS, context_budget_tokens=12000, context_safety_margin_tokens=100,
+                           max_output_tokens=256, summary_history_max_output_tokens=20000,
+                           summary_run_max_output_tokens=512)
+        for lane, cap, decision in (("H", 20000, "exceeded"), ("R", 512, "allow")):
+            request = prepare_summary_request(settings, {}, lane=lane)
+            projected = summary_budget_settings(settings, lane)
+            budget = check_context_budget(request, [None] * len(request["input"]), projected)
+            self.assertEqual(projected.max_output_tokens, cap)
+            self.assertEqual(budget["output_reserve_tokens"], cap)
+            self.assertEqual(budget["decision"], decision)
+        self.assertEqual(settings.max_output_tokens, 256)
+        self.assertEqual(settings.summary_history_max_output_tokens, 20000)
 
 
 class GroupProtocolTests(unittest.TestCase):

@@ -108,7 +108,8 @@ async def check_read_budgets(root):
     # A larger tool allowance is now disclosed through bounded artifacts. The
     # real disk-read quota remains unchanged and independent of context size.
     expanded = create_text_executor(root)
-    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
+    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name,
+                               log_dir=SETTINGS.log_dir, application_root=SETTINGS.application_root)
     with monitor_reads(root) as (opened, probes), patch("benchmarks.checks.support.access.SETTINGS", production):
         state, client, events = await run_case(
             "production_total_read_budget_archives_large_results",

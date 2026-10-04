@@ -83,13 +83,13 @@ async def check_configuration():
             "BASE_URL": SETTINGS.base_url, "MODEL_NAME": SETTINGS.model_name,
             "CONTEXT_BUDGET_TOKENS": "123456", "MAX_OUTPUT_TOKENS": "5000",
             "CONTEXT_SAFETY_MARGIN_TOKENS": "0", "OPAQUE_FALLBACK_TOKENS": "9000",
-            "SUMMARY_TARGET_PERCENT": "35",
+            "SUMMARY_HISTORY_MAX_OUTPUT_TOKENS": "6000", "SUMMARY_RUN_MAX_OUTPUT_TOKENS": "3000",
         }
         with patch.dict(os.environ, env, clear=True):
             loaded = load_settings(Path(temporary) / "missing.env")
         assert loaded.context_budget_tokens == 123456 and loaded.max_output_tokens == 5000
         assert loaded.context_safety_margin_tokens == 0 and loaded.opaque_fallback_tokens == 9000
-        assert loaded.summary_target_percent == 35
+        assert loaded.summary_history_max_output_tokens == 6000 and loaded.summary_run_max_output_tokens == 3000
     print(json.dumps({"scenario": "configuration_validation", "defaults": defaults}))
 
 async def check_transparent_request_and_boundary():
@@ -130,7 +130,8 @@ async def check_transparent_request_and_boundary():
 
     # Exercise the new default window at its inclusive boundary using actual
     # requests; retain the original small-window cases above independently.
-    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name, log_dir=SETTINGS.log_dir)
+    production = ModelSettings(base_url=SETTINGS.base_url, model_name=SETTINGS.model_name,
+                               log_dir=SETTINGS.log_dir, application_root=SETTINGS.application_root)
     padded = [{"role": "user", "content": ""}]
     prepared = prepare_request(production.model_name, padded, tools=ARTIFACT_TOOLS + HISTORY_TOOLS)
     assert prepared["max_output_tokens"] == production.max_output_tokens == 16384
@@ -193,6 +194,11 @@ async def check_tool_result_limit_and_real_file():
         assert state["usage_totals"] == {"input_tokens": 25, "output_tokens": 4, "total_tokens": 29, "missing_usage_calls": 0}
         again, second_client, _ = await run([], manager=manager, sid=sid, prompt="Recall the source", scenario="file_result_stays_in_history")
         assert not second_client.requests and again.state["tool_calls"] == again.state["model_calls"] == 0
+        assert again.state["summary_calls"] == 0
+        assert again.state["compaction"]["reason"] == "summary_budget_exceeded"
+        summary_budget = again.state["compaction"]["lanes"]["H"]["summary_budget"]
+        assert summary_budget["decision"] == "exceeded" and not summary_budget["request_sent"]
+        assert summary_budget["output_reserve_tokens"] == settings.summary_history_max_output_tokens
         assert again.state["input"][:len(state["input"])] == state["input"]
         assert outputs(again.state) == [result]
         assert again.state["history_end"] == state["history_end"]
@@ -322,25 +328,23 @@ async def check_measurement_failure():
     inputs = [[{"type": "provider_extension", "value": value}] for value in invalid] + [[cycle]]
     for index, items in enumerate(inputs):
         # Independent Runs now use the same confirmed saver as sessions.
-        # Its serializer rejects object/cycle before the business budget gate.
+        # The original-record encoder rejects objects/cycles before checkpoint
+        # or business request preparation. NaN/Inf are safely saved first.
         state, client, _ = await run([], prompt=items, scenario=f"measurement_unserializable_{index}")
         assert not client.requests and state["model_calls"] == 0
         if index < 2:
             assert state["error_code"] == "context_measurement_error"
             assert state["context_budget"]["decision"] == "error" and state["context_budget"]["request_sent"] is False
         else:
-            assert state["error_code"] == "checkpoint_write_error" and state["context_budget"] is None
+            assert state["error_code"] == "record_encoding_error" and state["context_budget"] is None
         assert state["usage_totals"]["missing_usage_calls"] == 0
     with patch.object(runtime, "prepare_request", side_effect=ValueError(PRIVATE)):
         state, _, _ = await run([], scenario="request_preparation_failure")
     assert state["error_code"] == "context_measurement_error"
 
 async def check_session_invalid_storage_boundaries():
-    """A real saver failure precedes measurement; JSON rejection is separate.
-
-    These cases do not inject storage faults: InMemorySaver's actual serializer
-    decides which input facts can be checkpointed. Invalid JSON that it accepts
-    still must fail the model-request measurement and remain non-inheritable.
+    """Unsupported originals fail before inheritance; safe non-JSON values can
+    be saved but must still pass the independent business budget serializer.
     """
     cycle = {"type": "provider_extension"}
     cycle["cycle"] = cycle
@@ -360,13 +364,13 @@ async def check_session_invalid_storage_boundaries():
         state = refused.state
         assert not client.requests and state["model_calls"] == state["tool_calls"] == 0
         assert state["usage_totals"] == {"input_tokens": None, "output_tokens": None, "total_tokens": None, "missing_usage_calls": 0}
-        assert state["history_end"] == len(prior["input"])
-        assert state["input"][:len(prior["input"])] == prior["input"]
-        assert len(state["input"]) == len(prior["input"]) + 1
         for namespace, checkpoints in prior_storage.items():
             for checkpoint_id, stored in checkpoints.items():
                 assert manager._checkpointer.storage[sid][namespace][checkpoint_id] == stored, "failed submission modified a previous checkpoint"
         if serializable:
+            assert state["history_end"] == len(prior["input"])
+            assert state["input"][:len(prior["input"])] == prior["input"]
+            assert len(state["input"]) == len(prior["input"]) + 1
             assert await saved_state(manager, first) == prior
             assert refused.checkpoint_complete and len(measured) == 1
             assert state["error_code"] == "context_measurement_error"
@@ -375,9 +379,11 @@ async def check_session_invalid_storage_boundaries():
             assert third.checkpoint_complete and third.state["stop_reason"] == "completed"
             assert actual.requests[0]["input"] == prior["input"] + [{"role": "user", "content": "Recall the fact"}]
         else:
-            assert refused.checkpoint_error == "checkpoint_write_error" and not refused.checkpoint_complete
+            assert refused.checkpoint_error == "record_encoding_error" and not refused.checkpoint_complete
             assert refused.checkpoint_id is None and state["context_budget"] is None and not measured
-            assert state["error_code"] == "checkpoint_write_error"
+            assert state["error_code"] == "record_encoding_error"
+            assert state["history_end"] == 0 and len(state["input"]) == 1
+            assert await saved_state(manager, first) == prior
             assert not any(event["event"] == "context_budget.checked" for event in read_events(state))
             if label == "cycle":
                 assert state["input"][-1]["cycle"] is state["input"][-1], "returned facts lost the original cyclic relation"
@@ -393,7 +399,7 @@ async def check_session_invalid_storage_boundaries():
             print(json.dumps({"scenario": f"session_invalid_{label}_blocked", "session_id": sid,
                               "run_id": state["run_id"], "prior_checkpoint_id": first.checkpoint_id,
                               "checkpoint_error": refused.checkpoint_error, "log_path": state["log_path"],
-                              "failure_source": "actual_checkpoint_serialization"}))
+                              "failure_source": "actual_original_record_encoding"}))
 
 async def check_budget_recording_failures():
     for event in ("context_budget.checked", "model.started"):

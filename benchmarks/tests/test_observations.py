@@ -25,7 +25,7 @@ class ObservationTests(unittest.TestCase):
         self.temporary = TemporaryDirectory(prefix="lineage-observation-unit-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.root_patch = patch.object(paths, "ARTIFACT_CACHE_ROOT", self.root / "artifacts")
+        self.root_patch = patch("lineage_agent.artifacts.store.Path.cwd", return_value=self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
         self.store = ArtifactStore()

@@ -94,7 +94,8 @@ def prepare(suite, config, directory, result, *, root=ROOT):
                 field_sources={key: "task_override" if key in overrides else source
                                for key, source in config["field_sources"].items()},
                 effective_settings_sha256=configuration_hash(profile),
-                paths={"project_root": "sample/materials/material", "log_dir": "sample/agent-logs", "source": "benchmark"},
+                paths={"project_root": "sample/materials/material", "log_dir": "sample/agent-logs",
+                       "application_root": str(root.resolve()), "source": "benchmark"},
             )
             unit["conditions"]["configuration"] = known(details)
         stage = "configuration_recording"
@@ -152,6 +153,7 @@ def execute_unit(unit, task, run_id, directory, *, root=ROOT, context):
             "case_id": task["case_id"], "definition_version": task["version"], "prompts": task["turns"],
             "mechanism": task.get("mechanism"), "profile": model_profile(config["model"], task), "tracing": tracing,
             "material_root": manifest["material_root"], "output_dir": str(sample.absolute()),
+            "application_root": str(root.resolve()),
             "ledger_path": str(context["ledger"].absolute()), "max_requests": limits["requests"], "remaining_seconds": timeout}
     started = time.monotonic()
     first_sample = context["started_samples"] == 0
@@ -237,7 +239,7 @@ def first_sample_completed(unit):
 def model_profile(profile: dict, case: dict) -> dict:
     from dataclasses import fields
     from lineage_agent.config.settings import ModelSettings
-    allowed = {item.name for item in fields(ModelSettings)} - {"project_root", "log_dir"}
+    allowed = {item.name for item in fields(ModelSettings)} - {"project_root", "log_dir", "application_root"}
     values = {key: value for key, value in profile.items() if key in allowed}
     values.update(case.get("settings_overrides", {}))
     # Persist all resolved numeric defaults; credentials are never ModelSettings fields.

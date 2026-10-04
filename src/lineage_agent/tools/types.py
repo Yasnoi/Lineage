@@ -47,6 +47,7 @@ TOOL_ARGUMENT_REASONS = {
     "read_budget_exceeded": "文件超过本次运行剩余的成功读取额度，未返回正文；可尝试较小文件。",
     "non_text_content": "文件包含不支持的控制字符，未返回正文。",
     "artifact_path_forbidden": "Artifact 保留目录不能通过项目文件工具访问。",
+    "storage_path_forbidden": "应用保留目录不能通过项目文件工具访问。",
     "invalid_artifact_arguments": "Artifact 工具参数字段或类型不符合要求。",
     "invalid_artifact_ref": "Artifact 引用格式无效。",
     "invalid_artifact_range": "字符范围必须是正文内的有效左闭右开范围。",

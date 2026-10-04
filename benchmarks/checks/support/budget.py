@@ -4,7 +4,7 @@
 import json
 import math
 from benchmarks.checks.support.events import observe_state, observe_turn
-from benchmarks.checks.support.runtime import LocalClient, SETTINGS as BASE_SETTINGS, audit_recording, outputs
+from benchmarks.checks.support.runtime import LocalClient, SETTINGS as BASE_SETTINGS, audit_recording, outputs, read_events
 from benchmarks.checks.support.session_faults import resources, closed_resources
 from benchmarks.checks.support.sessions import saved_state
 from benchmarks.core.files import ROOT
@@ -61,10 +61,22 @@ def audit(state, client, measured, *, scenario, turn=None, faults=None):
         observe_turn(turn)
     else:
         observe_state(state)
+    if state.get("error_code") == "record_encoding_error":
+        events = read_events(state)
+        assert state["stop_reason"] == "error" and state["context_budget"] is None
+        assert state["model_calls"] == state["tool_calls"] == 0 and not client.requests and not measured
+        assert state["record_files"] == {} and state["log_complete"]
+        assert len(events) == 1 and events[0]["event"] == "run.initialization_failed"
+        assert events[0]["stage"] == "history_init" and events[0]["error_code"] == "record_encoding_error"
+        assert PRIVATE not in json.dumps(events, ensure_ascii=False)
+        return events
     events = audit_recording(state, client, scenario=scenario, failed_writes=faults)
     assert state["model_calls"] == len(client.requests)
     assert len(state["context_risks"]) == len(state["input"])
-    checks = [event for event in events if event["event"] == "context_budget.checked"]
+    # This fixture wraps the business graph budget entrypoint. H/R and full
+    # replacement candidates are measured by the separate Compact entrypoint.
+    checks = [event for event in events if event["event"] == "context_budget.checked"
+              and event.get("purpose") not in {"summary", "candidate"}]
     starts = [event for event in events if event["event"] == "model.started"]
     for request, started in zip(client.requests, starts):
         matching = [value for value in measured if value["diagnostic"]["step_id"] == started["step_id"]]

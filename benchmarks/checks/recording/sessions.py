@@ -35,7 +35,30 @@ async def main():
             assert await run_sessions(root, source) == baseline
             assert await run_sessions(root, source, mode="connection") == baseline
         with check_group("recording.sessions.session_final_save_failure"):
-            assert await run_sessions(root, source, final_save_failure=True) == baseline
+            failed_states, failed_requests = await run_sessions(root, source, final_save_failure=True)
+            saved_states, saved_requests = baseline
+            assert failed_requests == saved_requests and failed_states[0] == saved_states[0]
+            failed, saved = failed_states[1], saved_states[1]
+            # Business completion remains public, but ownership changes only
+            # after the final save is confirmed. Compare every other State field.
+            assert {key: value for key, value in failed.items() if key != "active_context"} == {
+                key: value for key, value in saved.items() if key != "active_context"}
+            current, historical = failed["active_context"], saved["active_context"]
+            transitioned = {"current_run_id", "turn_start", "initial_input_count", "groups", "turns"}
+            assert {key: value for key, value in current.items() if key not in transitioned} == {
+                key: value for key, value in historical.items() if key not in transitioned}
+            assert current["current_run_id"] == "<current-run>" and historical["current_run_id"] is None
+            assert current["turns"] == historical["turns"][:-1]
+            assert current["turn_start"] == saved_states[0]["history_end"]
+            assert current["initial_input_count"] == 1 and historical["initial_input_count"] == 0
+            assert historical["turn_start"] == saved["history_end"] and historical["groups"] == []
+            assert len(current["groups"]) == 1 and current["groups"][0]["closed"] is True
+            assert current["groups"][0]["start"] == current["turn_start"] + 1
+            assert current["groups"][0]["end"] == saved["history_end"]
+            assert historical["turns"][-1] == {
+                "run_id": "<current-run>", "item_count": saved["history_end"] - current["turn_start"],
+                "group_count": 1, "record_end": failed["record_sequence"],
+            }
         with check_group("recording.sessions.skipped_after_save_failure"):
             await check_skipped_after_save_failure(root)
         with check_group("recording.sessions.fixture_integrity"):

@@ -11,6 +11,7 @@ from langgraph.types import Overwrite
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
 from lineage_agent.agent.context import ContextRecords, new_context
 from lineage_agent.agent.records import make_record_batch
+from lineage_agent.agent.record_journal import JournalError, RecordJournal
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
 from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
@@ -27,11 +28,12 @@ from lineage_agent.recording.summaries import tool_identity
 from lineage_agent.recording.tracing import start_trace
 from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 from lineage_agent.tools.history import HISTORY_TOOLS, HISTORY_TOOL_NAMES, HistoryExecutor
+from lineage_agent.storage import StorageError, conversation_paths
 
 
 CLIENT_CLOSE_MESSAGE = "模型客户端关闭失败；已取得的回答与统计予以保留。"
 ARTIFACT_INIT_MESSAGE = "工具结果存储无法初始化，未发起模型或工具调用。"
-ARTIFACT_CLOSE_MESSAGE = "工具结果临时存储清理失败；已取得的回答与统计予以保留。"
+ARTIFACT_CLOSE_MESSAGE = "工具结果存储关闭失败；已取得的回答与统计予以保留。"
 INVALID_INPUT_MESSAGE = "新增输入不符合支持的消息或工具协议项格式。"
 
 
@@ -125,6 +127,52 @@ def normalize_input(input: ModelInput) -> list[dict[str, Any]]:
         raise ValueError("input 必须是非空字符串或非空 Responses 协议项列表。")
 
 
+def inherit_context(previous: dict, new_input: list, new_risks: list, *, run_id: str) -> dict:
+    """Compose the next Run from the confirmed effective view, without registering it twice."""
+    history, risks, boundary = previous.get("input"), previous.get("context_risks"), previous.get("history_end")
+    if (not isinstance(history, list) or type(boundary) is not int or not 0 <= boundary <= len(history)
+            or not all(isinstance(item, dict) for item in history[:boundary])
+            or not isinstance(risks, list) or len(risks) != len(history)
+            or _input_association_error(history[:boundary]) is not None):
+        raise CheckpointError("checkpoint_read_error")
+    active = deepcopy(previous.get("active_context"))
+    if not isinstance(active, dict):
+        raise CheckpointError("checkpoint_read_error")
+    start = active.get("turn_start")
+    if type(start) is not int or not 0 <= start <= boundary:
+        raise CheckpointError("checkpoint_read_error")
+    # Only non-completed turns retain the previous admission-at-next-turn rule.
+    if active.get("current_run_id") is not None and boundary > start:
+        if any(turn["run_id"] == previous["run_id"] for turn in active["turns"]):
+            raise CheckpointError("checkpoint_read_error")
+        active["turns"].append({"run_id": previous["run_id"], "item_count": boundary - start,
+                                "group_count": sum(g["closed"] for g in active["groups"]),
+                                "record_end": previous["record_sequence"]})
+    active.update(turn_start=boundary, current_run_id=run_id, run_summary=None, groups=[],
+                  initial_input_count=len(new_input), parent_version_id=active["version_id"], version_id=str(uuid4()),
+                  item_refs=active["item_refs"][:boundary] + [f"history://record/{run_id}/{i}" for i in range(len(new_input))],
+                  summary_spans=[span for span in active["summary_spans"] if span["index"] < boundary])
+    return {"input": deepcopy(history[:boundary]) + deepcopy(new_input),
+            "context_risks": deepcopy(risks[:boundary]) + deepcopy(new_risks), "history_end": boundary,
+            "active_context": active, "history_scopes": deepcopy(previous.get("history_scopes", {})),
+            "record_files": deepcopy(previous.get("record_files", {}))}
+
+
+def completed_context(state: AgentState) -> dict:
+    """Prepare history ownership for the same final checkpoint, without a self reference."""
+    active = deepcopy(state["active_context"])
+    if (active["current_run_id"] != state["run_id"] or state["history_end"] != len(state["input"])
+            or any(not group["closed"] for group in active["groups"])
+            or any(turn["run_id"] == state["run_id"] for turn in active["turns"])):
+        raise CheckpointError("checkpoint_read_error")
+    active["turns"].append({"run_id": state["run_id"], "item_count": state["history_end"] - active["turn_start"],
+                            "group_count": len(active["groups"]), "record_end": state["record_sequence"]})
+    active.update(parent_version_id=active["version_id"], version_id=str(uuid4()),
+                  current_run_id=None, run_summary=None, groups=[], initial_input_count=0,
+                  turn_start=state["history_end"])
+    return active
+
+
 def validate_tools(
     tools: list[ToolDefinition] | None, execute_tool: ToolExecutor | None,
 ) -> list[ToolDefinition]:
@@ -154,7 +202,7 @@ async def run_agent(
     tools: list[ToolDefinition] | None = None,
     execute_tool: ToolExecutor | None = None,
 ) -> AgentState:
-    """Handle one independent request without retaining a conversation."""
+    """Handle one independent request; release execution state and retain its files."""
     state, _, _ = await _run_agent(input, settings, tools=tools, execute_tool=execute_tool)
     return state
 
@@ -198,7 +246,9 @@ async def _run_agent(
     store_close_attempted = False
     private_checkpointer = checkpointer is None
     scope_id = session_id or "run:" + recorder.run_id
+    conversation_id = session_id or recorder.run_id
     try:
+        initial_batch = make_record_batch(recorder.run_id, 0, input_items)
         state: AgentState = {
             "input": input_items,
             "history_end": 0,
@@ -210,7 +260,7 @@ async def _run_agent(
             "active_context": new_context(),
             "compaction": None,
             "compaction_events": [],
-            "record_batch": make_record_batch(recorder.run_id, 0, input_items),
+            "record_batch": [], "record_files": {},
             "record_sequence": len(input_items), "record_revision": 1,
             "record_admitted_through": 0, "history_scopes": {}, "record_metrics": {},
             "execution_facts": [], "run_call_ids": [],
@@ -221,6 +271,7 @@ async def _run_agent(
                 "missing_usage_calls": 0,
             },
             "run_id": recorder.run_id,
+            "conversation_id": conversation_id,
             "log_path": str(recorder.path),
             "log_complete": False,
             "result": None,
@@ -239,11 +290,24 @@ async def _run_agent(
             "error_code": None,
             "cleanup_error": None,
         }
-        state["active_context"].update(initial_input_count=len(input_items),
-                                       item_refs=[r["source_ref"] for r in state["record_batch"]])
+        state["active_context"].update(initial_input_count=len(input_items), current_run_id=recorder.run_id,
+                                       item_refs=[r["source_ref"] for r in initial_batch])
         if checkpointer is None:
             checkpointer = SessionCheckpointer()
         checkpointer.bind_run(scope_id, recorder)
+        try:
+            paths = conversation_paths(settings.application_root, conversation_id)
+            journal = RecordJournal(paths.history)
+            checkpointer.bind_history(scope_id, journal)
+            receipts, watermark = journal.append(recorder.run_id, initial_batch)
+            state["record_batch"] = receipts
+            state["record_files"] = {recorder.run_id: watermark}
+        except (StorageError, JournalError) as exc:
+            code = exc.code if isinstance(exc, JournalError) else "record_create_error"
+            state.update(stop_reason="error", error_code=code, error=str(CheckpointError(code)))
+            recorder.emit("run.initialization_failed", stage="history_init", error_code=code)
+            state["log_complete"] = recorder.close()
+            return deepcopy(state), None, code
         context_records = ContextRecords(checkpointer, scope_id)
         execute_tool = HistoryExecutor(context_records.store, execute_tool)
         tracer = start_trace(recorder.run_id, settings)
@@ -268,7 +332,7 @@ async def _run_agent(
         try:
             if artifacts is None:
                 owned_store = ArtifactStore()
-                artifacts = owned_store.bind_session(recorder.run_id)
+                artifacts = owned_store.bind_session(recorder.run_id, directory=paths.artifacts)
                 execute_tool = ArtifactExecutor(artifacts, execute_tool)
             observation_manager = ObservationManager(artifacts)
         except Exception:
@@ -336,42 +400,9 @@ async def _run_agent(
                     if checkpoint_id is not None and not saved.values:
                         raise CheckpointError("checkpoint_read_error")
                     if saved.values:
-                        history = saved.values.get("input")
-                        risks = saved.values.get("context_risks")
-                        boundary = saved.values.get("history_end")
-                        if (
-                            not isinstance(history, list) or type(boundary) is not int
-                            or not 0 <= boundary <= len(history)
-                            or not all(isinstance(item, dict) for item in history[:boundary])
-                            or not isinstance(risks, list) or len(risks) != len(history)
-                            or _input_association_error(history[:boundary]) is not None
-                        ):
-                            raise CheckpointError("checkpoint_read_error")
-                        state["input"] = deepcopy(history[:boundary]) + input_items
-                        state["context_risks"] = deepcopy(risks[:boundary]) + state["context_risks"]
-                        state["history_end"] = boundary
-                        previous_active = saved.values.get("active_context")
-                        if not isinstance(previous_active, dict):
-                            raise CheckpointError("checkpoint_read_error")
-                        active = deepcopy(previous_active)
-                        start = active.get("turn_start")
-                        if type(start) is not int or not 0 <= start <= boundary:
-                            raise CheckpointError("checkpoint_read_error")
-                        if boundary > start:
-                            active["turns"].append({
-                                "run_id": saved.values["run_id"],
-                                "checkpoint_id": saved.config["configurable"]["checkpoint_id"],
-                                "item_count": boundary - start,
-                                "group_count": sum(g["closed"] for g in active["groups"]),
-                                "record_end": saved.values["record_sequence"],
-                            })
-                        active.update(turn_start=boundary, run_summary=None, groups=[],
-                                      initial_input_count=len(input_items),
-                                      parent_version_id=active["version_id"], version_id=str(uuid4()),
-                                      item_refs=active["item_refs"][:boundary] + state["active_context"]["item_refs"],
-                                      summary_spans=[span for span in active["summary_spans"] if span["index"] < boundary])
-                        state["history_scopes"] = deepcopy(saved.values.get("history_scopes", {}))
-                        state["active_context"] = active
+                        own_files = state["record_files"]
+                        state.update(inherit_context(saved.values, input_items, state["context_risks"], run_id=recorder.run_id))
+                        state["record_files"].update(own_files)
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
                 elif artifact_initialization_failed:
@@ -472,10 +503,12 @@ async def _run_agent(
                     "stop_reason": "error", "error_code": "run_interrupted",
                     "tool_outcomes": state["tool_outcomes"],
                 }], kind="outcome")
-                state.update(record_batch=state["record_batch"] + terminal,
-                             record_sequence=state["record_sequence"] + len(terminal),
-                             record_revision=state["record_revision"] + 1)
                 try:
+                    receipts, watermark = journal.append(state["run_id"], terminal)
+                    state.update(record_batch=state["record_batch"] + receipts,
+                                 record_sequence=state["record_sequence"] + len(terminal),
+                                 record_revision=state["record_revision"] + 1)
+                    state["record_files"][state["run_id"]] = watermark
                     with tracing_context(enabled=False, parent=False):
                         await graph.aupdate_state(
                             {"configurable": {"thread_id": scope_id}},
@@ -535,10 +568,24 @@ async def _run_agent(
                 "stop_reason": state["stop_reason"], "error_code": state["error_code"],
                 "tool_outcomes": state["tool_outcomes"], "model_calls": state["model_calls"],
             }], kind="outcome")
-            state.update(record_batch=state["record_batch"] + outcome, record_sequence=state["record_sequence"] + len(outcome),
-                         record_revision=state["record_revision"] + 1)
+            if checkpoint_error is None:
+                try:
+                    receipts, watermark = journal.append(state["run_id"], outcome)
+                    state.update(record_batch=state["record_batch"] + receipts,
+                                 record_sequence=state["record_sequence"] + len(outcome),
+                                 record_revision=state["record_revision"] + 1)
+                    state["record_files"][state["run_id"]] = watermark
+                except JournalError as exc:
+                    checkpoint_error = exc.code
+                    state.update(stop_reason="error", error_code=exc.code, error=str(CheckpointError(exc.code)))
             try:
-                originals = await context_records.store.records(state["run_id"])
+                originals = journal.records(state["run_id"], state["record_files"][state["run_id"]])
+                try:
+                    logical_bytes = sum(len(json.dumps(r, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+                                        for r in originals)
+                except (TypeError, ValueError, UnicodeError):
+                    # Tagged opaque values have no ordinary JSON byte measure.
+                    logical_bytes = None
                 # Snapshot before final serialization. Count serialized values, not Python heap memory.
                 def binary_bytes(value):
                     if isinstance(value, bytes):
@@ -549,15 +596,18 @@ async def _run_agent(
                         return sum(binary_bytes(child) for child in value)
                     return 0
                 state["record_metrics"] = {
-                    "count": len(originals) + len(outcome),
-                    "logical_bytes": sum(len(json.dumps(r, ensure_ascii=False).encode("utf-8")) for r in originals + outcome),
+                    "count": len(originals),
+                    "logical_bytes": logical_bytes,
                     "checkpoint_serialized_bytes": binary_bytes(checkpointer.storage.get(scope_id, {}))
                         + sum(binary_bytes(v) for k, v in checkpointer.blobs.items() if k[0] == scope_id)
                         + sum(binary_bytes(v) for k, v in checkpointer.writes.items() if k[0] == scope_id),
+                    "file_bytes": state["record_files"][state["run_id"]]["byte_end"],
                     "measured_before_final_save": True,
                 }
             except Exception:
-                state["record_metrics"] = {"count": state["record_sequence"]}
+                state["record_metrics"] = {"count": state["record_sequence"], "logical_bytes": None,
+                    "file_bytes": state["record_files"].get(state["run_id"], {}).get("byte_end"),
+                    "measured_before_final_save": True}
             # The JSONL intentionally ends before this final acknowledgement. Its
             # completion, including close errors, is part of the final saved State.
             checkpointer.unbind_run(scope_id)
@@ -567,12 +617,22 @@ async def _run_agent(
                     "metadata": {"run_id": recorder.run_id, **({"session_id": session_id} if session_id else {})},
                 }
                 try:
+                    final_state = deepcopy(state)
+                    if state["stop_reason"] == "completed":
+                        final_state["active_context"] = completed_context(state)
                     with tracing_context(enabled=False, parent=False):
                         saved_config = await graph.aupdate_state(
-                            final_config, {**deepcopy(state), "input": Overwrite(deepcopy(state["input"]))},
+                            final_config, {**final_state, "input": Overwrite(deepcopy(final_state["input"]))},
                             as_node="model",
                         )
-                    final_checkpoint_id = saved_config["configurable"]["checkpoint_id"]
+                    candidate_id = saved_config["configurable"]["checkpoint_id"]
+                    confirmed = await checkpointer.read_confirmed(scope_id, candidate_id)
+                    saved_values = confirmed.checkpoint["channel_values"]
+                    if any(saved_values.get(key) != final_state[key] for key in (
+                            "run_id", "active_context", "record_files", "record_revision", "stop_reason")):
+                        raise CheckpointError("checkpoint_read_error")
+                    final_checkpoint_id = candidate_id
+                    state = final_state
                 except CheckpointError as exc:
                     checkpoint_error = exc.code
                 except Exception:

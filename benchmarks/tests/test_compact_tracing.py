@@ -23,14 +23,14 @@ def span(index, *, lane="R"):
     return {"index": index, "lane": lane, "summary_id": summary_id, "run_id": run_id,
             "reference": {"summary_id": summary_id, "checkpoint_id": checkpoint_id,
                           "lane": lane, "history_ref": "history://scope/" + str(uuid4()),
-                          "ranges": [{"run_id": run_id, "start": 0, "end": 10}], "document": PRIVATE},
+                          "ranges": [{"run_id": run_id, "start": 0, "end": 10}], "body": PRIVATE},
             "message": PRIVATE}
 
 
 class CompactTraceTests(unittest.IsolatedAsyncioTestCase):
     async def test_more_than_lineage_cap_is_fully_masked_after_runtrace_binding(self):
         active = {"version_id": str(uuid4()), "summary_spans": [span(index) for index in range(40)]}
-        items = [{"role": "assistant", "content": PRIVATE + str(index)} for index in range(40)]
+        items = [{"role": "assistant", "content": PRIVATE + str(index) + "\n[程序来源附注] PRIVATE_RANGE_731"} for index in range(40)]
         items.append({"role": "user", "content": "Retain this original user question, including NOT 13."})
         original = deepcopy((active, items))
         with capture() as (transport, stderr):
@@ -43,6 +43,7 @@ class CompactTraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stderr.getvalue())
         wire = json.dumps(transport.sent)
         self.assertNotIn(PRIVATE, wire)
+        self.assertNotIn("PRIVATE_RANGE_731", wire)
         self.assertIn("NOT 13", wire)
         self.assertEqual((active, items), original)
         business = next(item for item in transport.sent if item["name"] == "OpenAI Responses")
@@ -68,23 +69,21 @@ class CompactTraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("summary_content_omitted", projected)
 
     def test_lane_metrics_keep_safe_failures_without_derived_content(self):
-        metadata = {"status": "stopped", "reason": "recovery_margin_insufficient", "attempt_no": 2,
+        metadata = {"status": "stopped", "reason": "summary_not_effective", "attempt_no": 2,
                     "original_required": 1000, "candidate_required": 1100, "net_reclaimed": -100,
-                    "recovery_margin": -100, "snapshot": PRIVATE, "document": PRIVATE,
-                    "recovery_budget": {"base_required": 500, "hard_capacity": 300, "soft_target": 100,
-                                        "margin_required": 100, "target_bytes": 300, "private": PRIVATE},
+                    "remaining_budget": -100, "snapshot": PRIVATE, "body": PRIVATE,
                     "lanes": {lane: {"summary_id": str(uuid4()), "status": status, "model_called": called,
-                                     "target_bytes": 120, "summary_bytes": 150, "summary_call": 2,
-                                     "material": PRIVATE, "document": PRIVATE}
+                                     "max_output_tokens": 8192, "summary_bytes": 150, "summary_call": 2,
+                                     "material": PRIVATE, "body": PRIVATE}
                               for lane, status, called in (("H", "reused", False), ("R", "generated", True))}}
         projected = TraceSanitizer.compaction(metadata)
         self.assertEqual(projected["net_reclaimed"], -100)
-        self.assertEqual(projected["recovery_margin"], -100)
+        self.assertEqual(projected["remaining_budget"], -100)
         self.assertEqual(projected["attempt_no"], 2)
-        self.assertEqual(projected["reason"], "recovery_margin_insufficient")
+        self.assertEqual(projected["reason"], "summary_not_effective")
         self.assertFalse(projected["lanes"]["H"]["model_called"])
         self.assertTrue(projected["lanes"]["R"]["model_called"])
-        self.assertEqual(projected["recovery_budget"]["hard_capacity"], 300)
+        self.assertEqual(projected["lanes"]["R"]["max_output_tokens"], 8192)
         self.assertNotIn(PRIVATE, json.dumps(projected))
 
     def test_all_compaction_statuses_have_safe_cli_labels(self):
@@ -94,15 +93,17 @@ class CompactTraceTests(unittest.IsolatedAsyncioTestCase):
         for status in get_args(CompactionStatus):
             with self.subTest(status=status):
                 rendered = format_run_summary({**state, "compaction": {
-                    "status": status, "attempt_no": 2, "document": PRIVATE,
+                    "status": status, "attempt_no": 2, "body": PRIVATE,
                     "lanes": {"H": {"status": "reused"}, "R": {"status": "generated"}},
-                    "net_reclaimed": 123, "recovery_margin": 456,
+                    "net_reclaimed": 123, "remaining_budget": 456,
                 }})
                 self.assertNotIn("上下文压缩：未确认", rendered)
                 self.assertNotIn(PRIVATE, rendered)
                 self.assertIn("第 2 次尝试", rendered)
                 self.assertIn("H：复用", rendered)
                 self.assertIn("R：已生成", rendered)
+                self.assertIn("剩余额度：456（观测值", rendered)
+                self.assertNotIn("恢复余量", rendered)
 
 
 if __name__ == "__main__":

@@ -119,7 +119,9 @@ async def check_pipeline():
         state = await run(client, tools=[TOOL], execute_tool=executor)
         assert state["stop_reason"] == "completed" and len(executed) == 3
         assert state["tool_outcomes"]["succeeded"] == 5 and len(client.requests) == 3
-        assert all(not directory.exists() for _, _, directory in published)
+        assert all(directory.exists() for _, _, directory in published)
+        assert all((directory / (descriptor["artifact_ref"].rsplit("/", 1)[1] + ".raw")).is_file()
+                   for _, descriptor, directory in published)
         for view, descriptor, _ in published:
             try:
                 view.read(descriptor["artifact_ref"], 0)
@@ -333,7 +335,7 @@ async def check_lifecycle():
             release.set()
             await task
         manager.close()
-        assert not view._store._directory.exists()
+        assert view._store._directory.exists()
 
 
 def execute():

@@ -13,7 +13,8 @@ class RecordReference(TypedDict):
     checkpoint_id: str
 
 
-class TurnReference(RecordReference):
+class TurnDescriptor(TypedDict):
+    run_id: str
     item_count: int
     group_count: int
     record_end: int
@@ -32,7 +33,8 @@ class ActiveContext(TypedDict):
     parent_version_id: str | None
     history_summary: SummaryReference | None
     run_summary: SummaryReference | None
-    turns: list[TurnReference]
+    current_run_id: str | None
+    turns: list[TurnDescriptor]
     turn_start: int
     initial_input_count: int
     groups: list[dict[str, Any]]
@@ -71,8 +73,7 @@ class CompactionState(TypedDict):
     original_required: NotRequired[int]
     candidate_required: NotRequired[int]
     net_reclaimed: NotRequired[int]
-    recovery_margin: NotRequired[int]
-    recovery_budget: NotRequired[dict[str, int]]
+    remaining_budget: NotRequired[int]
     candidate_budget: NotRequired[ContextBudget]
     summary_budget: NotRequired[ContextBudget]
     summary_call: NotRequired[int]
@@ -102,6 +103,7 @@ class AgentState(TypedDict):
     compaction: CompactionState | None
     compaction_events: list[dict[str, Any]]
     record_batch: list[dict[str, Any]]
+    record_files: dict[str, dict[str, Any]]
     record_sequence: int
     record_revision: int
     record_admitted_through: int
@@ -113,6 +115,7 @@ class AgentState(TypedDict):
     summary_result: ModelResult | None
     summary_usage_totals: UsageTotals
     run_id: str
+    conversation_id: str
     log_path: str
     log_complete: bool
     result: ModelResult | None

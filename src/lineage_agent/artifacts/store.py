@@ -12,14 +12,13 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
-import tempfile
 from threading import RLock
 from typing import Any, NoReturn
 from uuid import uuid4
 
 from lineage_agent.tools.filesystem import paths
+from lineage_agent.storage import conversation_paths, ensure_storage_directory, storage_identifier
 from lineage_agent.tools.types import (
     MAX_RECALL_BYTES, inline_tool_output, serialize_tool_output, tool_output_bytes,
 )
@@ -37,7 +36,7 @@ _ERRORS = {
     "artifact_read_error": "Artifact 无法读取或快照完整性校验失败。",
     "artifact_not_found": "当前会话中不存在该 Artifact。",
     "artifact_store_closed": "ArtifactStore 已关闭，引用不再可用。",
-    "artifact_cleanup_error": "ArtifactStore 已关闭，但自身临时文件未能完整清理。",
+    "artifact_cleanup_error": "ArtifactStore 未能完成关闭。",
     "invalid_artifact_ref": "Artifact 引用格式无效。",
     "invalid_artifact_range": "字符范围必须是正文内的有效左闭右开范围。",
     "invalid_artifact_keywords": "检索需要 1 至 8 个关键词，每个包含 1 至 128 个字符。",
@@ -105,32 +104,49 @@ def _index(value: object, length: int) -> bool:
 
 
 class ArtifactStore:
-    """Application-owned temporary storage; call close or use a with block."""
+    """Persistent files with process-local access handles and session isolation."""
 
     def __init__(self) -> None:
         self._lock = RLock()
         self._closed = False
         self._records: dict[str, dict[str, _Record]] = {}
-        self._root = paths.ARTIFACT_CACHE_ROOT
-        try:
-            _check_path(self._root.parent, directory=True)
-            self._root.mkdir(exist_ok=True)
-            _check_path(self._root, directory=True)
-            self._directory = Path(tempfile.mkdtemp(prefix="store-", dir=self._root))
-            _check_path(self._directory, directory=True)
-        except Exception:
-            raise ArtifactError("artifact_write_error") from None
+        self._application_root = Path.cwd()
+        self._directories: dict[str, Path] = {}
+
+    @property
+    def _directory(self) -> Path:
+        # Compatibility for diagnostics that inspected the first binding. All
+        # operations use their own binding's path, never this convenience view.
+        if not self._directories:
+            return self._application_root / ".lineage" / "unbound" / "artifacts"
+        return next(iter(self._directories.values()))
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise ArtifactError("artifact_store_closed")
 
-    def bind_session(self, session_id: str) -> "SessionArtifacts":
+    def bind_session(self, session_id: str, *, directory: Path | None = None) -> "SessionArtifacts":
         with self._lock:
             self._ensure_open()
             if type(session_id) is not str or not session_id:
                 raise ArtifactError("invalid_artifact_session")
-            self._records.setdefault(session_id, {})
+            try:
+                if directory is None:
+                    path = self._directories.get(session_id)
+                    if path is None:
+                        path = conversation_paths(self._application_root, str(uuid4())).artifacts
+                else:
+                    path = Path(directory).absolute()
+                    if path.name != "artifacts" or path.parent.parent.name.casefold() != ".lineage":
+                        raise ValueError("invalid artifact directory")
+                    storage_identifier(path.parent.name)
+                    path = ensure_storage_directory(path)
+                if session_id in self._directories and self._directories[session_id] != path:
+                    raise ValueError("session directory changed")
+                self._directories[session_id] = path
+                self._records.setdefault(session_id, {})
+            except Exception:
+                raise ArtifactError("artifact_write_error") from None
             return SessionArtifacts(self, session_id)
 
     def _put(self, session_id: str, raw: str, tool_name: str) -> dict[str, Any]:
@@ -152,11 +168,12 @@ class ArtifactStore:
             }
             if reason is not None:
                 metadata["degradation_reason"] = reason
-            destination = self._directory / f"{identifier}.raw"
-            temporary = self._directory / f"{identifier}.tmp"
+            directory = self._directories[session_id]
+            destination = directory / f"{identifier}.raw"
+            temporary = directory / f"{identifier}.tmp"
             temporary_owned = False
             try:
-                _check_path(self._directory, directory=True)
+                _check_path(directory, directory=True)
                 # Fresh names and exclusive creation prevent replacing snapshots.
                 if destination.exists() or temporary.exists():
                     raise OSError("storage name collision")
@@ -285,20 +302,8 @@ class ArtifactStore:
         with self._lock:
             self._closed = True
             self._records.clear()
-            try:
-                # Keep a retryable cleanup path after failure, but never discover
-                # or delete a different Store's directory or a replacement link.
-                _check_path(self._root, directory=True)
-                if self._directory.parent != self._root or not self._directory.name.startswith("store-"):
-                    raise OSError("invalid cleanup target")
-                try:
-                    self._directory.lstat()
-                except FileNotFoundError:
-                    return
-                _check_path(self._directory, directory=True)
-                shutil.rmtree(self._directory)
-            except Exception:
-                raise ArtifactError("artifact_cleanup_error") from None
+            # Published files belong to the conversation, not the handle. No
+            # implicit import, deletion, or cross-process recovery occurs here.
 
     def __enter__(self) -> "ArtifactStore":
         self._ensure_open()

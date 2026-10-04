@@ -2176,11 +2176,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.prefix_three_group_protection_keeps_entire_boundary_old_turn",
-          "description": "当前前缀与双路恢复：three group protection keeps entire boundary old turn",
+          "group_id": "context.compaction.prefix_current_protection_never_preserves_historical_turns",
+          "description": "当前前缀与双路恢复：旧轮次全部进入 H，当前三组独立保护",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_prefix_three_group_protection_keeps_entire_boundary_old_turn"
+            "symbol": "check_prefix_current_protection_never_preserves_historical_turns"
           },
           "primary_area": "context",
           "tags": [
@@ -2221,11 +2221,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view",
-          "description": "当前前缀与双路恢复：invalid summary source stops after one call and keeps original view",
+          "group_id": "context.compaction.prefix_empty_summary_stops_after_one_call_and_keeps_original_view",
+          "description": "当前前缀与双路恢复：空摘要停止且不启用候选",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view"
+            "symbol": "check_prefix_empty_summary_stops_after_one_call_and_keeps_original_view"
           },
           "primary_area": "context",
           "tags": [
@@ -2356,11 +2356,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation",
-          "description": "当前前缀与双路恢复：previous h is reused without call and deducted before r allocation",
+          "group_id": "context.compaction.prefix_previous_h_is_reused_without_call_or_target_allocation",
+          "description": "当前前缀与双路恢复：无新增来源直接复用 H，无目标分配",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation"
+            "symbol": "check_prefix_previous_h_is_reused_without_call_or_target_allocation"
           },
           "primary_area": "context",
           "tags": [
@@ -2399,11 +2399,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery",
-          "description": "预算与保存确认边界：summary above soft target can commit with margin and positive recovery",
+          "group_id": "context.compaction.boundaries_allowed_candidate_below_old_headroom_commits_on_first_attempt",
+          "description": "预算与保存确认边界：候选放行且有净回收，即使空闲低于旧门槛也提交",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery"
+            "symbol": "check_boundaries_allowed_candidate_below_old_headroom_commits_on_first_attempt"
           },
           "primary_area": "context",
           "tags": [
@@ -2672,11 +2672,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.summary_lane_and_byte_target_are_independent_of_api_cap",
-          "description": "摘要与协议约定：lane and byte target are independent of api cap",
+          "group_id": "context.compaction.summary_lane_caps_are_independent_of_business_output_allowance",
+          "description": "摘要与协议约定：H/R 独立输出上限与实际发送和预算一致",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_lane_and_byte_target_are_independent_of_api_cap"
+            "symbol": "check_summary_lane_caps_are_independent_of_business_output_allowance"
           },
           "primary_area": "context",
           "tags": [
@@ -2685,11 +2685,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.summary_invalid_size_or_lane_never_prepares_a_request",
-          "description": "摘要与协议约定：invalid size or lane never prepares a request",
+          "group_id": "context.compaction.summary_invalid_lane_or_attempt_never_prepares_a_request",
+          "description": "摘要与协议约定：无效路别或尝试编号拒绝构造请求",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_invalid_size_or_lane_never_prepares_a_request"
+            "symbol": "check_summary_invalid_lane_or_attempt_never_prepares_a_request"
           },
           "primary_area": "context",
           "tags": [
@@ -2698,11 +2698,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.summary_machine_refs_need_explicit_allowed_origin",
-          "description": "摘要与协议约定：machine refs need explicit allowed origin",
+          "group_id": "context.compaction.summary_plain_text_is_preserved_without_schema_or_reference_parsing",
+          "description": "摘要与协议约定：普通文字无需 JSON 或逐条来源协议",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_machine_refs_need_explicit_allowed_origin"
+            "symbol": "check_summary_plain_text_is_preserved_without_schema_or_reference_parsing"
           },
           "primary_area": "context",
           "tags": [
@@ -2711,11 +2711,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.summary_invalid_source_or_structure_does_not_pass",
-          "description": "摘要与协议约定：invalid source or structure does not pass",
+          "group_id": "context.compaction.summary_invalid_completion_refusal_tool_request_and_empty_text_are_rejected",
+          "description": "摘要与协议约定：空白、错误、拒绝、截断及工具请求拒绝",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_invalid_source_or_structure_does_not_pass"
+            "symbol": "check_summary_invalid_completion_refusal_tool_request_and_empty_text_are_rejected"
           },
           "primary_area": "context",
           "tags": [
@@ -2724,11 +2724,11 @@
           "entry_module": "benchmarks.checks.context.compaction"
         },
         {
-          "group_id": "context.compaction.summary_minimum_size_measures_complete_lane_message",
-          "description": "摘要与协议约定：minimum size measures complete lane message",
+          "group_id": "context.compaction.summary_summary_budget_uses_lane_cap_without_changing_business_settings",
+          "description": "摘要与协议约定：摘要预算使用所属路别上限，不改变业务配置",
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
-            "symbol": "check_summary_minimum_size_measures_complete_lane_message"
+            "symbol": "check_summary_summary_budget_uses_lane_cap_without_changing_business_settings"
           },
           "primary_area": "context",
           "tags": [

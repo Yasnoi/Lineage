@@ -38,19 +38,25 @@ class CompactionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         final = client.business_requests[-1]
         self.assertEqual(final["tool_choice"], "none")
         self.assertEqual(final["instructions"], graph.FINAL_ANSWER_INSTRUCTIONS)
-        self.assertTrue(all(request["max_output_tokens"] == fixture.settings.max_output_tokens for request in client.summary_requests))
+        self.assertTrue(all(request["max_output_tokens"] == (fixture.settings.summary_history_max_output_tokens if summary_request_lane(request) == "H" else fixture.settings.summary_run_max_output_tokens) for request in client.summary_requests))
 
-    async def test_summary_above_soft_target_can_commit_with_margin_and_positive_recovery(self):
-        def over_soft(request):
-            policy = json.loads(request["instructions"].split("Compact request policy: ")[1])
-            return fixtures._summary(request, "a" * (policy["target_bytes"] + 10))
-        state, _ = await self.fixture.standalone(count=6, summary=over_soft)
+    async def test_allowed_candidate_below_old_headroom_commits_on_first_attempt(self):
+        native = compaction.check_context_budget
+        def measured(request, risks, settings, **kwargs):
+            budget = native(request, risks, settings, **kwargs)
+            if not is_summary_request(request) and any(
+                    isinstance(item.get("content"), str) and item["content"].startswith("当前进展摘要 R")
+                    for item in request["input"]):
+                budget.update(decision="allow", required_tokens=settings.context_budget_tokens - 1)
+            return budget
+        with patch.object(compaction, "check_context_budget", side_effect=measured):
+            state, client = await self.fixture.standalone(count=6)
         self.fixture.assert_complete(state)
-        event = state["compaction_events"][-1]
-        self.assertEqual(event["status"], "used")
-        self.assertGreater(event["lanes"]["R"]["summary_bytes"], event["lanes"]["R"]["target_bytes"])
-        self.assertGreater(event["net_reclaimed"], 0)
-        self.assertGreaterEqual(event["recovery_margin"], event["recovery_budget"]["margin_required"])
+        self.assertEqual(state["compaction"]["attempt_no"], 1)
+        self.assertEqual(state["summary_calls"], 1)
+        self.assertEqual(state["compaction"]["remaining_budget"], 1)
+        self.assertGreater(state["compaction"]["net_reclaimed"], 0)
+        self.assertNotIn("recovery_budget", state["compaction"])
 
     async def test_private_final_save_failure_cannot_report_completed(self):
         native = SessionCheckpointer.put

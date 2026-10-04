@@ -14,6 +14,7 @@ from lineage_agent.agent.compaction import MAX_COMPACT_PASSES, SummaryCall, buil
 from lineage_agent.agent.checkpointing import CheckpointError
 from lineage_agent.agent.context import ContextRecords
 from lineage_agent.agent.records import make_record_batch
+from lineage_agent.agent.record_journal import JournalError
 from lineage_agent.config.settings import DEFAULT_MAX_MODEL_CALLS, ModelSettings
 from lineage_agent.models.budget import (
     annotate_context_risks, budget_measurement_error, check_context_budget,
@@ -75,6 +76,7 @@ def build_graph(
 
     def finish(state: AgentState, update: dict[str, Any], node: str, step_id: str | None) -> dict[str, Any]:
         update.setdefault("record_batch", [])
+        batch = []
         appended = update.get("input", [])
         new_model = node == "model" and update.get("model_calls", state["model_calls"]) > state["model_calls"]
         if new_model or node == "tools":
@@ -86,7 +88,7 @@ def build_graph(
                                       call_facts=update.get("new_call_facts", []))
             update.pop("new_call_facts", None)
             sequence = state["record_sequence"] + len(batch)
-            update.update(record_batch=batch, record_sequence=sequence,
+            update.update(record_sequence=sequence,
                           record_revision=state["record_revision"] + bool(batch))
             active["item_refs"] += [r["source_ref"] for r in batch if r.get("item") is not None]
             closed = update.get("history_end", state["history_end"]) == len(state["input"]) + len(appended)
@@ -107,11 +109,23 @@ def build_graph(
             update["active_context"] = active
         # Checkpoint writes can fail before LangGraph yields a node's update.
         # Keep only this run's actual facts, never a second history store.
-        if observe_state is not None:
+        def observe():
+            if observe_state is None:
+                return
             observed = {**state, **update}
             new_input = update.get("input", [])
             observed["input"] = new_input.value if isinstance(new_input, Overwrite) else state["input"] + new_input
             observe_state(deepcopy(observed), node, step_id)
+        observe()
+        if batch and context_records is not None:
+            try:
+                journal = context_records.saver.history_journal(context_records.session_id)
+                receipts, watermark = journal.append(state["run_id"], batch)
+                update["record_batch"] = receipts
+                update["record_files"] = {**state["record_files"], state["run_id"]: watermark}
+            except JournalError as exc:
+                raise CheckpointError(exc.code) from None
+            observe()
         return update
 
     def emit(event: str, step_id: str | None, node: str, **details: Any) -> bool:

@@ -72,7 +72,7 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(client.closed)
         self.assertEqual(len(attempts), 1)
-        self.assertFalse(attempts[0]._directory.exists())
+        self.assertTrue(attempts[0]._directory.exists())
         events = self.events()
         self.assertEqual([event["error_code"] for event in events if event["event"] == "run.cleanup_failed"],
                          ["client_close_error", "artifact_cleanup_error"])
@@ -98,7 +98,7 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(client.closed)
         self.assertEqual(len(attempts), 1)
-        self.assertFalse(attempts[0]._directory.exists())
+        self.assertTrue(attempts[0]._directory.exists())
         events = self.events()
         self.assertEqual([event["error_code"] for event in events if event["event"] == "run.cleanup_failed"],
                          ["client_close_error", "artifact_cleanup_error"])
@@ -112,7 +112,7 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(runtime.PreExecutionConfigurationError):
                 await runtime.run_agent("invalid connection", self.settings)
         self.assertEqual(len(attempts), 1)
-        self.assertFalse(attempts[0]._directory.exists())
+        self.assertTrue(attempts[0]._directory.exists())
         events = self.events()
         self.assertTrue(any(event["event"] == "run.configuration_rejected" for event in events))
         self.assertNotIn(PRIVATE, json.dumps(events))

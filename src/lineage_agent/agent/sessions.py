@@ -1,4 +1,4 @@
-"""Process-local conversations backed only by LangGraph checkpoints."""
+"""Process-local execution with persistent conversation materials."""
 
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -18,6 +18,7 @@ from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.observations.hints import enhance_tools
 from lineage_agent.tools.types import ToolExecutor
 from lineage_agent.tools.history import HISTORY_TOOL_NAMES
+from lineage_agent.storage import StorageError, conversation_paths
 
 
 _SESSION_ERRORS = {
@@ -64,8 +65,8 @@ class _Session:
 class SessionManager:
     """Own checkpoints and trusted bindings, without a second history cache.
 
-    Session identifiers belong to this manager. Dropping the manager or exiting
-    the process discards all saved conversations. No resume API is exposed.
+    Session identifiers belong to this manager. Closing it releases execution
+    state, while original records and artifacts remain on disk. No resume API is exposed.
     """
 
     def __init__(self) -> None:
@@ -90,6 +91,9 @@ class SessionManager:
             if self._active_operations:
                 raise SessionError("session_busy")
             self._closed = True
+            for session_id in self._sessions:
+                self._checkpointer.release(session_id)
+            self._sessions.clear()
             if self._owned_store is not None:
                 try:
                     self._owned_store.close()
@@ -135,7 +139,11 @@ class SessionManager:
                 if self._owned_store is None:
                     self._owned_store = ArtifactStore()
                 artifact_store = self._owned_store
-            artifacts = artifact_store.bind_session(session_id)
+            try:
+                paths = conversation_paths(settings.application_root, session_id)
+                artifacts = artifact_store.bind_session(session_id, directory=paths.artifacts)
+            except StorageError:
+                raise ArtifactError("artifact_write_error") from None
             execute_tool = ArtifactExecutor(artifacts, execute_tool)
             available_tools = validate_tools([*available_tools, *ARTIFACT_TOOLS], execute_tool)
             self._sessions[session_id] = _Session(

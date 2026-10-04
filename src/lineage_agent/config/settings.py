@@ -2,7 +2,7 @@
 
 import math
 import os
-from dataclasses import InitVar, dataclass
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +16,8 @@ DEFAULT_TEXT_MAX_BYTES = 131072
 DEFAULT_TEXT_TOTAL_MAX_BYTES = 1048576
 DEFAULT_CONTEXT_BUDGET_TOKENS = 250000
 DEFAULT_MAX_OUTPUT_TOKENS = 16384
+DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS = 16384
+DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 8192
 
 
@@ -26,14 +28,15 @@ class ConfigurationError(ValueError):
 _REMOVED_OPTION = object()
 _REMOVED_CONTEXT_OPTIONS = (
     "context_trigger_percent", "context_target_percent", "summary_max_output_tokens", "summary_max_bytes",
-    "context_keep_recent_turns",
+    "context_keep_recent_turns", "summary_target_percent", "context_recovery_margin_percent",
 )
 
 
 def _removed_configuration(names: list[str]) -> ConfigurationError:
     return ConfigurationError(
         f"{', '.join(name.upper() for name in names)} 已移除。请删除旧配置；"
-        "摘要目标改用 SUMMARY_TARGET_PERCENT（默认 40），"
+        "摘要输出上限改用 SUMMARY_HISTORY_MAX_OUTPUT_TOKENS（默认 16384）"
+        "和 SUMMARY_RUN_MAX_OUTPUT_TOKENS（默认 8192），"
         "保护窗口改用 CONTEXT_KEEP_RECENT_GROUPS（默认 3），"
         "上下文触发上限固定为 CONTEXT_BUDGET_TOKENS。"
     )
@@ -49,6 +52,7 @@ class ModelSettings:
     max_model_calls: int = DEFAULT_MAX_MODEL_CALLS
     log_dir: Path = Path("logs")
     project_root: Path | None = None
+    application_root: Path = field(default_factory=Path.cwd)
     directory_max_entries: int = DEFAULT_DIRECTORY_MAX_ENTRIES
     text_max_bytes: int = DEFAULT_TEXT_MAX_BYTES
     text_total_max_bytes: int = DEFAULT_TEXT_TOTAL_MAX_BYTES
@@ -57,8 +61,8 @@ class ModelSettings:
     context_safety_margin_tokens: int = DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
     opaque_fallback_tokens: int = 4096
     context_keep_recent_groups: int = 3
-    summary_target_percent: int = 40
-    context_recovery_margin_percent: int = 10
+    summary_history_max_output_tokens: int = DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS
+    summary_run_max_output_tokens: int = DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS
     # Accept obsolete keywords only to give a precise migration error. InitVars
     # are not dataclass fields and never appear in asdict or saved configuration.
     context_trigger_percent: InitVar[object] = _REMOVED_OPTION
@@ -66,13 +70,16 @@ class ModelSettings:
     summary_max_output_tokens: InitVar[object] = _REMOVED_OPTION
     summary_max_bytes: InitVar[object] = _REMOVED_OPTION
     context_keep_recent_turns: InitVar[object] = _REMOVED_OPTION
+    summary_target_percent: InitVar[object] = _REMOVED_OPTION
+    context_recovery_margin_percent: InitVar[object] = _REMOVED_OPTION
 
     def __post_init__(self, context_trigger_percent: object, context_target_percent: object,
                       summary_max_output_tokens: object, summary_max_bytes: object,
-                      context_keep_recent_turns: object) -> None:
+                      context_keep_recent_turns: object, summary_target_percent: object,
+                      context_recovery_margin_percent: object) -> None:
         removed = [name for name, value in zip(_REMOVED_CONTEXT_OPTIONS, (
             context_trigger_percent, context_target_percent, summary_max_output_tokens, summary_max_bytes,
-            context_keep_recent_turns,
+            context_keep_recent_turns, summary_target_percent, context_recovery_margin_percent,
         ), strict=True) if value is not _REMOVED_OPTION]
         if removed:
             raise _removed_configuration(removed)
@@ -118,7 +125,7 @@ class ModelSettings:
             raise ConfigurationError("TEXT_TOTAL_MAX_BYTES 必须是正整数。")
         for name in (
             "context_budget_tokens", "max_output_tokens", "opaque_fallback_tokens",
-            "context_keep_recent_groups",
+            "context_keep_recent_groups", "summary_history_max_output_tokens", "summary_run_max_output_tokens",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -128,12 +135,12 @@ class ModelSettings:
             raise ConfigurationError("CONTEXT_SAFETY_MARGIN_TOKENS 必须是非负整数。")
         if self.context_budget_tokens <= self.max_output_tokens + self.context_safety_margin_tokens:
             raise ConfigurationError("上下文额度必须大于业务输出预留与安全余量之和。")
-        if (type(self.summary_target_percent) is not int
-                or not 1 <= self.summary_target_percent <= 100):
-            raise ConfigurationError("SUMMARY_TARGET_PERCENT 必须是 1 到 100 的整数。")
-        if (type(self.context_recovery_margin_percent) is not int
-                or not 0 <= self.context_recovery_margin_percent <= 99):
-            raise ConfigurationError("CONTEXT_RECOVERY_MARGIN_PERCENT 必须是 0 到 99 的整数。")
+        try:
+            if isinstance(self.application_root, str) and not self.application_root.strip():
+                raise ValueError("empty application root")
+            object.__setattr__(self, "application_root", Path(self.application_root).resolve())
+        except (OSError, TypeError, ValueError) as exc:
+            raise ConfigurationError("APPLICATION_ROOT 必须是有效的非空目录路径。") from exc
         try:
             if isinstance(self.log_dir, str) and not self.log_dir.strip():
                 raise ValueError("empty log directory")
@@ -209,8 +216,8 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         ("CONTEXT_SAFETY_MARGIN_TOKENS", DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS),
         ("OPAQUE_FALLBACK_TOKENS", 4096),
         ("CONTEXT_KEEP_RECENT_GROUPS", 3),
-        ("SUMMARY_TARGET_PERCENT", 40),
-        ("CONTEXT_RECOVERY_MARGIN_PERCENT", 10),
+        ("SUMMARY_HISTORY_MAX_OUTPUT_TOKENS", DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS),
+        ("SUMMARY_RUN_MAX_OUTPUT_TOKENS", DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS),
     ):
         try:
             budget_values[name.lower()] = int(os.environ.get(name, str(default)))
@@ -224,6 +231,7 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         max_model_calls=max_model_calls,
         log_dir=log_dir,
         project_root=project_root,
+        application_root=dotenv_path.parent,
         directory_max_entries=directory_max_entries,
         text_max_bytes=text_max_bytes,
         text_total_max_bytes=text_total_max_bytes,

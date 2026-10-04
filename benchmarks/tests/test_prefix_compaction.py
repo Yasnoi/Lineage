@@ -4,6 +4,7 @@ from copy import deepcopy
 import asyncio
 from dataclasses import replace
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -37,16 +38,8 @@ def _ids(value):
 
 
 def _summary(request, text="Earlier tool observations are available through history recall."):
-    material = unpack_summary_material(request)
-    refs = _ids(material)
-    if not refs:
-        refs = [ref for entries in material.get("candidate_input", {}).get("document", {}).values()
-                for entry in entries for ref in entry["source_ids"]]
-    if not refs:
-        raise AssertionError("summary request has no immutable sources")
-    document = {name: [] for name in ("requirements", "facts", "proposals", "corrections", "open_items")}
-    document["facts"] = [{"text": text, "source_ids": refs[:1]}]
-    return response(message(json.dumps(document)))
+    return response(message(text))
+
 
 
 class _Client(LocalClient):
@@ -80,7 +73,8 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.tmp.cleanup)
         self.settings = ModelSettings(
             base_url="https://unused.invalid/v1", model_name="local-check",
-            log_dir=Path(self.tmp.name), context_budget_tokens=24000,
+            log_dir=Path(self.tmp.name), application_root=Path(self.tmp.name), context_budget_tokens=24000,
+            summary_history_max_output_tokens=512, summary_run_max_output_tokens=256,
             max_output_tokens=256, context_safety_margin_tokens=64, max_model_calls=25,
         )
         self.executed = []
@@ -126,7 +120,8 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.executed, [f"c{index}" for index in range(10)])
         self.assertTrue(all(summary_request_lane(request) == "R" for request in client.summary_requests))
         self.assertIsNone(state["active_context"]["history_summary"])
-        self.assertIsNotNone(state["active_context"]["run_summary"])
+        self.assertTrue(any(span["lane"] == "R" for span in state["active_context"]["summary_spans"]))
+        self.assertIsNone(state["active_context"]["current_run_id"])
         original = client.business_requests[0]["input"][0]
         for request in client.business_requests:
             self.assertIn(original, request["input"])
@@ -196,7 +191,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             lanes = [summary_request_lane(request) for request in client.summary_requests]
             self.assertEqual(lanes[:2], ["H", "R"])
             self.assertIsNotNone(turn.state["active_context"]["history_summary"])
-            self.assertIsNotNone(turn.state["active_context"]["run_summary"])
+            self.assertTrue(any(span["lane"] == "R" for span in turn.state["active_context"]["summary_spans"]))
             history = unpack_summary_material(client.summary_requests[0])
             current = unpack_summary_material(client.summary_requests[1])
             self.assertTrue(all(old.state["run_id"] in ref for ref in _ids(history)))
@@ -243,7 +238,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outcomes[0]["stop_reason"], "error")
             self.assertEqual(outcomes[0]["tool_outcomes"]["succeeded"], 0)
 
-    async def test_three_group_protection_keeps_entire_boundary_old_turn(self):
+    async def test_current_protection_never_preserves_historical_turns(self):
         with SessionManager() as manager:
             sid = manager.create_session(self.settings, tools=[TOOL], execute_tool=self.tool)
             turns = []
@@ -266,22 +261,24 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assert_complete(turn.state)
             self.assertEqual([summary_request_lane(request) for request in client.summary_requests], ["H"])
             active_turns = turn.state["active_context"]["turns"]
-            self.assertEqual([ref["run_id"] for ref in active_turns], [item.state["run_id"] for item in turns[1:]])
-            self.assertIn({"role": "user", "content": "boundary entire user input"}, client.business_requests[0]["input"])
+            self.assertEqual([ref["run_id"] for ref in active_turns], [turn.state["run_id"]])
+            self.assertNotIn({"role": "user", "content": "boundary entire user input"}, client.business_requests[0]["input"])
             preserved = [item["call_id"] for item in client.business_requests[0]["input"] if item.get("type") == "function_call_output"]
-            self.assertEqual(preserved, ["old0", "old1"])
+            self.assertEqual(preserved, [])
+            ranges = turn.state["active_context"]["history_summary"]["ranges"]
+            self.assertEqual({bounds["run_id"] for bounds in ranges}, {item.state["run_id"] for item in turns})
 
     async def test_model_searches_and_reads_detail_missing_from_r_without_tool_replay(self):
         observed = {}
         def ask_search(request):
             active = request["input"]
             self.assertFalse(any(item.get("type") == "function_call_output" and item["call_id"] == "c0" for item in active))
-            summaries = [json.loads(item["content"]) for item in active
+            summaries = [item["content"] for item in active
                          if item.get("role") == "assistant" and isinstance(item.get("content"), str)
-                         and "derived_context_summary" in item["content"]]
-            summary = next(item for item in summaries if item["lane"] == "R")
-            self.assertNotIn("omitted-detail=37", json.dumps(summary["document"]))
-            observed["history_ref"] = summary["history"]["history_ref"]
+                         and item["content"].startswith("当前进展摘要 R")]
+            self.assertEqual(len(summaries), 1)
+            self.assertNotIn("omitted-detail=37", summaries[0])
+            observed["history_ref"] = re.search(r"history://scope/[0-9a-f-]+", summaries[0])[0]
             return response(call("hs0", name="history_search", arguments=json.dumps({
                 "history_ref": observed["history_ref"], "keywords": ["omitted-detail=37; not 73; c0"], "cursor": None,
             })))
@@ -325,14 +322,12 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["summary_calls"], 2)
         self.assertEqual(self.executed, [f"c{index}" for index in range(6)])
 
-    async def test_invalid_summary_source_stops_after_one_call_and_keeps_original_view(self):
+    async def test_empty_summary_stops_after_one_call_and_keeps_original_view(self):
         def invalid(request):
-            document = {name: [] for name in ("requirements", "facts", "proposals", "corrections", "open_items")}
-            document["facts"] = [{"text": "unsupported claim", "source_ids": ["history://record/missing/0"]}]
-            return response(message(json.dumps(document)))
+            return response(message("   "))
         state, client = await self.standalone(count=6, summary=invalid)
         self.assertEqual(state["summary_calls"], 1)
-        self.assertEqual(state["error_code"], "invalid_summary")
+        self.assertEqual(state["error_code"], "summary_model_error")
         self.assertIsNone(state["active_context"]["run_summary"])
         self.assertEqual(len(self.executed), 6)
         self.assertEqual(len(client.business_requests), 6)
@@ -500,7 +495,7 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("must-not-run", self.executed)
             self.assertFalse(client.summary_requests)
 
-    async def test_previous_h_is_reused_without_call_and_deducted_before_r_allocation(self):
+    async def test_previous_h_is_reused_without_call_or_target_allocation(self):
         from lineage_agent.agent.compaction import _message
         with SessionManager() as manager:
             sid = manager.create_session(self.settings, tools=[TOOL], execute_tool=self.tool)
@@ -519,11 +514,11 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(history["status"], "reused")
             self.assertFalse(history["model_called"])
             self.assertFalse(history["source_refs"])
-            empty = {name: [] for name in ("requirements", "facts", "proposals", "corrections", "open_items")}
-            reused_cost = json_bytes(_message("H", history, history["document"])) - json_bytes(_message("H", history, empty))
-            current_capacity = current["target_bytes"] - json_bytes(_message("R", current, empty))
-            self.assertGreater(reused_cost, 0)
-            self.assertEqual(reused_cost + current_capacity, candidate["recovery_budget"]["target_bytes"])
+            self.assertGreater(json_bytes(_message("H", history, history["body"])), 0)
+            self.assertNotIn("target_bytes", current)
+            self.assertNotIn("recovery_budget", candidate)
+            self.assertTrue(all("history_background_readonly" not in unpack_summary_material(request)
+                                for request in client.summary_requests))
 
     async def test_actual_summary_request_larger_than_window_is_not_sent(self):
         with SessionManager() as manager:

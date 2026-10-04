@@ -25,8 +25,8 @@ async def check_prefix_h_success_r_failure_keeps_both_original_views():
 async def check_prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted():
     await run_case(prefix.PrefixCompactionTests, "test_failed_first_model_call_history_keeps_error_outcome_when_compacted")
 
-async def check_prefix_three_group_protection_keeps_entire_boundary_old_turn():
-    await run_case(prefix.PrefixCompactionTests, "test_three_group_protection_keeps_entire_boundary_old_turn")
+async def check_prefix_current_protection_never_preserves_historical_turns():
+    await run_case(prefix.PrefixCompactionTests, "test_current_protection_never_preserves_historical_turns")
 
 async def check_prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay():
     await run_case(prefix.PrefixCompactionTests, "test_model_searches_and_reads_detail_missing_from_r_without_tool_replay")
@@ -34,8 +34,8 @@ async def check_prefix_model_searches_and_reads_detail_missing_from_r_without_to
 async def check_prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies():
     await run_case(prefix.PrefixCompactionTests, "test_oversized_valid_candidate_is_shortened_once_without_original_bodies")
 
-async def check_prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view():
-    await run_case(prefix.PrefixCompactionTests, "test_invalid_summary_source_stops_after_one_call_and_keeps_original_view")
+async def check_prefix_empty_summary_stops_after_one_call_and_keeps_original_view():
+    await run_case(prefix.PrefixCompactionTests, "test_empty_summary_stops_after_one_call_and_keeps_original_view")
 
 async def check_prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts():
     await run_case(prefix.PrefixCompactionTests, "test_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts")
@@ -61,8 +61,8 @@ async def check_prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_gr
 async def check_prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection():
     await run_case(prefix.PrefixCompactionTests, "test_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection")
 
-async def check_prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation():
-    await run_case(prefix.PrefixCompactionTests, "test_previous_h_is_reused_without_call_and_deducted_before_r_allocation")
+async def check_prefix_previous_h_is_reused_without_call_or_target_allocation():
+    await run_case(prefix.PrefixCompactionTests, "test_previous_h_is_reused_without_call_or_target_allocation")
 
 async def check_prefix_actual_summary_request_larger_than_window_is_not_sent():
     await run_case(prefix.PrefixCompactionTests, "test_actual_summary_request_larger_than_window_is_not_sent")
@@ -71,8 +71,8 @@ from benchmarks.tests import test_compaction_boundaries as boundaries
 async def check_boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options():
     await run_case(boundaries.CompactionBoundaryTests, "test_checked_requests_equal_actual_sdk_requests_including_final_call_options")
 
-async def check_boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery():
-    await run_case(boundaries.CompactionBoundaryTests, "test_summary_above_soft_target_can_commit_with_margin_and_positive_recovery")
+async def check_boundaries_allowed_candidate_below_old_headroom_commits_on_first_attempt():
+    await run_case(boundaries.CompactionBoundaryTests, "test_allowed_candidate_below_old_headroom_commits_on_first_attempt")
 
 async def check_boundaries_private_final_save_failure_cannot_report_completed():
     await run_case(boundaries.CompactionBoundaryTests, "test_private_final_save_failure_cannot_report_completed")
@@ -137,20 +137,20 @@ async def check_settings_new_environment_values_are_loaded_without_old_field():
     await run_case(settings.CompactSettingsTests, "test_new_environment_values_are_loaded_without_old_field")
 from benchmarks.tests import test_summary_contracts as summary
 
-async def check_summary_lane_and_byte_target_are_independent_of_api_cap():
-    await run_case(summary.SummaryContractsTests, "test_lane_and_byte_target_are_independent_of_api_cap")
+async def check_summary_lane_caps_are_independent_of_business_output_allowance():
+    await run_case(summary.SummaryContractsTests, "test_lane_caps_are_independent_of_business_output_allowance")
 
-async def check_summary_invalid_size_or_lane_never_prepares_a_request():
-    await run_case(summary.SummaryContractsTests, "test_invalid_size_or_lane_never_prepares_a_request")
+async def check_summary_invalid_lane_or_attempt_never_prepares_a_request():
+    await run_case(summary.SummaryContractsTests, "test_invalid_lane_or_attempt_never_prepares_a_request")
 
-async def check_summary_machine_refs_need_explicit_allowed_origin():
-    await run_case(summary.SummaryContractsTests, "test_machine_refs_need_explicit_allowed_origin")
+async def check_summary_plain_text_is_preserved_without_schema_or_reference_parsing():
+    await run_case(summary.SummaryContractsTests, "test_plain_text_is_preserved_without_schema_or_reference_parsing")
 
-async def check_summary_invalid_source_or_structure_does_not_pass():
-    await run_case(summary.SummaryContractsTests, "test_invalid_source_or_structure_does_not_pass")
+async def check_summary_invalid_completion_refusal_tool_request_and_empty_text_are_rejected():
+    await run_case(summary.SummaryContractsTests, "test_invalid_completion_refusal_tool_request_and_empty_text_are_rejected")
 
-async def check_summary_minimum_size_measures_complete_lane_message():
-    await run_case(summary.SummaryContractsTests, "test_minimum_size_measures_complete_lane_message")
+async def check_summary_summary_budget_uses_lane_cap_without_changing_business_settings():
+    await run_case(summary.SummaryContractsTests, "test_summary_budget_uses_lane_cap_without_changing_business_settings")
 
 async def check_summary_complete_multi_tool_group_including_failure_is_allowed():
     await run_case(summary.GroupProtocolTests, "test_complete_multi_tool_group_including_failure_is_allowed")
@@ -170,10 +170,10 @@ async def main():
         check_prefix_history_and_current_prefix_generate_h_then_r_and_commit_together,
         check_prefix_h_success_r_failure_keeps_both_original_views,
         check_prefix_failed_first_model_call_history_keeps_error_outcome_when_compacted,
-        check_prefix_three_group_protection_keeps_entire_boundary_old_turn,
+        check_prefix_current_protection_never_preserves_historical_turns,
         check_prefix_model_searches_and_reads_detail_missing_from_r_without_tool_replay,
         check_prefix_oversized_valid_candidate_is_shortened_once_without_original_bodies,
-        check_prefix_invalid_summary_source_stops_after_one_call_and_keeps_original_view,
+        check_prefix_empty_summary_stops_after_one_call_and_keeps_original_view,
         check_prefix_checkpoint_failures_keep_old_activity_and_actual_tool_and_summary_facts,
         check_prefix_two_complete_attempts_can_call_both_lanes_but_never_a_fifth_summary,
         check_prefix_second_oversized_candidate_stops_without_reinitializing_attempts,
@@ -182,10 +182,10 @@ async def main():
         check_prefix_summary_request_preflight_refuses_without_sending_or_recursive_recovery,
         check_prefix_multiple_tool_calls_and_legal_failures_remain_in_whole_groups,
         check_prefix_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection,
-        check_prefix_previous_h_is_reused_without_call_and_deducted_before_r_allocation,
+        check_prefix_previous_h_is_reused_without_call_or_target_allocation,
         check_prefix_actual_summary_request_larger_than_window_is_not_sent,
         check_boundaries_checked_requests_equal_actual_sdk_requests_including_final_call_options,
-        check_boundaries_summary_above_soft_target_can_commit_with_margin_and_positive_recovery,
+        check_boundaries_allowed_candidate_below_old_headroom_commits_on_first_attempt,
         check_boundaries_private_final_save_failure_cannot_report_completed,
         check_boundaries_activation_confirmation_failure_keeps_old_activity_and_paid_facts,
         check_boundaries_summary_logging_boundaries_do_not_send_or_enable_unsaved_work,
@@ -206,11 +206,11 @@ async def main():
         check_settings_defaults_and_limits,
         check_settings_old_turn_setting_is_rejected_in_constructor_and_environment,
         check_settings_new_environment_values_are_loaded_without_old_field,
-        check_summary_lane_and_byte_target_are_independent_of_api_cap,
-        check_summary_invalid_size_or_lane_never_prepares_a_request,
-        check_summary_machine_refs_need_explicit_allowed_origin,
-        check_summary_invalid_source_or_structure_does_not_pass,
-        check_summary_minimum_size_measures_complete_lane_message,
+        check_summary_lane_caps_are_independent_of_business_output_allowance,
+        check_summary_invalid_lane_or_attempt_never_prepares_a_request,
+        check_summary_plain_text_is_preserved_without_schema_or_reference_parsing,
+        check_summary_invalid_completion_refusal_tool_request_and_empty_text_are_rejected,
+        check_summary_summary_budget_uses_lane_cap_without_changing_business_settings,
         check_summary_complete_multi_tool_group_including_failure_is_allowed,
         check_summary_known_encrypted_reasoning_is_whole_group_only,
         check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers,

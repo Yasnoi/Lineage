@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import requests
 import sys
 import threading
@@ -16,12 +17,12 @@ from lineage_agent.agent import runtime
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 CHECK_DIR = ROOT / "logs" / "checks" / str(uuid4())
 
 SETTINGS = ModelSettings(
-    base_url="https://unused.invalid/v1", model_name="tracing-check", log_dir=CHECK_DIR,
+    base_url="https://unused.invalid/v1", model_name="tracing-check", log_dir=CHECK_DIR, application_root=CHECK_DIR,
 )
 
 MODEL_SECRET = "synthetic-model-secret-41f0"
@@ -82,9 +83,9 @@ async def run(replies, *, settings=SETTINGS, prompt="List the synthetic director
     return state, client
 
 def stable(state):
-    value = deepcopy({key: value for key, value in state.items() if key not in {"run_id", "session_id", "log_path"}})
-    # Independent runs allocate independent version and checkpoint identities.
-    # Keep the descriptor shape, turn order and all behavioral data comparable.
+    value = deepcopy({key: item for key, item in state.items() if key not in {"run_id", "session_id", "log_path"}})
+    # Generated identities and hashes include per-run UUIDs. Normalize their
+    # correspondence, retaining turn order, receipts, byte counts and all bodies.
     active = value.get("active_context")
     identities = {state["run_id"]: "<current-run>"}
     if active:
@@ -92,23 +93,58 @@ def stable(state):
         if active["parent_version_id"] is not None:
             active["parent_version_id"] = "<parent-version>"
         for index, turn in enumerate(active["turns"]):
-            identities[turn["run_id"]] = f"<turn-{index}>"
-            turn["run_id"] = f"<turn-{index}>"
-            turn["checkpoint_id"] = f"<checkpoint-{index}>"
+            identities.setdefault(turn["run_id"], f"<turn-{index}>")
+            turn["run_id"] = identities[turn["run_id"]]
+            if "checkpoint_id" in turn:
+                turn["checkpoint_id"] = f"<checkpoint-{index}>"
+    watermarks = value.get("record_files", {})
+    for index, run_id in enumerate(watermarks):
+        identities.setdefault(run_id, f"<record-run-{index}>")
+
+    def identity(text):
+        if isinstance(text, str):
+            for identifier, replacement in identities.items():
+                text = text.replace(identifier, replacement)
+        return text
+
+    if active:
+        active["current_run_id"] = identity(active.get("current_run_id"))
         for group in active.get("groups", []):
-            group["group_id"] = group["group_id"].replace(state["run_id"], "<current-run>")
-        for index, reference in enumerate(active.get("item_refs", [])):
-            if isinstance(reference, str):
-                for identifier, replacement in identities.items():
-                    reference = reference.replace(identifier, replacement)
-                active["item_refs"][index] = reference
-    # Raw protocol bodies and business call IDs remain exact. Only the new
-    # application-owned record identities vary across otherwise equal runs.
+            group["group_id"] = identity(group["group_id"])
+        active["item_refs"] = [identity(reference) for reference in active.get("item_refs", [])]
+    conversation_id = value.get("conversation_id")
+    if conversation_id is not None:
+        assert isinstance(conversation_id, str) and str(UUID(conversation_id)) == conversation_id
+        value["conversation_id"] = (identity(conversation_id) if conversation_id == state["run_id"]
+                                    else "<session-conversation>")
+
+    digests = {}
+    def digest(value):
+        assert isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+        return digests.setdefault(value, f"<digest-{len(digests)}>")
+
+    for watermark in watermarks.values():
+        assert watermark["format_version"] == 1
+        assert type(watermark["record_count"]) is int and watermark["record_count"] >= 0
+        assert type(watermark["byte_end"]) is int and watermark["byte_end"] >= watermark["record_count"]
     for record in value.get("record_batch", []):
+        # Receipts identify immutable originals; they no longer contain a copy
+        # of the raw item. Their coordinates stay exact across equivalent runs.
+        if "sha256" in record:
+            mark = watermarks[record["run_id"]]
+            assert type(record["sequence"]) is int and 0 <= record["sequence"] < mark["record_count"]
+            assert record["source_ref"] == f"history://record/{record['run_id']}/{record['sequence']}"
+            assert type(record["offset"]) is int and record["offset"] >= 0
+            assert type(record["length"]) is int and record["length"] > 0
+            assert record["offset"] + record["length"] <= mark["byte_end"]
+            record["sha256"] = digest(record["sha256"])
         for key in ("run_id", "group_id", "source_ref"):
-            if isinstance(record.get(key), str):
-                for identifier, replacement in identities.items():
-                    record[key] = record[key].replace(identifier, replacement)
+            if key in record:
+                record[key] = identity(record[key])
+    for watermark in watermarks.values():
+        watermark["prefix_sha256"] = digest(watermark["prefix_sha256"])
+    if "record_files" in value:
+        value["record_files"] = {identity(run_id): watermark for run_id, watermark in watermarks.items()}
     metrics = value.get("record_metrics", {})
     if "checkpoint_serialized_bytes" in metrics:
         measured = metrics["checkpoint_serialized_bytes"]
@@ -118,6 +154,7 @@ def stable(state):
         if measured:
             metrics["checkpoint_serialized_bytes"] = "<positive-byte-measurement>"
     return value
+
 
 def hanging_upload_child():
     from lineage_agent.entrypoints import cli

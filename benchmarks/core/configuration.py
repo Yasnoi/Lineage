@@ -11,7 +11,10 @@ from unittest.mock import patch
 from lineage_agent.config.settings import ModelSettings, load_settings
 from benchmarks.core.diagnostics import ConfigurationError
 
-MODEL_KEYS = {item.name for item in fields(ModelSettings)} - {"project_root", "log_dir"}
+MODEL_KEYS = {item.name for item in fields(ModelSettings)} - {"project_root", "log_dir", "application_root"}
+RETIRED_COMPACT_KEYS = {"context_trigger_percent", "context_target_percent", "summary_max_output_tokens",
+                        "summary_max_bytes", "context_keep_recent_turns", "summary_target_percent",
+                        "context_recovery_margin_percent"}
 CONNECTION_KEYS = {"API_KEY", "BASE_URL", "MODEL_NAME"}
 TRACE_ENV_KEYS = {"LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_ENDPOINT",
                   "LANGSMITH_PROJECT", "LANGSMITH_WORKSPACE_ID"}
@@ -29,13 +32,19 @@ def _fields(values, allowed, path):
                                  "只保留以下字段：" + ", ".join(sorted(allowed)) + "。")
 
 
+def _retired_compact(values, path):
+    if isinstance(values, dict) and set(values) & RETIRED_COMPACT_KEYS:
+        name = sorted(set(values) & RETIRED_COMPACT_KEYS)[0]
+        raise ConfigurationError(f"{path}.{name}", "retired_compact_setting", "此旧 Compact 配置已移除。",
+                                 "删除旧字段；当前组保护使用 context_keep_recent_groups，H/R 输出上限分别使用 summary_history_max_output_tokens 和 summary_run_max_output_tokens。")
+
+
 def _settings_error(exc, path):
     # Match trusted production error categories, but never publish exception text.
     if path == "project_env" and "无法读取 .env" in str(exc):
         return ConfigurationError("project_env", "file_unreadable", "项目 .env 必须是可读取的 UTF-8 文件。",
                                   "检查项目根目录 .env 的读取权限与编码。")
-    names = sorted(MODEL_KEYS | {"log_dir", "project_root", "context_trigger_percent",
-                                "context_target_percent", "summary_max_output_tokens", "summary_max_bytes"})
+    names = sorted(MODEL_KEYS | RETIRED_COMPACT_KEYS | {"log_dir", "project_root", "application_root"})
     name = next((key for key in names if key.upper() in str(exc)), None)
     if name is None and "上下文额度" in str(exc):
         name = "context_budget_tokens"
@@ -47,8 +56,8 @@ def _settings_error(exc, path):
         constraint = "必须是非空字符串。"
     elif name == "context_budget_tokens":
         constraint = "必须是正整数，且大于 max_output_tokens 与 context_safety_margin_tokens 之和。"
-    elif name == "summary_target_percent":
-        constraint = "必须是 1 到 100 的整数。"
+    elif name in RETIRED_COMPACT_KEYS:
+        constraint = "此旧 Compact 配置已移除；须删除，不能映射为新配置。"
     elif name == "context_safety_margin_tokens":
         constraint = "必须是非负整数。"
     elif name == "timeout_seconds":
@@ -61,6 +70,7 @@ def _settings_error(exc, path):
 
 
 def checked_model(values, *, path="model"):
+    _retired_compact(values, path)
     _fields(values, MODEL_KEYS, path)
     for key in ("base_url", "model_name"):
         if key not in values:
@@ -130,6 +140,7 @@ def checked_config(config):
         raise ConfigurationError("agent_source", "unsupported_source", '必须是 "project_env"。',
                                  "模型连接来自进程环境或项目 .env；个别设置使用 model_overrides。")
     overrides = config.get("model_overrides", {})
+    _retired_compact(overrides, "model_overrides")
     _fields(overrides, MODEL_KEYS, "model_overrides")
     units = selected_units(config)
     gate = config.get("gate_first_sample", False)

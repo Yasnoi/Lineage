@@ -52,7 +52,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_output_frames_are_lossless_and_reduce_measured_http_body(self):
         material = self.framed_material()
         original = deepcopy(material)
-        request = prepare_summary_request(SETTINGS, material, target_bytes=900, lane="R")
+        request = prepare_summary_request(SETTINGS, material, lane="R")
         self.assertEqual(unpack_summary_material(request), original)
         self.assertEqual(material, original)
         self.assertTrue(all(set(item) == {"role", "content"} and item["role"] == "user" for item in request["input"]))
@@ -63,7 +63,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         measured = []
         for candidate in (request, legacy):
             risks = annotate_context_risks(candidate["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline")
-            measured.append(check_context_budget(candidate, risks, summary_budget_settings(SETTINGS)))
+            measured.append(check_context_budget(candidate, risks, summary_budget_settings(SETTINGS, "R")))
         self.assertLess(measured[0]["required_tokens"], measured[1]["required_tokens"])
         self.assertEqual(unpack_summary_material(legacy), original)
         observed = []
@@ -79,7 +79,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unpack_summary_material(observed[0]), original)
 
     def test_source_output_frame_rejects_ambiguous_or_incomplete_slots(self):
-        request = prepare_summary_request(SETTINGS, self.framed_material(), target_bytes=900)
+        request = prepare_summary_request(SETTINGS, self.framed_material(), lane="H")
         for field, value in (("source_index", -1), ("source_index", True), ("source_index", 99),
                              ("body_index", 0), ("body_index", True), ("body_index", 2)):
             changed = deepcopy(request)
@@ -141,24 +141,24 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
 
         client, http = self.make_client(capture)
         async with client:
-            for lane, target in (("H", 640), ("R", 1379)):
-                with self.subTest(lane=lane, target=target):
-                    request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=target, lane=lane)
+            for lane, cap in (("H", 16384), ("R", 8192)):
+                with self.subTest(lane=lane, cap=cap):
+                    request = prepare_summary_request(SETTINGS, MATERIAL, lane=lane)
                     measured = deepcopy(request)
                     risks = annotate_context_risks(
                         request["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline-run",
                     )
-                    budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS))
+                    budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, lane))
                     self.assertEqual(budget["decision"], "allow")
-                    self.assertEqual(budget["output_reserve_tokens"], SETTINGS.max_output_tokens)
+                    self.assertEqual(budget["output_reserve_tokens"], cap)
                     self.assertEqual(budget["transparent_tokens"], len(json.dumps(
                         measured, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
                     ).encode("utf-8")))
                     result = await responses.send_prepared_response(client, request, purpose="summary")
                     self.assertEqual(request, measured)
                     self.assertEqual(bodies[-1], measured)
-                    self.assertEqual(bodies[-1]["max_output_tokens"], SETTINGS.max_output_tokens)
-                    self.assertIn(f"at most {target} UTF-8 bytes", bodies[-1]["instructions"])
+                    self.assertEqual(bodies[-1]["max_output_tokens"], cap)
+                    self.assertNotIn("UTF-8 bytes", bodies[-1]["instructions"])
                     self.assertEqual(summary_request_lane(bodies[-1]), lane)
                     self.assertEqual(bodies[-1]["reasoning"], {"effort": "none"})
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
@@ -191,7 +191,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
             }})
 
         client, http = self.make_client(reject)
-        request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=900)
+        request = prepare_summary_request(SETTINGS, MATERIAL, lane="H")
         async with client:
             with self.assertRaises(responses.ModelError) as raised:
                 await responses.send_prepared_response(client, request, purpose="summary")
@@ -219,23 +219,23 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(http.is_closed)
 
     def test_summary_recognition_requires_canonical_dynamic_protocol(self):
-        for target in (1, 900, 4000):
-            request = prepare_summary_request(SETTINGS, MATERIAL, target_bytes=target)
-            self.assertTrue(is_summary_request(request))
-            for change in (
-                {"max_output_tokens": SETTINGS.max_output_tokens + 1}, {"reasoning": {"effort": "low"}},
-                {"max_output_tokens": float(SETTINGS.max_output_tokens)},
-                {"instructions": SUMMARY_INSTRUCTIONS},
-                {"tools": [{"type": "function", "name": "unexpected", "parameters": {}}]},
-            ):
-                with self.subTest(target=target, change=change):
-                    self.assertFalse(is_summary_request({**request, **change}))
-            ordinary = prepare_request(
-                SETTINGS.model_name, [{"role": "user", "content": request["instructions"]}],
-                tool_choice="none", max_output_tokens=target,
-            )
-            ordinary["reasoning"] = {"effort": "none"}
-            self.assertFalse(is_summary_request(ordinary))
+        for lane, cap in (("H", 16384), ("R", 8192)):
+            for attempt in (1, 2):
+                request = prepare_summary_request(SETTINGS, MATERIAL, lane=lane, attempt_no=attempt)
+                self.assertTrue(is_summary_request(request))
+                for change in (
+                    {"max_output_tokens": cap + 1}, {"reasoning": {"effort": "low"}},
+                    {"max_output_tokens": float(cap)}, {"instructions": SUMMARY_INSTRUCTIONS},
+                    {"tools": [{"type": "function", "name": "unexpected", "parameters": {}}]},
+                ):
+                    with self.subTest(lane=lane, attempt=attempt, change=change):
+                        self.assertFalse(is_summary_request({**request, **change}))
+                ordinary = prepare_request(
+                    SETTINGS.model_name, [{"role": "user", "content": request["instructions"]}],
+                    tool_choice="none", max_output_tokens=cap,
+                )
+                ordinary["reasoning"] = {"effort": "none"}
+                self.assertFalse(is_summary_request(ordinary))
 
 
 if __name__ == "__main__":

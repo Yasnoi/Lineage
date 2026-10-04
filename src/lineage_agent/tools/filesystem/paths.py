@@ -16,6 +16,8 @@ ARTIFACT_CACHE_ROOT = Path(tempfile.gettempdir()).absolute() / "lineage-agent-ar
 
 
 def _check_artifact_boundary(path: Path) -> None:
+    if any(component.casefold() == ".lineage" for component in path.parts):
+        raise ToolArgumentError(reason_code="storage_path_forbidden")
     if path.is_relative_to(ARTIFACT_CACHE_ROOT):
         raise ToolArgumentError(reason_code="artifact_path_forbidden")
 
@@ -54,7 +56,7 @@ def bind_project_root(root: str | Path) -> Path:
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         raise ConfigurationError(
             "PROJECT_ROOT 必须是存在且可访问的目录，其自身及祖先不能包含链接或重解析点，"
-            "且不能位于 Artifact 保留目录。"
+            "且不能位于应用保留目录。"
         ) from exc
 
 
