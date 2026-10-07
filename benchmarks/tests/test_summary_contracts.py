@@ -40,18 +40,29 @@ class SummaryContractsTests(unittest.TestCase):
                     self.assertNotIn("tools", request)
         historical = prepare_summary_request(settings, material, lane="H")
         current = prepare_summary_request(settings, material, lane="R")
-        self.assertIn("task ending from a task succeeding", historical["instructions"])
-        self.assertIn("Do not attribute historical work", current["instructions"])
-        self.assertIn("截至覆盖范围", current["instructions"])
-        self.assertIn("Missing from these sources does not mean", current["instructions"])
-        self.assertIn("including facts", current["instructions"])
-        self.assertIn("actual result or execution facts", current["instructions"])
         self.assertNotIn("source_ids", current["instructions"])
         self.assertNotIn("compact_source_outputs_v1", current["instructions"])
         self.assertNotIn("body_index", current["instructions"])
         self.assertNotIn("UTF-8 bytes", current["instructions"])
-        self.assertNotIn("historical context", current["instructions"])
         self.assertNotEqual(historical["instructions"], current["instructions"])
+
+    def test_lane_and_shortening_policies_are_routed_without_changing_sources(self):
+        from lineage_agent.models.summarization import SUMMARY_INSTRUCTIONS, _LANE_INSTRUCTIONS
+        material = [{"role": "user", "content": "range note"},
+                    {"role": "assistant", "content": "candidate with conditional facts"}]
+        original = deepcopy(material)
+        for lane, other in (("H", "R"), ("R", "H")):
+            first = prepare_summary_request(SETTINGS, material, lane=lane)
+            second = prepare_summary_request(SETTINGS, material, lane=lane, attempt_no=2)
+            self.assertTrue(first["instructions"].startswith(SUMMARY_INSTRUCTIONS + _LANE_INSTRUCTIONS[lane]))
+            self.assertNotIn(_LANE_INSTRUCTIONS[other], first["instructions"])
+            self.assertEqual(first["input"], second["input"])
+            self.assertEqual(first["input"], original)
+            self.assertIn("Second and final attempt:", second["instructions"])
+            self.assertNotIn("Second and final attempt:", first["instructions"])
+            self.assertEqual(summary_request_lane(second), lane)
+            self.assertIsNone(summary_request_lane({**second, "instructions": second["instructions"].replace(
+                _LANE_INSTRUCTIONS[lane], _LANE_INSTRUCTIONS[other])}))
 
     def test_invalid_lane_or_attempt_never_prepares_a_request(self):
         for value in (0, -1, True, 3, 1.5, "1"):
