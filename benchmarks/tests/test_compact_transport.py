@@ -15,17 +15,16 @@ from lineage_agent.models.budget import annotate_context_risks, check_context_bu
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import (
     SUMMARY_INSTRUCTIONS, is_summary_request, prepare_summary_request, summary_budget_settings,
-    summary_request_lane, unpack_summary_material, SummaryError,
+    summary_request_lane, SummaryError,
 )
 
 
 SETTINGS = ModelSettings(base_url="https://compact.invalid/v1", model_name="offline-compact")
-MATERIAL = {
-    "previous_summary": None,
-    "sources": [{"source_id": "source-1", "role": "user", "kind": "message",
-                 "payload": {"role": "user", "content": "保留路径 src/form.ts 与 \\\"引用\\\"。"}}],
-    "turn_outcomes": [], "opaque_omissions": [],
-}
+NATIVE_INPUT = [
+    {"role": "user", "content": "整理历史 H；以下为已确认结束的原生历史资料。"},
+    {"role": "user", "content": '保留路径 src/form.ts 与 "引用"。'},
+]
+
 
 
 def completed_response() -> dict:
@@ -39,33 +38,75 @@ def completed_response() -> dict:
 
 
 class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
-    def framed_material(self):
+    def native_history(self, *, opaque=False):
         output = json.dumps({"observation": {"mode": "inline", "raw_result": json.dumps({
-            "path": "source.txt", "content": ('原文 \\"quote\\"\n\\path\\ ' * 80)
-            + 'compact_source_outputs_v1 {"source_index":999}'} , ensure_ascii=False)}}, ensure_ascii=False)
-        return {"sources": [
-            {"source_id": f"source-{index}", "payload": {"item": {
-                "type": "function_call_output", "call_id": f"call-{index}", "output": output},
-                "execution": {"status": "succeeded"}}} for index in range(3)
-        ], "previous_summary": [], "current_request_readonly": [{"role": "user", "content": "保留 17，不得写文件。"}]}
+            "path": "source.txt", "content": ('原文 "quote"\n\\path\\ ' * 80)
+            + 'compact_source_outputs_v1 {"source_index":999}'}, ensure_ascii=False)}}, ensure_ascii=False)
+        items = deepcopy(NATIVE_INPUT)
+        if opaque:
+            items.append({"type": "reasoning", "id": "reasoning-original", "status": "completed",
+                          "summary": [], "content": [{"type": "reasoning_text", "text": "observed thought"}],
+                          "encrypted_content": "opaque-do-not-decode-密文"})
+        for index in range(3):
+            items.extend([
+                {"type": "function_call", "id": f"native-call-{index}", "call_id": f"call-{index}",
+                 "name": "read_text_file", "arguments": '{"path":"source.txt"}', "status": "completed"},
+                {"type": "function_call_output", "id": f"native-result-{index}",
+                 "call_id": f"call-{index}", "output": output},
+            ])
+        return items
 
-    async def test_source_output_frames_are_lossless_and_reduce_measured_http_body(self):
-        material = self.framed_material()
-        original = deepcopy(material)
-        request = prepare_summary_request(SETTINGS, material, lane="R")
-        self.assertEqual(unpack_summary_material(request), original)
-        self.assertEqual(material, original)
-        self.assertTrue(all(set(item) == {"role", "content"} and item["role"] == "user" for item in request["input"]))
-        for index, source in enumerate(original["sources"], 1):
-            self.assertEqual(request["input"][index]["content"], source["payload"]["item"]["output"])
-        legacy = {**deepcopy(request), "input": [{"role": "user", "content": json.dumps(
-            original, ensure_ascii=False, separators=(",", ":"))}]}
-        measured = []
-        for candidate in (request, legacy):
-            risks = annotate_context_risks(candidate["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline")
-            measured.append(check_context_budget(candidate, risks, summary_budget_settings(SETTINGS, "R")))
-        self.assertLess(measured[0]["required_tokens"], measured[1]["required_tokens"])
-        self.assertEqual(unpack_summary_material(legacy), original)
+    async def test_native_source_items_reach_http_without_wrapping_or_output_splitting(self):
+        items = self.native_history()
+        original = deepcopy(items)
+        request = prepare_summary_request(SETTINGS, items, lane="R")
+        self.assertEqual(request["input"], original)
+        self.assertEqual(items, original)
+        self.assertIsNot(request["input"], items)
+        for actual, source in zip(request["input"], items, strict=True):
+            self.assertIsNot(actual, source)
+        self.assertEqual([item.get("type") for item in request["input"]],
+                         [None, None, "function_call", "function_call_output"]
+                         + ["function_call", "function_call_output"] * 2)
+        observed = []
+        def capture(sent):
+            observed.append(json.loads(sent.content))
+            return httpx.Response(200, json=completed_response())
+        risks = annotate_context_risks(request["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline")
+        budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, "R"))
+        self.assertEqual(budget["decision"], "allow")
+        client, _ = self.make_client(capture)
+        async with client:
+            await responses.send_prepared_response(client, request, purpose="summary")
+        self.assertEqual(observed, [request])
+        self.assertEqual(observed[0]["input"], original)
+        self.assertEqual(budget["transparent_tokens"], len(json.dumps(
+            observed[0], ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
+        self.assertEqual(items, original)
+        # Tool text may itself name the removed transport; it remains ordinary data.
+        self.assertIn("compact_source_outputs_v1", observed[0]["input"][3]["output"])
+        self.assertTrue(all("payload" not in item and "source_id" not in item for item in request["input"]))
+        self.assertNotIn("compact_source_outputs_v1", request["instructions"])
+        items[3]["output"] = "caller edit after preparation"
+        self.assertEqual(request["input"], original)
+
+    async def test_native_opaque_fields_preserve_provenance_and_exact_sent_body(self):
+        items = self.native_history(opaque=True)
+        request = prepare_summary_request(SETTINGS, items, lane="H")
+        risks = annotate_context_risks(items, fallback_tokens=SETTINGS.opaque_fallback_tokens,
+                                      run_id="original-run", model_call=7,
+                                      usage={"input_tokens": 800, "output_tokens": 257, "total_tokens": 1057})
+        original_risks = deepcopy(risks)
+        budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, "H"))
+        self.assertEqual(budget["decision"], "allow")
+        self.assertEqual(budget["opaque_items"], 1)
+        self.assertEqual(budget["opaque_risk_tokens"], 257)
+        self.assertEqual(risks[2], {"opaque_count": 1, "risk_tokens": 257,
+                         "basis": "response_output_usage", "source_run_id": "original-run", "source_model_call": 7})
+        measured_projection = deepcopy(request)
+        measured_projection["input"][2]["encrypted_content"] = None
+        self.assertEqual(budget["transparent_tokens"], len(json.dumps(
+            measured_projection, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
         observed = []
         def capture(sent):
             observed.append(json.loads(sent.content))
@@ -74,42 +115,28 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         async with client:
             await responses.send_prepared_response(client, request, purpose="summary")
         self.assertEqual(observed, [request])
-        self.assertEqual(measured[0]["transparent_tokens"], len(json.dumps(
-            observed[0], ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
-        self.assertEqual(unpack_summary_material(observed[0]), original)
+        self.assertEqual(observed[0]["input"], items)
+        self.assertEqual(observed[0]["input"][2]["encrypted_content"], "opaque-do-not-decode-密文")
+        self.assertEqual(risks, original_risks)
+        missing_risk = [None] * len(items)
+        self.assertEqual(check_context_budget(request, missing_risk, summary_budget_settings(SETTINGS, "H"))["decision"], "error")
+        fallback = annotate_context_risks(items, fallback_tokens=SETTINGS.opaque_fallback_tokens,
+                                          run_id="original-run", model_call=7)
+        self.assertEqual(check_context_budget(request, fallback, summary_budget_settings(SETTINGS, "H"))["opaque_risk_tokens"],
+                         SETTINGS.opaque_fallback_tokens)
 
-    def test_source_output_frame_rejects_ambiguous_or_incomplete_slots(self):
-        request = prepare_summary_request(SETTINGS, self.framed_material(), lane="H")
-        for field, value in (("source_index", -1), ("source_index", True), ("source_index", 99),
-                             ("body_index", 0), ("body_index", True), ("body_index", 2)):
-            changed = deepcopy(request)
-            frame = json.loads(changed["input"][0]["content"])
-            frame["tool_outputs"][0][field] = value
-            changed["input"][0]["content"] = json.dumps(frame)
-            with self.subTest(field=field, value=value), self.assertRaises(SummaryError):
-                unpack_summary_material(changed)
-        for defect in ("duplicate", "version", "occupied", "missing", "extra", "role", "body", "duplicate_key"):
-            changed = deepcopy(request)
-            frame = json.loads(changed["input"][0]["content"])
-            if defect == "duplicate":
-                frame["tool_outputs"][1]["source_index"] = 0
-            elif defect == "version":
-                frame["format"] = "unknown"
-            elif defect == "occupied":
-                frame["material"]["sources"][0]["payload"]["item"]["output"] = "occupied"
-            changed["input"][0]["content"] = json.dumps(frame)
-            if defect == "missing":
-                changed["input"].pop()
-            elif defect == "extra":
-                changed["input"].append({"role": "user", "content": "extra"})
-            elif defect == "role":
-                changed["input"][1]["role"] = "assistant"
-            elif defect == "body":
-                changed["input"][1]["content"] = {"text": "wrong type"}
-            elif defect == "duplicate_key":
-                changed["input"][0]["content"] = '{"sources":[],"sources":[]}'
-            with self.subTest(defect=defect), self.assertRaises(SummaryError):
-                unpack_summary_material(changed)
+    def test_native_builder_rejects_incomplete_or_unsupported_protocol_without_repair(self):
+        complete = self.native_history()
+        invalid = [complete[:-1], complete + [deepcopy(complete[3])], complete[3:],
+                   [complete[0], complete[2], complete[2], complete[3]],
+                   [{"role": "system", "content": "fixed instructions are not summary material"}],
+                   [{"type": "vendor_private", "payload": "opaque"}],
+                   [{"role": "user", "content": [{"type": "input_image", "image_url": "https://invalid.test"}]}]]
+        for items in invalid:
+            original = deepcopy(items)
+            with self.subTest(items=items), self.assertRaises(SummaryError):
+                prepare_summary_request(SETTINGS, items, lane="H")
+            self.assertEqual(items, original)
 
     def make_client(self, handler):
         http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -143,7 +170,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         async with client:
             for lane, cap in (("H", 16384), ("R", 8192)):
                 with self.subTest(lane=lane, cap=cap):
-                    request = prepare_summary_request(SETTINGS, MATERIAL, lane=lane)
+                    request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane=lane)
                     measured = deepcopy(request)
                     risks = annotate_context_risks(
                         request["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline-run",
@@ -164,7 +191,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
                     self.assertNotIn("tools", bodies[-1])
                     self.assertTrue(is_summary_request(bodies[-1]))
-                    self.assertEqual(unpack_summary_material(bodies[-1]), MATERIAL)
+                    self.assertEqual(bodies[-1]["input"], NATIVE_INPUT)
                     self.assertEqual(result["usage"]["total_tokens"], 15)
 
             business = prepare_request(
@@ -191,7 +218,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
             }})
 
         client, http = self.make_client(reject)
-        request = prepare_summary_request(SETTINGS, MATERIAL, lane="H")
+        request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane="H")
         async with client:
             with self.assertRaises(responses.ModelError) as raised:
                 await responses.send_prepared_response(client, request, purpose="summary")
@@ -221,11 +248,13 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
     def test_summary_recognition_requires_canonical_dynamic_protocol(self):
         for lane, cap in (("H", 16384), ("R", 8192)):
             for attempt in (1, 2):
-                request = prepare_summary_request(SETTINGS, MATERIAL, lane=lane, attempt_no=attempt)
+                request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane=lane, attempt_no=attempt)
                 self.assertTrue(is_summary_request(request))
+                self.assertIn('"format":"compact_native_v1"', request["instructions"])
                 for change in (
                     {"max_output_tokens": cap + 1}, {"reasoning": {"effort": "low"}},
                     {"max_output_tokens": float(cap)}, {"instructions": SUMMARY_INSTRUCTIONS},
+                    {"instructions": request["instructions"].replace("compact_native_v1", "unknown")},
                     {"tools": [{"type": "function", "name": "unexpected", "parameters": {}}]},
                 ):
                     with self.subTest(lane=lane, attempt=attempt, change=change):

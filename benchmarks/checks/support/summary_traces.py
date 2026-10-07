@@ -59,8 +59,14 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
                           for index, reference, owner in ((0, h_ref, source_run), (2, old_r_ref, source_run), (5, r_ref, run_id))],
     }
     summary_request = prepare_summary_request(
-        SETTINGS, {"sources": [{"source_id": "fixture:0", "role": "user", "kind": "message",
-                                "payload": {"role": "user", "content": BODY}}]},
+        SETTINGS, [
+            {"role": "user", "content": "Summarize confirmed native source records, not a new task."},
+            {"role": "user", "content": BODY},
+            {"type": "reasoning", "id": "reasoning-source", "summary": [], "encrypted_content": BODY + " opaque"},
+            {"type": "function_call", "id": "call-source", "call_id": "source-call", "name": "read_text_file",
+             "arguments": json.dumps({"path": BODY + ".txt"})},
+            {"type": "function_call_output", "call_id": "source-call", "output": BODY + " result"},
+        ],
         lane=lane,
     )
     assert is_summary_request(summary_request) and summary_request["reasoning"] == {"effort": "none"}

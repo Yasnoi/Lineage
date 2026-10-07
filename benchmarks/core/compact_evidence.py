@@ -1,14 +1,17 @@
 """Local Compact evidence from actual requests; no semantic success inference."""
 
 from copy import deepcopy
+import hashlib
 import json
+from pathlib import Path
 
 from benchmarks.core.contracts import known, unknown
 from benchmarks.core.evidence import digest
 from benchmarks.core.files import atomic_write_json
 from lineage_agent.models.budget import check_context_budget
-from lineage_agent.models.summarization import is_summary_request, unpack_summary_material
-from lineage_agent.tools.types import serialize_tool_output
+from lineage_agent.models.summarization import is_summary_request, summary_budget_settings
+from lineage_agent.agent.record_codec import decode_record
+from lineage_agent.agent.records import record_projection
 
 
 HISTORY_CHECKS = (
@@ -18,11 +21,122 @@ HISTORY_CHECKS = (
 )
 
 
-def material(request):
+def summary_context(observer, request):
+    """Metadata captured at the application send boundary, never SDK input."""
+    return deepcopy(getattr(observer, "summary_contexts", {}).get(digest(request), {}))
+
+
+def capture_summary_context(observer, original):
+    async def send(client, request, **kwargs):
+        if kwargs.get("purpose") == "summary":
+            identity = digest(request)
+            contexts = getattr(observer, "summary_contexts", None)
+            if contexts is None:
+                contexts = observer.summary_contexts = {}
+            if identity in contexts:
+                raise ValueError("duplicate summary request identity")
+            contexts[identity] = deepcopy(kwargs.get("summary_metadata") or {})
+        return await original(client, request, **kwargs)
+    return send
+
+
+def _confirmed_records(metadata, selected):
+    """Read only the checkpoint-confirmed byte prefix; never create or heal files."""
+    records = {}
+    paths = {}
+    for entry in selected.get("source_files", []):
+        run_id, path = entry["run_id"], Path(entry["path"])
+        if run_id in paths and paths[run_id] != path:
+            raise ValueError("conflicting original paths")
+        paths[run_id] = path
+    for run_id, path in paths.items():
+        boundary = metadata["snapshot"]["record_files"][run_id]
+        if (boundary.get("format_version") != 1 or type(boundary.get("byte_end")) is not int
+                or boundary["byte_end"] < 0 or type(boundary.get("record_count")) is not int):
+            raise ValueError("invalid original boundary")
+        with path.open("rb") as handle:
+            content = handle.read(boundary["byte_end"])
+        if (len(content) != boundary["byte_end"]
+                or hashlib.sha256(content).hexdigest() != boundary["prefix_sha256"]):
+            raise ValueError("original prefix does not match confirmation")
+        lines = content.splitlines(keepends=True)
+        if len(lines) != boundary["record_count"]:
+            raise ValueError("original count differs")
+        for sequence, line in enumerate(lines):
+            record = decode_record(line)
+            ref = f"history://record/{run_id}/{sequence}"
+            if (not line.endswith(b"\n") or record.get("source_ref") != ref
+                    or record.get("run_id") != run_id or record.get("sequence") != sequence):
+                raise ValueError("original identity differs")
+            records[ref] = record
+    return records
+
+
+def native_binding(observer, request):
+    """Join actual native input to trusted sidecars and immutable original files."""
+    metadata = summary_context(observer, request)
+    result = {"verified": False, "reason": "summary source binding unavailable", "records": [],
+              "input_records": [], "metadata": metadata}
     try:
-        return unpack_summary_material(request)
-    except (KeyError, IndexError, TypeError, ValueError):
-        return {}
+        lane = summary_lane(request)
+        selected = metadata["lanes"][lane]
+        if lane != metadata.get("lane") or selected["summary_request_sha256"] != digest(request):
+            raise ValueError("request lineage differs")
+        sidecar = metadata["summary_input_metadata"]
+        items, refs = request["input"], sidecar["item_refs"]
+        if (not isinstance(refs, list) or len(items) != len(refs)
+                or len(sidecar["context_risks"]) != len(items)):
+            raise ValueError("native sidecar alignment differs")
+        records = _confirmed_records(metadata, selected)
+        seen = set()
+        for item, ref in zip(items, refs, strict=True):
+            if ref is None:
+                continue
+            if ref in seen or ref not in records or records[ref].get("item") != item:
+                raise ValueError("native original differs")
+            seen.add(ref)
+            result["input_records"].append(records[ref])
+        selected_refs = selected.get("source_refs", [])
+        if metadata.get("attempt_no") != 2 and not all(
+                ref in records and (records[ref].get("item") is None or ref in seen) for ref in selected_refs):
+            raise ValueError("selected native original missing")
+        if metadata.get("attempt_no") != 2:
+            expected = [ref for ref in selected_refs if records[ref].get("item") is not None]
+            if [ref for ref in refs if ref in selected_refs] != expected:
+                raise ValueError("selected native order differs")
+        spans = sidecar["derived_spans"]
+        positions = set()
+        for span in spans:
+            index = span["index"]
+            if (type(index) is not int or not 0 <= index < len(items) or index in positions
+                    or refs[index] is not None or type(items[index].get("content")) is not str
+                    or not isinstance(span.get("reference"), dict)
+                    or hashlib.sha256(items[index]["content"].encode("utf-8")).hexdigest() != span["body_sha256"]):
+                raise ValueError("derived body binding differs")
+            positions.add(index)
+        if {index for index, ref in enumerate(refs) if ref is None} != {0, *positions}:
+            raise ValueError("unbound native input")
+        if metadata.get("attempt_no") == 2:
+            candidate = selected["candidate_input"]
+            if (seen or len(spans) != 1 or items[spans[0]["index"]]["content"] != candidate["body"]
+                    or spans[0]["reference"].get("summary_id") != candidate["summary_id"]
+                    or spans[0]["reference"].get("checkpoint_id") != candidate["checkpoint_id"]):
+                raise ValueError("candidate-only retry differs")
+        else:
+            previous = selected.get("previous", [])
+            if [span["reference"] for span in spans] != previous:
+                raise ValueError("previous summary ownership differs")
+        ranges = selected["scope"]["ranges"]
+        for bounds in ranges:
+            if not all(f"history://record/{bounds['run_id']}/{sequence}" in records
+                       for sequence in range(bounds["start"], bounds["end"])):
+                raise ValueError("covered original unavailable")
+        result["records"] = [record for ref, record in records.items() if covered(ref, ranges)]
+        result.update(verified=True, reason="native objects match confirmed files and derived identities")
+    except (KeyError, IndexError, TypeError, ValueError, OSError, UnicodeError):
+        result["records"] = []
+        result["input_records"] = []
+    return result
 
 
 def summary_lane(request):
@@ -59,8 +173,7 @@ def protocol_shape(item):
 
 
 def source_has_text(source, text):
-    payload = source.get("payload")
-    return isinstance(payload, str) and text in payload or text in json.dumps(payload, ensure_ascii=False)
+    return text in record_projection(source)[0]
 
 
 def covered(source_ref, ranges):
@@ -99,8 +212,7 @@ def _pair_sources(requests):
 
 def _matching_recall_pages(reads, targets, text):
     """Validate exact projection offsets, including evidence spanning pages."""
-    originals = {source["source_id"]: (serialize_tool_output(source["payload"])
-                 if isinstance(source["payload"], dict) else source["payload"]) for source in targets}
+    originals = {source["source_ref"]: record_projection(source)[0] for source in targets}
     spans = {}
     for call, output in reads:
         ref = (_json(call.get("arguments")) or {}).get("source_ref")
@@ -129,11 +241,11 @@ def _matching_recall_pages(reads, targets, text):
 def history_coverage(observer, states, mechanism):
     requests = [item for turn in sorted(observer.requests) for item in observer.requests[turn]]
     summaries = [request for request in requests if is_summary_request(request)]
-    r_sources = [source for request in summaries if summary_lane(request) == "R"
-                 for source in material(request).get("sources", [])]
+    bindings = [native_binding(observer, request) for request in summaries if summary_lane(request) == "R"]
+    r_sources = [source for binding in bindings if binding["verified"] for source in binding["records"]]
     targets = [source for source in r_sources if source_has_text(source, mechanism["target_path"])
                and source_has_text(source, mechanism["source_text"])]
-    target_refs = {source.get("source_id") for source in targets}
+    target_refs = {source.get("source_ref") for source in targets}
     events = [event for state in states for event in state.get("compaction_events", [])]
     # Candidate events alone cannot prove activation; only the confirmed use does.
     used = [event for event in events if event.get("status") == "used"]
@@ -214,6 +326,27 @@ def turn_compact_evidence(observer, state, turn, settings):
                                                for name, items in recalls.items()})}
     metrics["compact_attempts"] = known(len({(event.get("request_no"), event.get("attempt_no")) for event in events}))
     metrics["compact_successes"] = known(sum(event.get("status") == "used" for event in events))
+    native = []
+    for request in summaries:
+        binding = native_binding(observer, request)
+        metadata = binding["metadata"]
+        sidecar = metadata.get("summary_input_metadata", {})
+        lane = summary_lane(request)
+        measured = check_context_budget(request, sidecar.get("context_risks", []),
+                                        summary_budget_settings(settings, lane))
+        saved_budget = metadata.get("lanes", {}).get(lane, {}).get("summary_budget", {})
+        budget_fields = ("decision", "required_tokens", "transparent_tokens", "opaque_items",
+                         "opaque_risk_tokens", "output_reserve_tokens", "safety_margin_tokens", "limit_tokens")
+        native.append({"lane": lane, "request_sha256": digest(request), "input": deepcopy(request["input"]),
+                       "instructions": request.get("instructions"),
+                       "summary_input_metadata": sidecar,
+                       "source_binding": {key: value for key, value in binding.items()
+                                          if key not in {"records", "input_records", "metadata"}},
+                       "source_metadata": {key: metadata.get(key) for key in
+                                           ("snapshot", "lanes", "request_no", "attempt_no")},
+                       "summary_budget": measured,
+                       "budget_matches_preflight": all(measured.get(key) == saved_budget.get(key)
+                                                       for key in budget_fields)})
     if business:
         # Isolate the actual schema overhead. The previous Run can contain opaque
         # reasoning whose admission risks are not part of this transport observer.
@@ -232,8 +365,7 @@ def turn_compact_evidence(observer, state, turn, settings):
         "business_protocol_shapes": [
             {"request_id": entry.get("request_id"), "output": [protocol_shape(item) for item in entry["output"]]}
             for entry in observer.response_outputs if entry["turn"] == turn and entry["purpose"] == "business"],
-        "summary_requests": [{"lane": summary_lane(request), "request_sha256": digest(request),
-                              "material": material(request)} for request in summaries],
+        "summary_requests": native,
         "summary_outputs": [entry for entry in observer.response_outputs if entry["turn"] == turn and entry["purpose"] == "summary"],
         "recalls": {name: [{"call": call, "output": output,
                             "evidence_source": pair_sources.get(call["call_id"], "final_state_input")}

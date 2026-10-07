@@ -14,7 +14,7 @@ from lineage_agent.agent.context import ContextRecords, json_bytes
 from lineage_agent.agent.record_journal import JournalError
 from lineage_agent.agent.state import AgentState
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
-from lineage_agent.models.responses import ModelError
+from lineage_agent.models.responses import ModelError, compactable_group_items
 from lineage_agent.models.summarization import (
     SummaryError, parse_summary, prepare_summary_request, summary_budget_settings,
 )
@@ -231,13 +231,27 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             return finish(state, {"compaction": compaction}, "summarize_" + lane, step_id)
         try:
             if compaction["attempt_no"] == 2:
-                material = {"candidate_input": selected["candidate_input"], "sources": [],
-                            "coverage_readonly": deepcopy(selected["scope"]["ranges"])}
+                candidate = selected["candidate_input"]
+                material = {
+                    "input": [
+                        {"role": "user", "content": (
+                            f"精简本次 {lane} 候选摘要。它尚未启用；覆盖范围和归属不变。"
+                            "下文仅为第一份候选正文，不含原始历史；保留重要条件、失败、修正和不确定性。")},
+                        {"role": "assistant", "content": candidate["body"]},
+                    ],
+                    "context_risks": [None, None], "item_refs": [None, None],
+                    "derived_spans": [{"index": 1, "lane": lane, "run_id": state["run_id"],
+                        "summary_id": candidate["summary_id"],
+                        "reference": {key: candidate[key] for key in ("summary_id", "checkpoint_id")},
+                        "body_sha256": sha256(candidate["body"].encode("utf-8")).hexdigest()}],
+                }
             else:
                 material = await records.material(compaction, lane, state)
-            request = prepare_summary_request(settings, material, lane=lane, attempt_no=compaction["attempt_no"])
-            risks = annotate_context_risks(request["input"], fallback_tokens=settings.opaque_fallback_tokens,
-                                           run_id=state["run_id"])
+            if (not compactable_group_items(material["input"], require_response=False)
+                    or validate_input(material["input"]) is not None):
+                return stop(state, compaction, "unsupported_protocol_boundary")
+            request = prepare_summary_request(settings, material["input"], lane=lane, attempt_no=compaction["attempt_no"])
+            risks = material["context_risks"]
             budget = check_context_budget(request, risks, summary_budget_settings(settings, lane), step_id=step_id)
             selected["summary_request_sha256"] = sha256(json.dumps(
                 request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
@@ -264,7 +278,10 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         failure = None
         try:
             result = await call_summary(request, {**compaction, "lane": lane,
-                                                "source_bytes": json_bytes(material)})
+                "source_bytes": json_bytes(request["input"]),
+                # This provenance is application metadata, never SDK request input.
+                "summary_input_metadata": {key: deepcopy(material[key]) for key in (
+                    "context_risks", "derived_spans", "item_refs")}})
         except ModelError as exc:
             result, failure = exc.result, "summary_model_error"
         except Exception:

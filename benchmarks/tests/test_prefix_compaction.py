@@ -15,26 +15,12 @@ from benchmarks.checks.support.runtime import LocalClient, TOOL, call, message, 
 from lineage_agent.agent import runtime
 from lineage_agent.agent.checkpointing import SessionCheckpointer
 from lineage_agent.agent.context import ContextRecords, json_bytes
-from lineage_agent.agent.records import record_projection
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.budget import annotate_context_risks, check_context_budget
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import is_summary_request, summary_request_lane, unpack_summary_material
+from lineage_agent.models.summarization import is_summary_request, summary_request_lane
 from lineage_agent.tools.types import ToolExecutionError
-
-
-def _ids(value):
-    result = []
-    if isinstance(value, dict):
-        if isinstance(value.get("source_id"), str):
-            result.append(value["source_id"])
-        for child in value.values():
-            result.extend(_ids(child))
-    elif isinstance(value, list):
-        for child in value:
-            result.extend(_ids(child))
-    return list(dict.fromkeys(result))
 
 
 def _summary(request, text="Earlier tool observations are available through history recall."):
@@ -102,18 +88,17 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         async def audit_material(records, compaction, lane, state):
             material = await original_material(records, compaction, lane, state)
             self.assertNotIn("allowed_source_ids", material)
-            expected = []
-            for ref in compaction["lanes"][lane]["source_refs"]:
-                record = await records.store.get(ref, checkpoint_id=compaction["snapshot"]["source_checkpoint_id"])
-                projection, opaque = record_projection(record)
-                expected.append({"source_id": ref, "kind": record["kind"], "group_id": record.get("group_id"),
-                                 "payload": json.loads(projection), "opaque_omitted": opaque})
-            self.assertEqual(material["sources"], expected)
+            self.assertEqual(len(material["input"]), len(material["item_refs"]))
+            for item, ref in zip(material["input"], material["item_refs"], strict=True):
+                if ref is not None:
+                    record = await records.store.get(ref, checkpoint_id=compaction["snapshot"]["source_checkpoint_id"])
+                    self.assertEqual(item, record["item"])
+            self.assertNotIn("sources", material)
             materials.append(deepcopy(material))
             return material
         with patch.object(ContextRecords, "material", new=audit_material):
             state, client = await self.standalone()
-        self.assertEqual([unpack_summary_material(request) for request in client.summary_requests], materials)
+        self.assertEqual([request["input"] for request in client.summary_requests], [material["input"] for material in materials])
         self.assert_complete(state)
         self.assertGreater(state["summary_calls"], 0)
         self.assertEqual(state["model_calls"], 11)
@@ -130,13 +115,11 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             if not is_summary_request(request):
                 business_count += 1
                 continue
-            material = unpack_summary_material(request)
-            source_calls = [(source["payload"].get("item") or {}).get("call_id")
-                            for source in material.get("sources", []) if isinstance(source.get("payload"), dict)]
+            source_calls = [item["call_id"] for item in request["input"] if item.get("type") == "function_call"]
             self.assertTrue(source_calls)
             for index in range(business_count - 3, business_count):
                 self.assertNotIn(f"c{index}", source_calls)
-            self.assertEqual(material["current_request_readonly"], [original])
+            self.assertIn(original, request["input"])
         self.assertTrue(all(event.get("session_id") is None for event in read_events(state)))
         self.assertGreaterEqual(len(client.summary_requests), 2)
         self.assertEqual(len([span for span in state["active_context"]["summary_spans"] if span["lane"] == "R"]), 1)
@@ -192,10 +175,12 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lanes[:2], ["H", "R"])
             self.assertIsNotNone(turn.state["active_context"]["history_summary"])
             self.assertTrue(any(span["lane"] == "R" for span in turn.state["active_context"]["summary_spans"]))
-            history = unpack_summary_material(client.summary_requests[0])
-            current = unpack_summary_material(client.summary_requests[1])
-            self.assertTrue(all(old.state["run_id"] in ref for ref in _ids(history)))
-            self.assertTrue(all(turn.state["run_id"] in ref for ref in _ids(current)))
+            history = client.summary_requests[0]["input"]
+            current = client.summary_requests[1]["input"]
+            self.assertIn(old.state["input"][0], history)
+            self.assertNotIn(old.state["input"][0], current)
+            self.assertIn({"role": "user", "content": "current task; preserve 17 and do not write"}, current)
+            self.assertFalse(any(item.get("type") == "function_call" for item in history))
             self.assertEqual(turn.state["summary_calls"], len(client.summary_requests))
 
     async def test_h_success_r_failure_keeps_both_original_views(self):
@@ -232,11 +217,11 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
                 turn = await manager.run_turn(sid, "current task")
             self.assert_complete(turn.state)
             historical = next(request for request in client.summary_requests if summary_request_lane(request) == "H")
-            material = unpack_summary_material(historical)
-            outcomes = [source["payload"]["outcome"] for source in material["sources"] if source["kind"] == "outcome"]
-            self.assertEqual(len(outcomes), 1)
-            self.assertEqual(outcomes[0]["stop_reason"], "error")
-            self.assertEqual(outcomes[0]["tool_outcomes"]["succeeded"], 0)
+            note = historical["input"][0]["content"]
+            self.assertIn(old.state["run_id"], note)
+            self.assertIn("error", note)
+            self.assertIn("model_error", note)
+            self.assertFalse(any(item.get("type") == "function_call_output" for item in historical["input"]))
 
     async def test_current_protection_never_preserves_historical_turns(self):
         with SessionManager() as manager:
@@ -313,11 +298,11 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assert_complete(state)
         self.assertEqual(len(requests), 2)
         self.assertEqual(state["compaction"]["attempt_no"], 2)
-        first = unpack_summary_material(requests[0])
-        second = unpack_summary_material(requests[1])
-        self.assertTrue(any("payload" in item for item in first["sources"]))
-        self.assertIn("candidate_input", second)
-        self.assertFalse(any("payload" in item for item in second["sources"]))
+        first, second = requests[0]["input"], requests[1]["input"]
+        self.assertTrue(any(item.get("type") == "function_call_output" for item in first))
+        self.assertEqual(len(second), 2)
+        self.assertEqual(second[1], {"role": "assistant", "content": "L" * 11000})
+        self.assertFalse(any(item.get("type") == "function_call_output" for item in second))
         self.assertNotIn("omitted-detail=37", json.dumps(second))
         self.assertEqual(state["summary_calls"], 2)
         self.assertEqual(self.executed, [f"c{index}" for index in range(6)])
@@ -373,9 +358,9 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(turn.state["summary_calls"], 4)
             self.assertEqual(turn.state["compaction"]["attempt_no"], 2)
             for request in requests[2:]:
-                material = unpack_summary_material(request)
-                self.assertIn("candidate_input", material)
-                self.assertTrue(all("payload" not in source for source in material["sources"]))
+                self.assertEqual(len(request["input"]), 2)
+                self.assertEqual(request["input"][1], {"role": "assistant", "content": "L" * 11000})
+                self.assertNotIn("omitted-detail=37", json.dumps(request["input"]))
 
     async def test_second_oversized_candidate_stops_without_reinitializing_attempts(self):
         state, client = await self.standalone(count=6, summary=lambda request: _summary(request, "L" * 11000))
@@ -460,12 +445,12 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             outputs = {item["call_id"] for item in request["input"] if item.get("type") == "function_call_output"}
             for index in range(6):
                 self.assertEqual(f"g{index}a" in outputs, f"g{index}b" in outputs)
-        material = unpack_summary_material(client.summary_requests[0])
-        originals = [source["payload"] for source in material["sources"]]
-        outputs = {record["item"]["call_id"] for record in originals if record["item"].get("type") == "function_call_output"}
+        originals = client.summary_requests[0]["input"]
+        outputs = {item["call_id"] for item in originals if item.get("type") == "function_call_output"}
         self.assertIn("g0a", outputs)
         self.assertIn("g0b", outputs)
-        self.assertTrue(any((record.get("execution") or {}).get("outcome") == "failed" for record in originals))
+        self.assertIn("failed", originals[0]["content"])
+        self.assertIn("g0b", originals[0]["content"])
 
     async def test_unclosed_multi_tool_group_is_excluded_from_confirmed_prefix_selection(self):
         self.settings = replace(self.settings, context_budget_tokens=100000)
@@ -517,15 +502,19 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(json_bytes(_message("H", history, history["body"])), 0)
             self.assertNotIn("target_bytes", current)
             self.assertNotIn("recovery_budget", candidate)
-            self.assertTrue(all("history_background_readonly" not in unpack_summary_material(request)
-                                for request in client.summary_requests))
+            for request in client.summary_requests:
+                if summary_request_lane(request) == "R":
+                    self.assertNotIn("historical source", json.dumps(request["input"]))
 
     async def test_actual_summary_request_larger_than_window_is_not_sent(self):
+        # A fixed lane output reserve alone can make the native request exceed W;
+        # business requests keep their smaller output cap.
+        self.settings = replace(self.settings, summary_history_max_output_tokens=24000)
         with SessionManager() as manager:
             sid = manager.create_session(self.settings, tools=[TOOL], execute_tool=self.tool)
             for index in range(4):
-                # Transparent text fits business requests but its nested JSON
-                # projection needs substantially more escaping in a summary.
+                # Keep genuine quoted source text; no old wrapping overhead is
+                # needed to exercise the real summary preflight boundary.
                 client = _Client([response(message('\\"' * 3000 if index == 0 else "short historical response"))])
                 with patch.object(runtime, "create_client", return_value=client):
                     turn = await manager.run_turn(sid, f"old task {index}")

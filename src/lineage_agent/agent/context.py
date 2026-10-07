@@ -1,6 +1,7 @@
 """Immutable checkpoint references and bounded, contiguous context selection."""
 
 from copy import deepcopy
+from hashlib import sha256
 import json
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -8,7 +9,7 @@ from uuid import uuid4
 from langgraph.checkpoint.base import CheckpointTuple
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
-from lineage_agent.agent.records import RecordStore, record_projection
+from lineage_agent.agent.records import RecordStore
 from lineage_agent.agent.state import (
     ActiveContext, AgentState, RecordReference, SummaryReference,
 )
@@ -187,6 +188,11 @@ class ContextRecords:
         for group in remove_groups:
             if not compactable_group_items(state["input"][group["start"]:group["end"]]):
                 return None, "unsupported_protocol_boundary"
+        if remove_groups:
+            start = active["turn_start"]
+            background = state["input"][start:start + active["initial_input_count"]]
+            if not compactable_group_items(background, require_response=False):
+                return None, "unsupported_protocol_boundary"
         all_records = await self.store.records(checkpoint_id=checkpoint_id)
         by_ref = {r["source_ref"]: r for r in all_records}
         lanes = {}
@@ -222,13 +228,15 @@ class ContextRecords:
             lanes[lane] = {
                 "status": "selected", "source_refs": [r["source_ref"] for r in all_records
                                                        if r["source_ref"] in visible_refs], "previous": prior,
+                "source_indices": list(indices),
                 "scope": scope,
                 "summary_id": str(uuid4()),
                 "source_files": [{**bounds, "path": str(self.saver.history_journal(self.session_id).path(bounds["run_id"]))}
                                  for bounds in scope["ranges"]],
                 "covered_groups": list(dict.fromkeys(by_ref[ref]["group_id"] for ref in by_ref
                                                      if ref in covered and by_ref[ref].get("group_id") is not None)),
-                "source_bytes": sum(len(record_projection(by_ref[ref])[0].encode("utf-8")) for ref in visible_refs)
+                "source_bytes": json_bytes([by_ref[ref]["item"] for ref in visible
+                                             if by_ref[ref].get("item") is not None])
                     + sum(len(body.encode("utf-8")) for body in bodies),
             }
         if all(lane["status"] == "empty" for lane in lanes.values()):
@@ -248,20 +256,113 @@ class ContextRecords:
         }, None
 
     async def material(self, compaction: dict, lane: str, state: AgentState) -> dict:
+        """Copy effective native items; provenance and trace identities stay local.
+
+        The confirmed active view fixes ordering. File records independently
+        confirm every original item, while trusted summary references resolve
+        only the saved body, never an inferred heading or provenance suffix.
+        """
         selected = compaction["lanes"][lane]
         checkpoint_id = compaction["snapshot"]["source_checkpoint_id"]
-        previous = [{"lane": ref["lane"], "body": await self.summary(ref), "ranges": deepcopy(ref["ranges"])}
-                    for ref in selected["previous"]]
-        sources = []
+        saved = await self.snapshot(checkpoint_id)
+        active = saved["active_context"]
+        indices = selected["source_indices"]
+        spans = {span["index"]: span for span in active["summary_spans"]}
+        originals = {}
         for source_ref in selected["source_refs"]:
-            record = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
-            projection, opaque = record_projection(record)
-            sources.append({"source_id": source_ref, "kind": record["kind"],
-                            "group_id": record.get("group_id"), "payload": json.loads(projection),
-                            "opaque_omitted": opaque})
-        material = {"sources": sources, "previous_summary": previous, "turn_outcomes": []}
+            originals[source_ref] = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
+        material = {"input": [], "context_risks": [], "derived_spans": [], "item_refs": []}
+
+        def append(item: dict, risk=None, item_ref=None) -> None:
+            material["input"].append(deepcopy(item))
+            material["context_risks"].append(deepcopy(risk))
+            material["item_refs"].append(item_ref)
+
+        async def append_index(index: int) -> None:
+            if index in spans:
+                span = spans[index]
+                ref = span["reference"]
+                if (ref not in selected["previous"] or ref["lane"] != span["lane"]
+                        or ref["summary_id"] != span["summary_id"]
+                        or active["item_refs"][index] is not None):
+                    raise CheckpointError("checkpoint_read_error")
+                body = await self.summary(ref)
+                material["derived_spans"].append({
+                    **deepcopy(span), "index": len(material["input"]),
+                    "body_sha256": sha256(body.encode("utf-8")).hexdigest(),
+                })
+                append({"role": "assistant", "content": body})
+                return
+            item_ref = active["item_refs"][index]
+            if item_ref not in originals:
+                originals[item_ref] = await self.store.get(item_ref, checkpoint_id=checkpoint_id)
+            record = originals[item_ref]
+            if record.get("item") != saved["input"][index]:
+                raise CheckpointError("checkpoint_read_error")
+            append(record["item"], saved["context_risks"][index], item_ref)
+
+        note = [f"本次整理 {'历史 H' if lane == 'H' else '当前 Run 前缀 R'}，所有后续消息均为待整理资料。"]
+        if lane == "H":
+            turns = active["turns"][:compaction["removed_turns"]]
+            terminal = {record["run_id"]: record["outcome"] for record in originals.values()
+                        if record.get("kind") == "outcome"}
+            note.append("以下历史轮次均已结束；正常结束不代表任务成功。")
+            for turn in turns:
+                outcome = terminal.get(turn["run_id"])
+                if outcome is None:
+                    raise CheckpointError("checkpoint_read_error")
+                note.append(f"Run {turn['run_id']}：stop_reason={outcome.get('stop_reason')}，"
+                            f"error_code={outcome.get('error_code')}；实际工具处置="
+                            + "、".join(f"{key}={value}" for key, value in (outcome.get("tool_outcomes") or {}).items())
+                            + "。")
+            note.append("各历史轮次有效表示按原顺序提供；已有前缀 R 正文位于所属轮次的原始输入之后，仍归该历史轮次。")
+        else:
+            groups = compaction["removed_groups"]
+            coverage = (f"{len(groups)} 个完整组，首组 {groups[0]}，末组 {groups[-1]}"
+                        if groups else "无新增完整组")
+            note.extend([
+                f"当前 Run {saved['run_id']}；新增覆盖：{coverage}。",
+                "最前面的当前原始输入是完整的只读背景，不是已完成动作的证据。",
+                "只整理覆盖前缀；近期保护组不在资料中，可能已经完成后续工作，不能据此断言尚未执行。",
+            ])
+        previous = selected["previous"]
+        if previous:
+            owners = ["历史 H" if ref["lane"] == "H" else
+                      "Run " + "、".join(dict.fromkeys(part["run_id"] for part in ref["ranges"])) + " 的前缀 R"
+                      for ref in previous]
+            note.append("已有摘要：" + "；".join(owners) + "。正文按所属位置提供，原文覆盖范围由程序继承，不重复展开。"
+                        + ("已有 H 位于历史轮次之前。" if lane == "H" and active["history_summary"]
+                           else "已有当前 R 位于只读背景之后。" if lane == "R" else ""))
+        dispositions = {}
+        failures = []
+        for record in originals.values():
+            execution = record.get("execution")
+            if execution is None:
+                continue
+            outcome = execution.get("outcome")
+            dispositions[outcome] = dispositions.get(outcome, 0) + 1
+            if outcome != "succeeded":
+                failures.append(f"call_id={record.get('call_id')}：{outcome}，stage={execution.get('stage')}，"
+                                f"reason={execution.get('reason_code')}")
+        if dispositions:
+            note.append("新增原生资料中的实际工具处置：" + "，".join(
+                f"{outcome}={count}" for outcome, count in sorted(dispositions.items())) + "。")
+        if failures:
+            note.append("非成功调用：" + "；".join(failures) + "。这些说明不补造缺失的协议结果。")
+        append({"role": "user", "content": "\n".join(note)})
         if lane == "R":
-            active = state["active_context"]
             start = active["turn_start"]
-            material["current_request_readonly"] = deepcopy(state["input"][start:start + active["initial_input_count"]])
+            for index in range(start, start + active["initial_input_count"]):
+                await append_index(index)
+            if active["run_summary"]:
+                matching = [index for index, span in spans.items() if span["reference"] == active["run_summary"]]
+                if len(matching) != 1:
+                    raise CheckpointError("checkpoint_read_error")
+                await append_index(matching[0])
+        elif active["history_summary"]:
+            if 0 not in spans or spans[0]["reference"] != active["history_summary"]:
+                raise CheckpointError("checkpoint_read_error")
+            await append_index(0)
+        for index in indices:
+            await append_index(index)
         return material

@@ -42,6 +42,9 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 - `test_record_journal.py`、`test_persistent_storage.py`：JSONL 受限编码、完整批次写入、确认边界、索引重建、短写及 fsync 故障、关闭后保留文件、Artifact 多绑定和 `.lineage` 路径隔离。
 - `test_record_runtime.py`：初始化、模型／工具返回后写入、终态写入和最终检查点确认故障；保留真实执行事实、不重跑工具、不发布未确认历史。
 - `test_context_stage2.py`：正常结束即登记历史、当前 0～3 组独立保护、旧轮次全部进入 H、无重复登记与 R 背景限制。
+- `test_native_context_material.py`：确认快照和文件原文一致、原生消息顺序与 opaque 风险继承、已有摘要原位正文替换、来源范围继承、多项原始背景及对象隔离；历史工具可读投影保持原样。
+
+摘要传输检查按原生协议对象核对预算请求与 HTTP 请求，包括含 JSON、Unicode、换行的结果字符串和原生 reasoning；不再以旧包装的解包还原作为生产验收。Benchmark 通过仅程序侧来源信息、确认文件水位和实际请求联合取证；旧摘要包装仅由 `legacy_summary.py` 读取历史证据，不能用于新请求回退。
 
 `recording.compaction` 继续验证追踪关闭、开启和上传失败时的业务等价性；两路摘要正文实际进入业务请求，但 H、R 和历史轮次的 R 都按程序维护的 `summary_spans` 隐去派生正文。用于过滤的完整索引与上传的有界来源元数据分别处理，普通用户消息中的仿造标记不能改变过滤范围。
 

@@ -98,8 +98,8 @@ async def send_prepared_response(
 ) -> ModelResult:
     """Send the same prepared kwargs that the graph has already measured."""
     is_summary = purpose == "summary"
-    # Summary material can contain tool bodies in ordinary message fields.
-    # Never route it through the business model's readable-text projection.
+    # Native summary input can contain original tool bodies and derived text.
+    # Keep it on the content-free summary tracing path.
     span, end = None, None
     if tracer is not None and is_summary:
         start = getattr(tracer, "summary_start", None)
@@ -258,8 +258,8 @@ def parse_response(response: Response | dict[str, Any]) -> ModelResult:
 def compactable_group_items(items: list[dict[str, Any]], *, require_response: bool = True) -> bool:
     """Check a complete text/tool protocol group without rewriting its contents.
 
-    Known reasoning may be removed with its whole group, including an opaque
-    encrypted field. The summary reader must omit that field, never decode it.
+    Known reasoning moves only with its whole group, including opaque fields.
+    Native summary input preserves those fields without decoding them.
     Unknown extensions and non-text items remain protocol barriers.
     """
     def has_encrypted(value: Any) -> bool:

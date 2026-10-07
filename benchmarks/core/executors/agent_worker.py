@@ -18,7 +18,10 @@ from benchmarks.core.contracts import known, not_applicable, unknown
 from benchmarks.core.budgets import RequestBudget, WorkerAbort
 from benchmarks.core.configuration import RETIRED_COMPACT_KEYS
 from benchmarks.core.evidence import ObservedTools, Observer, digest
-from benchmarks.core.compact_evidence import HISTORY_CHECKS, history_coverage, material, source_has_text, summary_lane, turn_compact_evidence
+from benchmarks.core.compact_evidence import (
+    HISTORY_CHECKS, capture_summary_context, history_coverage, native_binding, summary_context,
+    summary_lane, turn_compact_evidence,
+)
 from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
@@ -192,16 +195,18 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
         except (KeyError, TypeError):
             lineage_valid = False
         seen.add(identity)
+        binding = native_binding(observer, summary_requests[index])
+        lineage_valid = lineage_valid and binding["verified"]
         if entry.get("attempt_no") == 2:
             previous = prior_lanes.get(lane, {})
-            retry = material(summary_requests[index])
-            candidate = retry.get("candidate_input", {})
+            observed = summary_context(observer, summary_requests[index])
+            candidate = observed.get("lanes", {}).get(lane, {}).get("candidate_input", {})
             lineage_valid = lineage_valid and bool(previous) and (
                 candidate.get("body") == previous.get("body")
                 and candidate.get("summary_id") == previous.get("summary_id")
                 and candidate.get("checkpoint_id")
                 and candidate == value.get("candidate_input")
-                and all("payload" not in item for item in retry.get("sources", [])))
+                and not binding["input_records"])
         prior_lanes[lane] = value
     ref = active.get("history_summary") or {}
     last_h = compaction.get("lanes", {}).get("H", {})
@@ -209,11 +214,11 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
         lineage_valid and compaction.get("status") == "used" and compaction.get("confirmed_checkpoint_id")
         and ref.get("summary_id") == last_h.get("summary_id") and ref.get("checkpoint_id")
         and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
-    source_items = [source for request in summary_requests if summary_lane(request) == "H"
-                    for source in material(request).get("sources", []) if "payload" in source]
+    bindings = [native_binding(observer, request) for request in summary_requests if summary_lane(request) == "H"]
+    source_items = [source for binding in bindings if binding["verified"] for source in binding["input_records"]]
     prior_runs = {state.get("run_id") for state in states[:pressure_turn - 1] if state.get("run_id")}
     proofs["all_prior_turns_selected"] = bool(prior_runs) and all(
-        any(str(source.get("source_id", "")).startswith(f"history://record/{run_id}/") for source in source_items)
+        any(source.get("run_id") == run_id for source in source_items)
         for run_id in prior_runs)
     proofs["pressure_has_no_current_summary"] = bool(summary_requests) and all(
         summary_lane(request) == "H" for request in summary_requests)
@@ -224,18 +229,11 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
                 (state.get("active_context") or {}).get("turns", []))
         for state in states[:pressure_turn - 1])
     first_run = states[source_turn - 1].get("run_id") if len(states) >= source_turn else None
-    selected = [source for source in source_items if str(source.get("source_id", "")).startswith(f"history://record/{first_run}/")]
+    selected = [source for source in source_items if source.get("run_id") == first_run]
     admitted = (old_record or {}).get("admitted_input", [])
     old_tools = [item for item in admitted if item.get("type") == "function_call_output"]
     def original_selected(item):
-        for source in selected:
-            try:
-                payload = source["payload"]
-                if (json.loads(payload) if isinstance(payload, str) else payload)["item"] == item:
-                    return True
-            except (KeyError, TypeError, ValueError):
-                pass
-        return False
+        return any(source.get("item") == item for source in selected)
     proofs["old_record_selected"] = bool(old_tools) and all(original_selected(item) for item in old_tools)
     old_user_items = [item for item in admitted if item.get("role") == "user"]
     proofs["old_user_requirements_selected"] = bool(old_user_items) and all(original_selected(item) for item in old_user_items)
@@ -268,7 +266,7 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
         and event.get("bytes_read") == mechanism["background_bytes"] for event in observer.tool_events)
     process = evidence(observer.output_dir / "mechanism.json", "mechanism", "in-memory actual SDK comparisons")
     atomic_write_json(observer.output_dir / "mechanism.json", {
-        "checks": proofs, "first_run_id": first_run, "summary_source_ids": [item.get("source_id") for item in selected],
+        "checks": proofs, "first_run_id": first_run, "summary_source_ids": [item.get("source_ref") for item in selected],
         "old_tool_item_sha256": [digest(item) for item in old_tools],
         "summary_request_sha256": [digest(item) for item in summary_requests],
         "following_request_sha256": [digest(item) for item in following],
@@ -348,7 +346,9 @@ async def execute_sample(spec: dict, spec_sha256: str) -> tuple[dict, int]:
         if multiple:
             manager = SessionManager()
             sid = manager.create_session(settings, tools=TOOL_DEFINITIONS, execute_tool=executor)
-        with patch.object(runtime, "create_client", side_effect=observer.client_factory(runtime.create_client)):
+        with patch.object(runtime, "create_client", side_effect=observer.client_factory(runtime.create_client)), \
+                patch.object(runtime, "send_prepared_response",
+                             side_effect=capture_summary_context(observer, runtime.send_prepared_response)):
             for index, original_prompt in enumerate(spec["prompts"], 1):
                 observer.turn = index
                 current = result["turns"][index - 1]

@@ -16,7 +16,7 @@ from openai import APIStatusError
 from benchmarks.core.budgets import BudgetRecordError, RequestBudget, WorkerAbort, read_ledger
 from benchmarks.core.evidence import ObservedTools, Observer, digest
 from benchmarks.core.executors import agent_worker as worker
-from lineage_agent.models.summarization import is_summary_request, unpack_summary_material
+from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.recording import tracing
 from lineage_agent.tools.filesystem.executor import create_filesystem_executor
 from lineage_agent.tools.types import ToolArgumentError
@@ -444,8 +444,7 @@ class ResearchWorkerTests(unittest.TestCase):
         def respond(kwargs):
             nonlocal business_count
             if is_summary_request(kwargs):
-                material = unpack_summary_material(kwargs)
-                summaries.append(material)
+                summaries.append(deepcopy(kwargs))
                 text = "x" * 20000 if second_pass and len(summaries) == 1 else "signature fact"
                 return message(text)
             business_count += 1
@@ -478,9 +477,9 @@ class ResearchWorkerTests(unittest.TestCase):
             self.assertEqual(pressure["max_padding_bytes"], 32768)
             self.assertFalse(pressure["capped"])
         if second_pass:
-            self.assertEqual(summaries[1]["candidate_input"]["body"], "x" * 20000)
-            self.assertNotIn("previous_summary", summaries[1])
-            self.assertTrue(all("payload" not in item for item in summaries[1]["sources"]))
+            self.assertEqual(summaries[1]["input"][1], {"role": "assistant", "content": "x" * 20000})
+            self.assertEqual(len(summaries[1]["input"]), 2)
+            self.assertNotIn("signature fact", json.dumps(summaries[1]["input"]))
             args = list(coverage_spy.call_args.args)
             original_record = deepcopy(args[-1])
             for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("body", "foreign")):

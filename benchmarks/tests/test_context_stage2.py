@@ -10,7 +10,7 @@ from benchmarks.tests import test_prefix_compaction as fixtures
 from lineage_agent.agent import compaction, graph, runtime
 from lineage_agent.agent.context import ContextRecords
 from lineage_agent.agent.sessions import SessionManager
-from lineage_agent.models.summarization import summary_request_lane, unpack_summary_material
+from lineage_agent.models.summarization import summary_request_lane
 
 
 class ContextStage2Tests(unittest.IsolatedAsyncioTestCase):
@@ -141,14 +141,14 @@ class ContextStage2Tests(unittest.IsolatedAsyncioTestCase):
             requests = [request for request in client.summary_requests if summary_request_lane(request) == "R"]
             self.assertGreaterEqual(len(requests), 2)
             for request in requests:
-                material = unpack_summary_material(request)
-                self.assertNotIn("history_background_readonly", material)
-                self.assertNotIn("H_RAW_STAGE2", json.dumps(material))
-                self.assertNotIn("H_DERIVED_STAGE2", json.dumps(material))
-                self.assertEqual(material["current_request_readonly"], [{"role": "user", "content": prompt}])
-                self.assertTrue(all(item["lane"] == "R" for item in material["previous_summary"]))
-                self.assertTrue(all(source["source_id"].startswith(f"history://record/{current.state['run_id']}/")
-                                    for source in material["sources"]))
+                items = request["input"]
+                self.assertNotIn("H_RAW_STAGE2", json.dumps(items))
+                self.assertNotIn("H_DERIVED_STAGE2", json.dumps(items))
+                self.assertIn({"role": "user", "content": prompt}, items)
+                self.assertNotIn(old.state["run_id"], items[0]["content"])
+                self.assertTrue(all(item.get("content") == "R_STAGE2截至覆盖范围"
+                                    for item in items if item.get("role") == "assistant"))
+
 
 
 if __name__ == "__main__":

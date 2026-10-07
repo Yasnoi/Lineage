@@ -7,10 +7,14 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
-from benchmarks.core.compact_evidence import covered, history_coverage, turn_compact_evidence
+from benchmarks.core.compact_evidence import covered, history_coverage, native_binding, turn_compact_evidence
+from benchmarks.core.evidence import digest
+from lineage_agent.agent.record_journal import RecordJournal
+from lineage_agent.agent.records import make_record_batch, record_projection
 from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
-from lineage_agent.models.summarization import prepare_summary_request, unpack_summary_material
+from lineage_agent.models.summarization import prepare_summary_request, summary_budget_settings
+from lineage_agent.models.budget import check_context_budget
 from lineage_agent.tools.types import inline_tool_output, serialize_tool_output
 
 
@@ -31,10 +35,14 @@ class CompactEvidenceTests(unittest.TestCase):
         self.path = "evaluation-fixtures/02.txt"
         self.text = "额度37，不得自动放行；修正旧额度137。"
         self.original = pair("read_text_file", "file-2", {"path": self.path}, {"path": self.path, "content": self.text})
-        self.summary = prepare_summary_request(self.settings, {"sources": [
-            {"source_id": self.source_ref, "payload": json.dumps({"item": self.original[1]}, ensure_ascii=False)}]},
-            lane="R")
-        projection = json.dumps({"item": self.original[1]}, ensure_ascii=False)
+        self.journal = RecordJournal(self.output / "history")
+        self.addCleanup(self.journal.close)
+        self.original_records = make_record_batch("run1", 0, [{"role": "user", "content": "read the chain"}, *self.original])
+        _, self.watermark = self.journal.append("run1", self.original_records)
+        self.summary = prepare_summary_request(self.settings, [
+            {"role": "user", "content": "Current Run prefix; first original input is read-only background."},
+            *[record["item"] for record in self.original_records]], lane="R")
+        projection = record_projection(self.original_records[2])[0]
         self.recall = pair("history_search", "search", {"history_ref": "scope", "keywords": ["37"], "cursor": None},
                            {"hits": [{"source_ref": self.source_ref}]})
         self.recall += pair("history_read", "read", {"source_ref": self.source_ref, "start": 0, "end": None},
@@ -42,6 +50,18 @@ class CompactEvidenceTests(unittest.TestCase):
         self.observer = SimpleNamespace(output_dir=self.output, requests={1: [
             prepare_request("test", self.original), self.summary, prepare_request("test", self.recall)]},
             response_outputs=[{"turn": 1, "purpose": "business", "output": [self.original[0], self.recall[0], self.recall[2]]}])
+        self.metadata = {"lane": "R", "request_no": 5, "attempt_no": 1,
+            "snapshot": {"record_files": {"run1": self.watermark}},
+            "summary_input_metadata": {"item_refs": [None, *[record["source_ref"] for record in self.original_records]],
+                                       "context_risks": [None] * len(self.summary["input"]), "derived_spans": []},
+            "lanes": {"R": {"source_refs": [record["source_ref"] for record in self.original_records[1:]],
+                "previous": [], "source_files": [{"run_id": "run1", "path": str(self.journal.path("run1")),
+                                                  "start": 1, "end": 3}],
+                "scope": {"ranges": [{"run_id": "run1", "start": 1, "end": 3}]},
+                "summary_request_sha256": digest(self.summary),
+                "summary_budget": check_context_budget(self.summary, [None] * len(self.summary["input"]),
+                                                       summary_budget_settings(self.settings, "R"))}}}
+        self.observer.summary_contexts = {digest(self.summary): self.metadata}
         self.event = {"status": "used", "request_no": 5, "attempt_no": 1, "lanes": {"R": {"summary_id": "s"}},
                       "history_scopes": [{"ranges": [{"run_id": "run1", "start": 0, "end": 3}]}]}
         self.state = {"run_id": "run1", "compaction_events": [self.event]}
@@ -68,13 +88,62 @@ class CompactEvidenceTests(unittest.TestCase):
         checks = history_coverage(self.observer, [self.state], self.mechanism)
         self.assertEqual(next(check["status"] for check in checks if check["name"] == "history_read_used"), "gap")
 
-    def test_structured_source_payload_matches_same_original_projection(self):
-        source_material = unpack_summary_material(self.summary)
-        source = source_material["sources"][0]
-        source["payload"] = json.loads(source["payload"])
-        self.summary.update(prepare_summary_request(self.settings, source_material, lane="R"))
-        checks = history_coverage(self.observer, [self.state], self.mechanism)
-        self.assertTrue(all(check["status"] == "verified" for check in checks), checks)
+    def test_native_sources_match_file_and_sidecar_without_transport_wrappers(self):
+        before = self.journal.path("run1").read_bytes()
+        binding = native_binding(self.observer, self.summary)
+        self.assertTrue(binding["verified"])
+        self.assertEqual(binding["input_records"], self.original_records)
+        self.assertEqual(self.summary["input"][3], self.original[1])
+        self.assertEqual(self.journal.path("run1").read_bytes(), before)
+        _, path = turn_compact_evidence(self.observer, self.state, 1, self.settings)
+        evidence = json.loads(path.read_text(encoding="utf-8"))["summary_requests"][0]
+        self.assertNotIn("material", evidence)
+        self.assertEqual(evidence["input"], self.summary["input"])
+        self.assertTrue(evidence["source_binding"]["verified"])
+        self.assertTrue(evidence["budget_matches_preflight"])
+
+    def test_missing_or_corrupt_sidecar_cannot_manufacture_source_proof(self):
+        for defect in ("missing", "request_hash", "reference", "watermark"):
+            with self.subTest(defect=defect):
+                observer = deepcopy(self.observer)
+                metadata = observer.summary_contexts[digest(self.summary)]
+                if defect == "missing":
+                    observer.summary_contexts.clear()
+                elif defect == "request_hash":
+                    metadata["lanes"]["R"]["summary_request_sha256"] = "wrong"
+                elif defect == "reference":
+                    metadata["summary_input_metadata"]["item_refs"][-1] = "history://record/foreign/2"
+                else:
+                    metadata["snapshot"]["record_files"]["run1"]["prefix_sha256"] = "0" * 64
+                self.assertFalse(native_binding(observer, self.summary)["verified"])
+
+    def test_changed_native_output_or_file_cannot_verify(self):
+        request = deepcopy(self.summary)
+        request["input"][-1]["output"] = ""
+        observer = deepcopy(self.observer)
+        observer.summary_contexts[digest(request)] = deepcopy(self.metadata)
+        observer.summary_contexts[digest(request)]["lanes"]["R"]["summary_request_sha256"] = digest(request)
+        self.assertFalse(native_binding(observer, request)["verified"])
+        path = self.journal.path("run1")
+        body = path.read_bytes()
+        path.write_bytes(body.replace(b'read the chain', b'read the other', 1))
+        self.assertFalse(native_binding(self.observer, self.summary)["verified"])
+
+    def test_native_order_and_readonly_background_cannot_lose_their_bindings(self):
+        for defect in ("reordered", "unbound_readonly"):
+            with self.subTest(defect=defect):
+                request = deepcopy(self.summary)
+                metadata = deepcopy(self.metadata)
+                if defect == "reordered":
+                    request["input"][2:] = reversed(request["input"][2:])
+                    metadata["summary_input_metadata"]["item_refs"][2:] = reversed(
+                        metadata["summary_input_metadata"]["item_refs"][2:])
+                else:
+                    metadata["summary_input_metadata"]["item_refs"][1] = None
+                metadata["lanes"]["R"]["summary_request_sha256"] = digest(request)
+                observer = deepcopy(self.observer)
+                observer.summary_contexts[digest(request)] = metadata
+                self.assertFalse(native_binding(observer, request)["verified"])
 
     def test_metrics_keep_every_attempt_and_only_current_turn_recalls(self):
         second = deepcopy(self.event)
