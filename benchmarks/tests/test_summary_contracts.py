@@ -39,7 +39,7 @@ class SummaryContractsTests(unittest.TestCase):
         settings = replace(SETTINGS, max_output_tokens=256)
         material = [{"role": "user", "content": "do not change 17 or the negation"}]
         original = deepcopy(material)
-        for lane, cap in (("H", 16384), ("R", 8192)):
+        for lane, cap in (("H", 16384), ("R", 16384)):
             for attempt in (1, 2):
                 with self.subTest(lane=lane, attempt=attempt):
                     request = prepare_summary_request(settings, material, lane=lane, attempt_no=attempt)

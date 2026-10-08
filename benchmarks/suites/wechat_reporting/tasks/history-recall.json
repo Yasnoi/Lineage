@@ -1,7 +1,7 @@
 {
   "unit_id": "history-recall",
   "case_id": "history-recall",
-  "version": "2",
+  "version": "3",
   "title": "单 Run 压缩后回查小结果",
   "capabilities": [
     "compaction",
@@ -15,7 +15,7 @@
     "context_budget_tokens": 65536,
     "context_keep_recent_groups": 3,
     "summary_history_max_output_tokens": 16384,
-    "summary_run_max_output_tokens": 8192
+    "summary_run_max_output_tokens": 16384
   },
   "mechanism": {
     "kind": "history_recall",

@@ -17,7 +17,7 @@ class CompactSettingsTests(unittest.TestCase):
     def test_defaults_and_limits(self):
         self.assertEqual(self.settings.context_keep_recent_groups, 3)
         self.assertEqual(self.settings.summary_history_max_output_tokens, 16384)
-        self.assertEqual(self.settings.summary_run_max_output_tokens, 8192)
+        self.assertEqual(self.settings.summary_run_max_output_tokens, 16384)
         for name in ("context_keep_recent_turns", "summary_target_percent", "context_recovery_margin_percent"):
             self.assertNotIn(name, asdict(self.settings))
         for name in ("context_keep_recent_groups", "summary_history_max_output_tokens", "summary_run_max_output_tokens"):
@@ -33,7 +33,7 @@ class CompactSettingsTests(unittest.TestCase):
         small = replace(self.settings, context_budget_tokens=1000, max_output_tokens=128,
                         context_safety_margin_tokens=100)
         self.assertEqual(small.summary_history_max_output_tokens, 16384)
-        self.assertEqual(small.summary_run_max_output_tokens, 8192)
+        self.assertEqual(small.summary_run_max_output_tokens, 16384)
 
     def test_old_turn_setting_is_rejected_in_constructor_and_environment(self):
         for field in ("context_keep_recent_turns", "summary_target_percent", "context_recovery_margin_percent",

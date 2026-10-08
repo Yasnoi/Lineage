@@ -29,7 +29,7 @@ CONTEXT_SAFETY_MARGIN_TOKENS=8192
 OPAQUE_FALLBACK_TOKENS=4096
 CONTEXT_KEEP_RECENT_GROUPS=3
 SUMMARY_HISTORY_MAX_OUTPUT_TOKENS=16384
-SUMMARY_RUN_MAX_OUTPUT_TOKENS=8192
+SUMMARY_RUN_MAX_OUTPUT_TOKENS=16384
 LOG_DIR=logs
 PROJECT_ROOT=
 DIRECTORY_MAX_ENTRIES=1000
@@ -167,7 +167,7 @@ asyncio.run(main())
 | --- | ---: | --- |
 | `CONTEXT_KEEP_RECENT_GROUPS` | 3 | 只保护当前 Run 最近的完整业务交互组，必须为正整数 |
 | `SUMMARY_HISTORY_MAX_OUTPUT_TOKENS` | 16384 | H 摘要请求独立的 API 输出上限与预算预留 |
-| `SUMMARY_RUN_MAX_OUTPUT_TOKENS` | 8192 | R 摘要请求独立的 API 输出上限与预算预留 |
+| `SUMMARY_RUN_MAX_OUTPUT_TOKENS` | 16384 | R 摘要请求独立的 API 输出上限与预算预留 |
 
 上述配置不接受布尔值。`CONTEXT_KEEP_RECENT_TURNS`、`CONTEXT_TRIGGER_PERCENT`、`CONTEXT_TARGET_PERCENT`、`SUMMARY_MAX_OUTPUT_TOKENS`、`SUMMARY_MAX_BYTES`、`SUMMARY_TARGET_PERCENT` 和 `CONTEXT_RECOVERY_MARGIN_PERCENT` 已移除；显式提供时须删除旧字段，不能把旧比例或轮次数自动换算为新设置。Compact 不再分配生成软目标或要求额外百分比恢复余量，预算器的 `CONTEXT_SAFETY_MARGIN_TOKENS` 仍保留。
 
@@ -601,7 +601,7 @@ uv run --locked python -m benchmarks review logs/benchmarks/<运行ID> --prepare
 
 运行、配置、结构、扩展和评审方法见 [Benchmark 使用说明](benchmarks/README.md)，原检查去向见 [覆盖映射](benchmarks/COVERAGE.md)，项目事实与评分边界见 [WeChat Reporting 任务说明](benchmarks/suites/wechat_reporting/README.md)。语义评审完成前，真实运行结果保持待评审；执行和追踪完成均不能证明 Research 质量通过。
 
-生产预算与批次上限分别管理。[研究运行样例](benchmarks/entrypoints/run.example.json) 未覆盖的值按 v2 配置优先级读取。读取受限例仍使用 4 KiB；跨轮摘要例当前为 v4，使用 65536 窗口、6 KiB 背景和至多 32 KiB 压力；第 5 轮以实际继承请求二分选择刚超限的压力，验证前四轮全部进入 H，第 6 轮追问。旧 v3/v2.3 定义作为历史资料保留，不能直接将不同任务版本的结果当成严格对照。`history-recall` v2 检查当前 Run 压缩后的原始小结果搜索与回读；真实摘要是否遗漏目标细节需要单独核查，不能只凭发生回读便声称覆盖了遗漏恢复。两例 H/R 输出上限为 16384/8192，不使用软目标或额外恢复余量。新增历史工具的固定请求开销应单列，来源引用合法性与语义正确性分别评审。
+生产预算与批次上限分别管理。[研究运行样例](benchmarks/entrypoints/run.example.json) 未覆盖的值按 v2 配置优先级读取。读取受限例仍使用 4 KiB；跨轮摘要例当前为 v5，使用 65536 窗口、6 KiB 背景和至多 32 KiB 压力；第 5 轮以实际继承请求二分选择刚超限的压力，验证前四轮全部进入 H，第 6 轮追问。旧 v4/v3/v2.3 定义作为历史资料保留，不能直接将不同任务版本的结果当成严格对照。`history-recall` v3 检查当前 Run 压缩后的原始小结果搜索与回读；真实摘要是否遗漏目标细节需要单独核查，不能只凭发生回读便声称覆盖了遗漏恢复。两例 H/R 输出上限均为 16384，不使用软目标或额外恢复余量。新增历史工具的固定请求开销应单列，来源引用合法性与语义正确性分别评审。
 
 批次请求数、累计时间和样本时间由运行配置指定，执行器硬上限分别为 400 次、7200 秒和 1200 秒。业务、摘要及失败请求均计数；到达上限时保留所有已运行样本及未运行项，不追加样本掩盖失败。报告应区分框架执行结束、Agent 终态和任务完成，保留压缩占用、净回收、候选剩余预算、两路调用、召回、延迟、可获得用量及存储规模。费用无账单时为未知，单次观察不构成稳定性结论。
 

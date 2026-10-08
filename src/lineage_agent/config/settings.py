@@ -17,7 +17,7 @@ DEFAULT_TEXT_TOTAL_MAX_BYTES = 1048576
 DEFAULT_CONTEXT_BUDGET_TOKENS = 250000
 DEFAULT_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS = 16384
-DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS = 8192
+DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 8192
 REASONING_EFFORTS = ("none", "low", "high", "max")
 
@@ -42,7 +42,7 @@ def _removed_configuration(names: list[str]) -> ConfigurationError:
     return ConfigurationError(
         f"{', '.join(name.upper() for name in names)} 已移除。请删除旧配置；"
         "摘要输出上限改用 SUMMARY_HISTORY_MAX_OUTPUT_TOKENS（默认 16384）"
-        "和 SUMMARY_RUN_MAX_OUTPUT_TOKENS（默认 8192），"
+        "和 SUMMARY_RUN_MAX_OUTPUT_TOKENS（默认 16384），"
         "保护窗口改用 CONTEXT_KEEP_RECENT_GROUPS（默认 3），"
         "上下文触发上限固定为 CONTEXT_BUDGET_TOKENS。"
     )

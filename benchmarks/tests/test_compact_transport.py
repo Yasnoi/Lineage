@@ -168,7 +168,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
 
         client, http = self.make_client(capture)
         async with client:
-            for lane, cap in (("H", 16384), ("R", 8192)):
+            for lane, cap in (("H", 16384), ("R", 16384)):
                 with self.subTest(lane=lane, cap=cap):
                     request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane=lane)
                     measured = deepcopy(request)
@@ -246,7 +246,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(http.is_closed)
 
     def test_summary_recognition_requires_canonical_dynamic_protocol(self):
-        for lane, cap in (("H", 16384), ("R", 8192)):
+        for lane, cap in (("H", 16384), ("R", 16384)):
             for attempt in (1, 2):
                 request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane=lane, attempt_no=attempt)
                 self.assertTrue(is_summary_request(request))
