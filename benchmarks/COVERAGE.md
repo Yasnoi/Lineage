@@ -242,3 +242,9 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 | `recording.compaction.summary_tool_request` | recording | 摘要意外工具调用的失败投影保持正文省略。；recording, context | `check_compaction_tracing.py:main:summary_tool_request` | [main:summary_tool_request](checks/recording/compaction.py) |
 | `recording.compaction.summary_incomplete` | recording | 未完成摘要的追踪仍不暴露摘要正文。；recording, context | `check_compaction_tracing.py:main:summary_incomplete` | [main:summary_incomplete](checks/recording/compaction.py) |
 | `recording.compaction.bounded_lineage_provenance` | recording | 摘要来源引用有界且只依据明确来源隐藏派生内容，不按文本前缀猜测。；recording, context | `check_compaction_tracing.py:main:bounded_lineage_provenance` | [main:bounded_lineage_provenance](checks/recording/compaction.py) |
+
+### 摘要共享 effort 与结构指令
+
+- `test_summary_effort.py`：未设置及四个显式等级的配置、H/R 两次尝试与实际 HTTP 参数一致；业务恢复沿用同一 effort；推理不进入摘要正文，纯推理响应不能替代摘要。
+- `test_summary_contracts.py` / `test_native_context_material.py`：共同规则与 H/R 规则分区、灵活大纲、仅程序范围说明加标签；原生项、风险和已有摘要正文保持原有合同。
+- `test_summary_effort_comparison.py`：四组交错顺序、原生输入与旧摘要不变、只允许指令/首条范围说明/effort 差异、累计时间上限和冻结哈希检查。原有对照框架的失败计数、证据故障、认证停止和禁用重试检查继续适用。

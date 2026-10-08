@@ -27,6 +27,9 @@ from lineage_agent.models.summarization import (
 
 
 LIMITS = {"sdk_requests": 40, "execution_seconds": 1200, "request_seconds": 120, "repeats": 2}
+EFFORT_LIMITS = {"sdk_requests": 80, "execution_seconds": 4800, "request_seconds": 120, "repeats": 2}
+EFFORT_VARIANTS = ("P0-high", "P0-max", "P1-high", "P1-max")
+EFFORT_DESIGN = "effort-outline-v1"
 
 
 def digest(value):
@@ -54,7 +57,7 @@ def freeze(sources: Path, destination: Path):
     for case in manifest["cases"]:
         request = case["request"]
         case["instructions"] = {"A": request["instructions"], "B": _summary_instructions(
-            request["max_output_tokens"], case["lane"], 1)}
+            request["max_output_tokens"], case["lane"], 1, "none")}
         case["instruction_sha256"] = {key: digest(value) for key, value in case["instructions"].items()}
         case["risks_sha256"] = digest(case["risks"])
     validate(manifest)
@@ -62,8 +65,44 @@ def freeze(sources: Path, destination: Path):
     atomic_write_json(destination / "manifest.json", manifest)
 
 
+def freeze_effort(baseline: Path, destination: Path):
+    """P0 is the previously frozen B, never regenerated using candidate code."""
+    provenance = json.loads((baseline / "baseline.json").read_text(encoding="utf-8"))
+    for name, expected in provenance["files"].items():
+        if sha256_file(baseline / name) != expected:
+            raise ValueError("baseline changed after capture")
+    manifest = json.loads((baseline / "p0-manifest.json").read_text(encoding="utf-8"))
+    validate(manifest)
+    verify_sources(manifest)
+    manifest.update(design=EFFORT_DESIGN, limits=dict(EFFORT_LIMITS), baseline=provenance,
+                    frozen_at=utc_now(), candidate_source_sha256=sha256_file(ROOT / "src/lineage_agent/models/summarization.py"))
+    for path in (baseline / "p0-manifest.json", baseline / "p0-results.json", baseline / "baseline.json"):
+        manifest["source_files"][path.resolve().relative_to(ROOT).as_posix()] = sha256_file(path)
+    old_results = json.loads((baseline / "p0-results.json").read_text(encoding="utf-8"))
+    for case in manifest["cases"]:
+        case["request"]["instructions"] = case["instructions"]["B"]
+        for row in old_results["results"]:
+            if row["case"] == case["id"] and row["variant"] == "B":
+                old_path = ROOT / provenance["source"] / f'{row["file_prefix"]}-request.json'
+                if json.loads(old_path.read_text(encoding="utf-8")) != case["request"]:
+                    raise ValueError("P0 differs from actually sent historical B")
+                manifest["source_files"][old_path.relative_to(ROOT).as_posix()] = sha256_file(old_path)
+        case["baseline_request_sha256"] = digest(case["request"])
+        case["instructions"] = {variant: (case["request"]["instructions"] if variant.startswith("P0-") else
+            _summary_instructions(case["request"]["max_output_tokens"], case["lane"], 1, variant.split("-")[1]))
+            for variant in EFFORT_VARIANTS}
+        case["instruction_sha256"] = {key: digest(value) for key, value in case["instructions"].items()}
+        case["design"] = EFFORT_DESIGN
+    validate(manifest)
+    destination.mkdir(parents=True, exist_ok=False)
+    atomic_write_json(destination / "manifest.json", manifest)
+
+
 def validate(manifest):
-    if manifest["limits"] != LIMITS or not 1 <= len(manifest["cases"]) <= 10:
+    effort = manifest.get("design") == EFFORT_DESIGN
+    if manifest.get("design") not in (None, EFFORT_DESIGN):
+        raise ValueError("unknown comparison design")
+    if manifest["limits"] != (EFFORT_LIMITS if effort else LIMITS) or not 1 <= len(manifest["cases"]) <= 10:
         raise ValueError("invalid comparison limits")
     identities = set()
     for case in manifest["cases"]:
@@ -82,8 +121,10 @@ def validate(manifest):
                 or digest(request) != case["baseline_request_sha256"]
                 or digest(request["input"]) != case["input_sha256"]
                 or digest(without_instructions(request)) != case["fixed_request_sha256"]
-                or request["instructions"] != case["instructions"]["A"]
-                or set(case["instructions"]) != {"A", "B"}
+                or (case.get("design") == EFFORT_DESIGN) != effort
+                or request["instructions"] != case["instructions"]["P0-high" if effort else "A"]
+                or effort and case["instructions"]["P0-high"] != case["instructions"]["P0-max"]
+                or set(case["instructions"]) != (set(EFFORT_VARIANTS) if effort else {"A", "B"})
                 or any(type(value) is not str or not value.strip()
                        or digest(value) != case["instruction_sha256"][key]
                        for key, value in case["instructions"].items())):
@@ -95,6 +136,15 @@ def prepare(case, variant):
     request["instructions"] = case["instructions"][variant]
     if digest(without_instructions(request)) != case["fixed_request_sha256"]:
         raise ValueError("comparison changed more than Instructions")
+    if case.get("design") == EFFORT_DESIGN:
+        if variant not in EFFORT_VARIANTS:
+            raise ValueError("unknown effort variant")
+        request["reasoning"] = {"effort": variant.split("-")[1]}
+        if variant.startswith("P1-"):
+            note = request["input"][0]
+            if note.get("role") != "user" or type(note.get("content")) is not str:
+                raise ValueError("invalid application range note")
+            note["content"] = "<summary_scope>\n" + note["content"] + "\n</summary_scope>"
     settings = SummaryBudgetSettings(case["context_budget_tokens"], request["max_output_tokens"],
                                      case["safety_margin_tokens"])
     return request, check_context_budget(request, case["risks"], settings)
@@ -105,7 +155,11 @@ def schedule(manifest):
     for repeat in (1, 2):
         for index, case in enumerate(manifest["cases"]):
             # Reverse first/second exposure in the second repeat.
-            for variant in (("A", "B") if repeat == 1 else ("B", "A")):
+            variants = (("A", "B") if repeat == 1 else ("B", "A"))
+            if manifest.get("design") == EFFORT_DESIGN:
+                offset = (index + (repeat - 1) * 2) % 4
+                variants = EFFORT_VARIANTS[offset:] + EFFORT_VARIANTS[:offset]
+            for variant in variants:
                 rows.append({"case_index": index, "case": case["id"], "variant": variant,
                              "repeat": repeat, "status": "not_run", "review_id": uuid4().hex})
     return rows
@@ -114,14 +168,16 @@ def schedule(manifest):
 async def compare(manifest, output: Path, client, *, provenance=None):
     """One serial batch. All failures occupy their planned slot; never retry/resume."""
     validate(manifest)
+    limits = manifest["limits"]
     ledger = output / "sdk-ledger.jsonl"
     with ledger.open("xb"):
         pass
     identity = str(uuid4())
-    budget = RequestBudget(ledger, identity, "summary-instructions", max_requests=40,
-                           remaining_seconds=1200, batch_id=identity)
+    budget = RequestBudget(ledger, identity, "summary-instructions", max_requests=limits["sdk_requests"],
+                           remaining_seconds=limits["request_seconds"], batch_id=identity)
     started = time.monotonic()
-    state = {"started_at": utc_now(), "provenance": provenance, "limits": LIMITS,
+    deadline = started + limits["execution_seconds"]
+    state = {"started_at": utc_now(), "provenance": provenance, "limits": limits,
              "results": schedule(manifest), "stop_reason": None, "requests": 0,
              "seconds": 0, "semantic_review": "pending", "human_review": "pending"}
     active = {}
@@ -148,6 +204,8 @@ async def compare(manifest, output: Path, client, *, provenance=None):
     try:
         save()
         for number, row in enumerate(state["results"], 1):
+            if time.monotonic() >= deadline:
+                raise WorkerAbort("execution_time_exhausted")
             case = manifest["cases"][row["case_index"]]
             request, preflight = prepare(case, row["variant"])
             prefix = f'{number:02d}'
@@ -160,6 +218,8 @@ async def compare(manifest, output: Path, client, *, provenance=None):
             # Persist the complete slot before making an SDK call.
             row["status"] = "ready"
             save()
+            # One ledger and request allowance throughout; only the per-slot deadline renews.
+            budget.deadline = min(deadline, time.monotonic() + limits["request_seconds"])
             event = budget.reserve(number, "summary")
             state["requests"] += 1
             row.update(status="started", request_id=event["request_id"], started_at=event["started_at"])
@@ -205,7 +265,7 @@ async def compare(manifest, output: Path, client, *, provenance=None):
         raise WorkerAbort(state["stop_reason"]) from exc
     finally:
         hooks.remove(capture)
-    events = read_ledger(ledger, 40, batch_id=identity)
+    events = read_ledger(ledger, limits["sdk_requests"], batch_id=identity)
     if len(events) != state["requests"]:
         raise WorkerAbort("accounting_mismatch")
     state.update(finished_at=utc_now(), unused_allowance_closed=True)
@@ -219,9 +279,15 @@ def main():
     freeze_parser = sub.add_parser("freeze")
     freeze_parser.add_argument("sources", type=Path)
     freeze_parser.add_argument("destination", type=Path)
+    effort_parser = sub.add_parser("freeze-effort")
+    effort_parser.add_argument("baseline", type=Path)
+    effort_parser.add_argument("destination", type=Path)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("directory", type=Path)
     args = parser.parse_args()
+    if args.action == "freeze-effort":
+        freeze_effort(args.baseline, args.destination)
+        return
     if args.action == "freeze":
         freeze(args.sources, args.destination)
         return
