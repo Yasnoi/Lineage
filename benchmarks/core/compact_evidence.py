@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import hashlib
+from html import unescape
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.summarization import is_summary_request, summary_budget_settings
 from lineage_agent.agent.record_codec import decode_record
 from lineage_agent.agent.records import record_projection
+from lineage_agent.models.summary_input import INPUT_FORMAT, record_details, serialize_conversation
 
 
 HISTORY_CHECKS = (
@@ -73,7 +75,7 @@ def _confirmed_records(metadata, selected):
 
 
 def native_binding(observer, request):
-    """Join actual native input to trusted sidecars and immutable original files."""
+    """Bind rendered text to original files and derived bodies, without rereading by title."""
     metadata = summary_context(observer, request)
     result = {"verified": False, "reason": "summary source binding unavailable", "records": [],
               "input_records": [], "metadata": metadata}
@@ -83,11 +85,30 @@ def native_binding(observer, request):
         if lane != metadata.get("lane") or selected["summary_request_sha256"] != digest(request):
             raise ValueError("request lineage differs")
         sidecar = metadata["summary_input_metadata"]
-        items, refs = request["input"], sidecar["item_refs"]
-        if (not isinstance(refs, list) or len(items) != len(refs)
-                or len(sidecar["context_risks"]) != len(items)):
-            raise ValueError("native sidecar alignment differs")
+        refs, details, receipts = sidecar["item_refs"], sidecar["item_details"], sidecar["source_spans"]
+        if (sidecar.get("format") != INPUT_FORMAT or not isinstance(refs, list)
+                or len(details) != len(refs) or len(receipts) != len(refs)
+                or [receipt["index"] for receipt in receipts] != list(range(len(refs)))
+                or sidecar["context_risks"] != [None] or len(request["input"]) != 1):
+            raise ValueError("text sidecar alignment differs")
+        text = request["input"][0]["content"]
         records = _confirmed_records(metadata, selected)
+        items = []
+        for index, (ref, detail, receipt) in enumerate(zip(refs, details, receipts, strict=True)):
+            if ref is not None:
+                record = records[ref]
+                if detail != record_details(record, background=detail.get("kind") == "background"):
+                    raise ValueError("source identity or execution differs")
+                items.append(record["item"])
+            else:
+                start, end = receipt["body_start"], receipt["body_end"]
+                if type(start) is not int or type(end) is not int or not 0 <= start <= end <= len(text):
+                    raise ValueError("invalid source text range")
+                items.append({"role": "user" if detail.get("kind") == "scope" else "assistant",
+                              "content": unescape(text[start:end])})
+        rendered = serialize_conversation(items, item_details=details)
+        if rendered.input != request["input"] or rendered.source_spans != receipts:
+            raise ValueError("rendered source differs")
         seen = set()
         for item, ref in zip(items, refs, strict=True):
             if ref is None:
@@ -132,7 +153,7 @@ def native_binding(observer, request):
                        for sequence in range(bounds["start"], bounds["end"])):
                 raise ValueError("covered original unavailable")
         result["records"] = [record for ref, record in records.items() if covered(ref, ranges)]
-        result.update(verified=True, reason="native objects match confirmed files and derived identities")
+        result.update(verified=True, reason="rendered text matches confirmed files and derived identities")
     except (KeyError, IndexError, TypeError, ValueError, OSError, UnicodeError):
         result["records"] = []
         result["input_records"] = []

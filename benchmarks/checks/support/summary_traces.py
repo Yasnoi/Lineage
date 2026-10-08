@@ -60,9 +60,10 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
     }
     summary_request = prepare_summary_request(
         SETTINGS, [
-            {"role": "user", "content": "Summarize confirmed native source records, not a new task."},
+            {"role": "user", "content": "Summarize confirmed source records, not a new task."},
             {"role": "user", "content": BODY},
-            {"type": "reasoning", "id": "reasoning-source", "summary": [], "encrypted_content": BODY + " opaque"},
+            {"type": "reasoning", "id": "reasoning-source", "summary": [], "encrypted_content": BODY + " opaque",
+             "content": [{"type": "reasoning_text", "text": BODY + " readable thinking"}]},
             {"type": "function_call", "id": "call-source", "call_id": "source-call", "name": "read_text_file",
              "arguments": json.dumps({"path": BODY + ".txt"})},
             {"type": "function_call_output", "call_id": "source-call", "output": BODY + " result"},

@@ -477,8 +477,9 @@ class ResearchWorkerTests(unittest.TestCase):
             self.assertEqual(pressure["max_padding_bytes"], 32768)
             self.assertFalse(pressure["capped"])
         if second_pass:
-            self.assertEqual(summaries[1]["input"][1], {"role": "assistant", "content": "x" * 20000})
-            self.assertEqual(len(summaries[1]["input"]), 2)
+            self.assertEqual(len(summaries[1]["input"]), 1)
+            self.assertIn("<candidate_summary lane=\"H\">\n" + "x" * 20000 + "\n</candidate_summary>",
+                          summaries[1]["input"][0]["content"])
             self.assertNotIn("signature fact", json.dumps(summaries[1]["input"]))
             args = list(coverage_spy.call_args.args)
             original_record = deepcopy(args[-1])

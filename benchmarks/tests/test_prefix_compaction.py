@@ -5,8 +5,11 @@ import asyncio
 from dataclasses import replace
 import json
 import re
+import xml.etree.ElementTree as ET
+from lineage_agent.models.summary_input import serialize_conversation
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from langgraph.errors import NodeCancelledError
@@ -83,8 +86,19 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["stop_reason"], "completed", (state.get("error_code"), state.get("error"), state.get("compaction")))
 
     async def test_independent_long_run_recovers_current_prefix_and_protects_three_groups(self):
+        from benchmarks.core.compact_evidence import native_binding
+        from benchmarks.core.evidence import digest
         original_material = ContextRecords.material
+        original_send = runtime.send_prepared_response
         materials = []
+        bindings = []
+        async def audit_send(client, request, **kwargs):
+            if kwargs.get("purpose") == "summary":
+                observer = SimpleNamespace(summary_contexts={digest(request): kwargs["summary_metadata"]})
+                binding = native_binding(observer, request)
+                self.assertTrue(binding["verified"], binding["reason"])
+                bindings.append(binding)
+            return await original_send(client, request, **kwargs)
         async def audit_material(records, compaction, lane, state):
             material = await original_material(records, compaction, lane, state)
             self.assertNotIn("allowed_source_ids", material)
@@ -96,11 +110,13 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("sources", material)
             materials.append(deepcopy(material))
             return material
-        with patch.object(ContextRecords, "material", new=audit_material):
+        with patch.object(ContextRecords, "material", new=audit_material), \
+                patch.object(runtime, "send_prepared_response", new=audit_send):
             state, client = await self.standalone()
-        self.assertEqual([request["input"] for request in client.summary_requests], [material["input"] for material in materials])
+        self.assertEqual([request["input"] for request in client.summary_requests], [serialize_conversation(material["input"], item_details=material["item_details"]).input for material in materials])
         self.assert_complete(state)
         self.assertGreater(state["summary_calls"], 0)
+        self.assertEqual(len(bindings), state["summary_calls"])
         self.assertEqual(state["model_calls"], 11)
         self.assertEqual(self.executed, [f"c{index}" for index in range(10)])
         self.assertTrue(all(summary_request_lane(request) == "R" for request in client.summary_requests))
@@ -115,11 +131,12 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             if not is_summary_request(request):
                 business_count += 1
                 continue
-            source_calls = [item["call_id"] for item in request["input"] if item.get("type") == "function_call"]
+            transcript = ET.fromstring("<root>" + request["input"][0]["content"] + "</root>")
+            source_calls = [item.attrib["call_id"] for item in transcript.iter("tool_call")]
             self.assertTrue(source_calls)
             for index in range(business_count - 3, business_count):
                 self.assertNotIn(f"c{index}", source_calls)
-            self.assertIn(original, request["input"])
+            self.assertIn(original["content"], transcript.findtext(".//current_request_background"))
         self.assertTrue(all(event.get("session_id") is None for event in read_events(state)))
         self.assertGreaterEqual(len(client.summary_requests), 2)
         self.assertEqual(len([span for span in state["active_context"]["summary_spans"] if span["lane"] == "R"]), 1)
@@ -175,12 +192,12 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lanes[:2], ["H", "R"])
             self.assertIsNotNone(turn.state["active_context"]["history_summary"])
             self.assertTrue(any(span["lane"] == "R" for span in turn.state["active_context"]["summary_spans"]))
-            history = client.summary_requests[0]["input"]
-            current = client.summary_requests[1]["input"]
-            self.assertIn(old.state["input"][0], history)
-            self.assertNotIn(old.state["input"][0], current)
-            self.assertIn({"role": "user", "content": "current task; preserve 17 and do not write"}, current)
-            self.assertFalse(any(item.get("type") == "function_call" for item in history))
+            history = client.summary_requests[0]["input"][0]["content"]
+            current = client.summary_requests[1]["input"][0]["content"]
+            self.assertIn(old.state["input"][0]["content"], history)
+            self.assertNotIn(old.state["input"][0]["content"], current)
+            self.assertIn("current task; preserve 17 and do not write", current)
+            self.assertNotIn("<tool_call", history)
             self.assertEqual(turn.state["summary_calls"], len(client.summary_requests))
 
     async def test_h_success_r_failure_keeps_both_original_views(self):
@@ -299,9 +316,10 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(state["compaction"]["attempt_no"], 2)
         first, second = requests[0]["input"], requests[1]["input"]
-        self.assertTrue(any(item.get("type") == "function_call_output" for item in first))
-        self.assertEqual(len(second), 2)
-        self.assertEqual(second[1], {"role": "assistant", "content": "L" * 11000})
+        self.assertIn("<tool_result", first[0]["content"])
+        self.assertEqual(len(second), 1)
+        self.assertIn("<candidate_summary", second[0]["content"])
+        self.assertIn("L" * 11000, second[0]["content"])
         self.assertFalse(any(item.get("type") == "function_call_output" for item in second))
         self.assertNotIn("omitted-detail=37", json.dumps(second))
         self.assertEqual(state["summary_calls"], 2)
@@ -358,8 +376,9 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(turn.state["summary_calls"], 4)
             self.assertEqual(turn.state["compaction"]["attempt_no"], 2)
             for request in requests[2:]:
-                self.assertEqual(len(request["input"]), 2)
-                self.assertEqual(request["input"][1], {"role": "assistant", "content": "L" * 11000})
+                self.assertEqual(len(request["input"]), 1)
+                self.assertIn("<candidate_summary", request["input"][0]["content"])
+                self.assertIn("L" * 11000, request["input"][0]["content"])
                 self.assertNotIn("omitted-detail=37", json.dumps(request["input"]))
 
     async def test_second_oversized_candidate_stops_without_reinitializing_attempts(self):
@@ -446,7 +465,8 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
             for index in range(6):
                 self.assertEqual(f"g{index}a" in outputs, f"g{index}b" in outputs)
         originals = client.summary_requests[0]["input"]
-        outputs = {item["call_id"] for item in originals if item.get("type") == "function_call_output"}
+        transcript = ET.fromstring("<root>" + originals[0]["content"] + "</root>")
+        outputs = {item.attrib["call_id"] for item in transcript.iter("tool_result")}
         self.assertIn("g0a", outputs)
         self.assertIn("g0b", outputs)
         self.assertIn("failed", originals[0]["content"])

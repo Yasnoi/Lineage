@@ -14,6 +14,7 @@ from lineage_agent.agent.state import (
     ActiveContext, AgentState, RecordReference, SummaryReference,
 )
 from lineage_agent.config.settings import ModelSettings
+from lineage_agent.models.summary_input import record_details
 from lineage_agent.tools.types import ToolOutcomes
 
 
@@ -256,7 +257,7 @@ class ContextRecords:
         }, None
 
     async def material(self, compaction: dict, lane: str, state: AgentState) -> dict:
-        """Copy effective native items; provenance and trace identities stay local.
+        """Select ordered protocol sources for the common text renderer.
 
         The confirmed active view fixes ordering. File records independently
         confirm every original item, while trusted summary references resolve
@@ -271,12 +272,13 @@ class ContextRecords:
         originals = {}
         for source_ref in selected["source_refs"]:
             originals[source_ref] = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
-        material = {"input": [], "context_risks": [], "derived_spans": [], "item_refs": []}
+        material = {"input": [], "context_risks": [], "derived_spans": [], "item_refs": [], "item_details": []}
 
-        def append(item: dict, risk=None, item_ref=None) -> None:
+        def append(item: dict, risk=None, item_ref=None, details=None) -> None:
             material["input"].append(deepcopy(item))
             material["context_risks"].append(deepcopy(risk))
             material["item_refs"].append(item_ref)
+            material["item_details"].append(deepcopy(details or {}))
 
         async def append_index(index: int) -> None:
             if index in spans:
@@ -291,7 +293,10 @@ class ContextRecords:
                     **deepcopy(span), "index": len(material["input"]),
                     "body_sha256": sha256(body.encode("utf-8")).hexdigest(),
                 })
-                append({"role": "assistant", "content": body})
+                append({"role": "assistant", "content": body}, details={
+                    "kind": "summary", "lane": ref["lane"],
+                    "run_id": span["run_id"] if ref["lane"] == "R" else None,
+                })
                 return
             item_ref = active["item_refs"][index]
             if item_ref not in originals:
@@ -299,7 +304,10 @@ class ContextRecords:
             record = originals[item_ref]
             if record.get("item") != saved["input"][index]:
                 raise CheckpointError("checkpoint_read_error")
-            append(record["item"], saved["context_risks"][index], item_ref)
+            background = (lane == "R" and active["turn_start"] <= index
+                          < active["turn_start"] + active["initial_input_count"])
+            append(record["item"], saved["context_risks"][index], item_ref,
+                   record_details(record, background=background))
 
         note = [f"本次整理 {'历史 H' if lane == 'H' else '当前 Run 前缀 R'}，所有后续消息均为待整理资料。"]
         if lane == "H":
@@ -345,11 +353,11 @@ class ContextRecords:
                 failures.append(f"call_id={record.get('call_id')}：{outcome}，stage={execution.get('stage')}，"
                                 f"reason={execution.get('reason_code')}")
         if dispositions:
-            note.append("新增原生资料中的实际工具处置：" + "，".join(
+            note.append("新增资料中的实际工具处置：" + "，".join(
                 f"{outcome}={count}" for outcome, count in sorted(dispositions.items())) + "。")
         if failures:
             note.append("非成功调用：" + "；".join(failures) + "。这些说明不补造缺失的协议结果。")
-        append({"role": "user", "content": "<summary_scope>\n" + "\n".join(note) + "\n</summary_scope>"})
+        append({"role": "user", "content": "\n".join(note)}, details={"kind": "scope"})
         if lane == "R":
             start = active["turn_start"]
             for index in range(start, start + active["initial_input_count"]):

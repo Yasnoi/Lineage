@@ -1,6 +1,7 @@
 """Independent integration checks for current protection and final ownership."""
 
 from copy import deepcopy
+import xml.etree.ElementTree as ET
 import json
 import unittest
 from unittest.mock import patch
@@ -140,14 +141,17 @@ class ContextStage2Tests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(summary_request_lane(request) == "H" for request in client.summary_requests))
             requests = [request for request in client.summary_requests if summary_request_lane(request) == "R"]
             self.assertGreaterEqual(len(requests), 2)
-            for request in requests:
+            for index, request in enumerate(requests):
                 items = request["input"]
                 self.assertNotIn("H_RAW_STAGE2", json.dumps(items))
                 self.assertNotIn("H_DERIVED_STAGE2", json.dumps(items))
-                self.assertIn({"role": "user", "content": prompt}, items)
+                root = ET.fromstring("<root>" + items[0]["content"] + "</root>")
+                self.assertEqual(root.findtext(".//current_request_background"), "\n" + prompt + "\n")
                 self.assertNotIn(old.state["run_id"], items[0]["content"])
-                self.assertTrue(all(item.get("content") == "R_STAGE2截至覆盖范围"
-                                    for item in items if item.get("role") == "assistant"))
+                previous = root.findall(".//previous_summary")
+                self.assertEqual(len(previous), 0 if index == 0 else 1)
+                for body in previous:
+                    self.assertEqual(body.text, "\nR_STAGE2截至覆盖范围\n")
 
 
 

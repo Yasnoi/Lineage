@@ -3,6 +3,7 @@
 from copy import deepcopy
 import json
 import os
+from html import escape
 import unittest
 from unittest.mock import patch
 
@@ -56,18 +57,22 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
             ])
         return items
 
-    async def test_native_source_items_reach_http_without_wrapping_or_output_splitting(self):
-        items = self.native_history()
+    async def test_text_sources_reach_http_with_exact_pairing_and_without_protocol_replay(self):
+        items = self.native_history(opaque=True)
         original = deepcopy(items)
         request = prepare_summary_request(SETTINGS, items, lane="R")
-        self.assertEqual(request["input"], original)
         self.assertEqual(items, original)
-        self.assertIsNot(request["input"], items)
-        for actual, source in zip(request["input"], items, strict=True):
-            self.assertIsNot(actual, source)
-        self.assertEqual([item.get("type") for item in request["input"]],
-                         [None, None, "function_call", "function_call_output"]
-                         + ["function_call", "function_call_output"] * 2)
+        self.assertEqual(len(request["input"]), 1)
+        text = request["input"][0]["content"]
+        self.assertEqual(request["input"][0]["role"], "user")
+        self.assertIn("<conversation>", text)
+        self.assertIn("observed thought", text)
+        self.assertIn("<opaque_reasoning>", text)
+        self.assertNotIn("opaque-do-not-decode", text)
+        for number in range(3):
+            self.assertIn(f'<tool_call call_id="call-{number}" name="read_text_file">', text)
+            self.assertIn(f'<tool_result call_id="call-{number}" name="read_text_file">', text)
+        self.assertIn(escape(items[-1]["output"], quote=False), text)
         observed = []
         def capture(sent):
             observed.append(json.loads(sent.content))
@@ -75,55 +80,17 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
         risks = annotate_context_risks(request["input"], fallback_tokens=SETTINGS.opaque_fallback_tokens, run_id="offline")
         budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, "R"))
         self.assertEqual(budget["decision"], "allow")
+        self.assertEqual(budget["opaque_items"], 0)
+        self.assertEqual(budget["opaque_risk_tokens"], 0)
         client, _ = self.make_client(capture)
         async with client:
             await responses.send_prepared_response(client, request, purpose="summary")
         self.assertEqual(observed, [request])
-        self.assertEqual(observed[0]["input"], original)
         self.assertEqual(budget["transparent_tokens"], len(json.dumps(
             observed[0], ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
         self.assertEqual(items, original)
-        # Tool text may itself name the removed transport; it remains ordinary data.
-        self.assertIn("compact_source_outputs_v1", observed[0]["input"][3]["output"])
-        self.assertTrue(all("payload" not in item and "source_id" not in item for item in request["input"]))
-        self.assertNotIn("compact_source_outputs_v1", request["instructions"])
-        items[3]["output"] = "caller edit after preparation"
-        self.assertEqual(request["input"], original)
-
-    async def test_native_opaque_fields_preserve_provenance_and_exact_sent_body(self):
-        items = self.native_history(opaque=True)
-        request = prepare_summary_request(SETTINGS, items, lane="H")
-        risks = annotate_context_risks(items, fallback_tokens=SETTINGS.opaque_fallback_tokens,
-                                      run_id="original-run", model_call=7,
-                                      usage={"input_tokens": 800, "output_tokens": 257, "total_tokens": 1057})
-        original_risks = deepcopy(risks)
-        budget = check_context_budget(request, risks, summary_budget_settings(SETTINGS, "H"))
-        self.assertEqual(budget["decision"], "allow")
-        self.assertEqual(budget["opaque_items"], 1)
-        self.assertEqual(budget["opaque_risk_tokens"], 257)
-        self.assertEqual(risks[2], {"opaque_count": 1, "risk_tokens": 257,
-                         "basis": "response_output_usage", "source_run_id": "original-run", "source_model_call": 7})
-        measured_projection = deepcopy(request)
-        measured_projection["input"][2]["encrypted_content"] = None
-        self.assertEqual(budget["transparent_tokens"], len(json.dumps(
-            measured_projection, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")))
-        observed = []
-        def capture(sent):
-            observed.append(json.loads(sent.content))
-            return httpx.Response(200, json=completed_response())
-        client, _ = self.make_client(capture)
-        async with client:
-            await responses.send_prepared_response(client, request, purpose="summary")
-        self.assertEqual(observed, [request])
-        self.assertEqual(observed[0]["input"], items)
-        self.assertEqual(observed[0]["input"][2]["encrypted_content"], "opaque-do-not-decode-密文")
-        self.assertEqual(risks, original_risks)
-        missing_risk = [None] * len(items)
-        self.assertEqual(check_context_budget(request, missing_risk, summary_budget_settings(SETTINGS, "H"))["decision"], "error")
-        fallback = annotate_context_risks(items, fallback_tokens=SETTINGS.opaque_fallback_tokens,
-                                          run_id="original-run", model_call=7)
-        self.assertEqual(check_context_budget(request, fallback, summary_budget_settings(SETTINGS, "H"))["opaque_risk_tokens"],
-                         SETTINGS.opaque_fallback_tokens)
+        items[-1]["output"] = "caller changed source"
+        self.assertEqual(request["input"][0]["content"], text)
 
     def test_native_builder_rejects_incomplete_or_unsupported_protocol_without_repair(self):
         complete = self.native_history()
@@ -191,7 +158,8 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
                     self.assertNotIn("tools", bodies[-1])
                     self.assertTrue(is_summary_request(bodies[-1]))
-                    self.assertEqual(bodies[-1]["input"], NATIVE_INPUT)
+                    self.assertEqual(len(bodies[-1]["input"]), 1)
+                    self.assertIn(NATIVE_INPUT[1]["content"], bodies[-1]["input"][0]["content"])
                     self.assertEqual(result["usage"]["total_tokens"], 15)
 
             business = prepare_request(
@@ -250,11 +218,11 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
             for attempt in (1, 2):
                 request = prepare_summary_request(SETTINGS, NATIVE_INPUT, lane=lane, attempt_no=attempt)
                 self.assertTrue(is_summary_request(request))
-                self.assertIn('"format":"compact_native_v1"', request["instructions"])
+                self.assertIn('"format":"compact_conversation_v1"', request["instructions"])
                 for change in (
                     {"max_output_tokens": cap + 1}, {"reasoning": {"effort": "low"}},
                     {"max_output_tokens": float(cap)}, {"instructions": SUMMARY_INSTRUCTIONS},
-                    {"instructions": request["instructions"].replace("compact_native_v1", "unknown")},
+                    {"instructions": request["instructions"].replace("compact_conversation_v1", "unknown")},
                     {"tools": [{"type": "function", "name": "unexpected", "parameters": {}}]},
                 ):
                     with self.subTest(lane=lane, attempt=attempt, change=change):

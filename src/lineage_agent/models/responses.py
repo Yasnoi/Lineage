@@ -100,7 +100,7 @@ async def send_prepared_response(
 ) -> ModelResult:
     """Send the same prepared kwargs that the graph has already measured."""
     is_summary = purpose == "summary"
-    # Native summary input can contain original tool bodies and derived text.
+    # Textual summary input contains tool bodies, historical thinking and derived text.
     # Keep it on the content-free summary tracing path.
     span, end = None, None
     if tracer is not None and is_summary:
@@ -261,7 +261,7 @@ def compactable_group_items(items: list[dict[str, Any]], *, require_response: bo
     """Check a complete text/tool protocol group without rewriting its contents.
 
     Known reasoning moves only with its whole group, including opaque fields.
-    Native summary input preserves those fields without decoding them.
+    Source records retain these fields; summary rendering never decodes them.
     Unknown extensions and non-text items remain protocol barriers.
     """
     def has_encrypted(value: Any) -> bool:

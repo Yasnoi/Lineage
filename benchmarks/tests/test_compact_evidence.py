@@ -15,6 +15,7 @@ from lineage_agent.config.settings import ModelSettings
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.summarization import prepare_summary_request, summary_budget_settings
 from lineage_agent.models.budget import check_context_budget
+from lineage_agent.models.summary_input import INPUT_FORMAT, record_details, serialize_conversation
 from lineage_agent.tools.types import inline_tool_output, serialize_tool_output
 
 
@@ -39,9 +40,12 @@ class CompactEvidenceTests(unittest.TestCase):
         self.addCleanup(self.journal.close)
         self.original_records = make_record_batch("run1", 0, [{"role": "user", "content": "read the chain"}, *self.original])
         _, self.watermark = self.journal.append("run1", self.original_records)
-        self.summary = prepare_summary_request(self.settings, [
+        self.items = [
             {"role": "user", "content": "Current Run prefix; first original input is read-only background."},
-            *[record["item"] for record in self.original_records]], lane="R")
+            *[record["item"] for record in self.original_records]]
+        self.details = [{"kind": "scope"}, *[record_details(record) for record in self.original_records]]
+        rendered = serialize_conversation(self.items, item_details=self.details)
+        self.summary = prepare_summary_request(self.settings, rendered, lane="R")
         projection = record_projection(self.original_records[2])[0]
         self.recall = pair("history_search", "search", {"history_ref": "scope", "keywords": ["37"], "cursor": None},
                            {"hits": [{"source_ref": self.source_ref}]})
@@ -53,7 +57,8 @@ class CompactEvidenceTests(unittest.TestCase):
         self.metadata = {"lane": "R", "request_no": 5, "attempt_no": 1,
             "snapshot": {"record_files": {"run1": self.watermark}},
             "summary_input_metadata": {"item_refs": [None, *[record["source_ref"] for record in self.original_records]],
-                                       "context_risks": [None] * len(self.summary["input"]), "derived_spans": []},
+                                       "context_risks": [None], "derived_spans": [], "item_details": self.details,
+                                       "format": INPUT_FORMAT, "source_spans": rendered.source_spans},
             "lanes": {"R": {"source_refs": [record["source_ref"] for record in self.original_records[1:]],
                 "previous": [], "source_files": [{"run_id": "run1", "path": str(self.journal.path("run1")),
                                                   "start": 1, "end": 3}],
@@ -93,7 +98,8 @@ class CompactEvidenceTests(unittest.TestCase):
         binding = native_binding(self.observer, self.summary)
         self.assertTrue(binding["verified"])
         self.assertEqual(binding["input_records"], self.original_records)
-        self.assertEqual(self.summary["input"][3], self.original[1])
+        self.assertEqual(len(self.summary["input"]), 1)
+        self.assertIn(self.text, self.summary["input"][0]["content"])
         self.assertEqual(self.journal.path("run1").read_bytes(), before)
         _, path = turn_compact_evidence(self.observer, self.state, 1, self.settings)
         evidence = json.loads(path.read_text(encoding="utf-8"))["summary_requests"][0]
@@ -119,7 +125,7 @@ class CompactEvidenceTests(unittest.TestCase):
 
     def test_changed_native_output_or_file_cannot_verify(self):
         request = deepcopy(self.summary)
-        request["input"][-1]["output"] = ""
+        request["input"][0]["content"] = request["input"][0]["content"].replace(self.text, "changed result")
         observer = deepcopy(self.observer)
         observer.summary_contexts[digest(request)] = deepcopy(self.metadata)
         observer.summary_contexts[digest(request)]["lanes"]["R"]["summary_request_sha256"] = digest(request)
@@ -135,7 +141,7 @@ class CompactEvidenceTests(unittest.TestCase):
                 request = deepcopy(self.summary)
                 metadata = deepcopy(self.metadata)
                 if defect == "reordered":
-                    request["input"][2:] = reversed(request["input"][2:])
+                    pass  # The source order changed but the actual rendered request did not.
                     metadata["summary_input_metadata"]["item_refs"][2:] = reversed(
                         metadata["summary_input_metadata"]["item_refs"][2:])
                 else:
