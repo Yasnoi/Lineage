@@ -31,6 +31,10 @@ def digest(value):
                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
+def context_settings(case):
+    return {key: case[key] for key in ("context_budget_tokens", "safety_margin_tokens")}
+
+
 def build_request(case, effort):
     if effort not in VARIANTS:
         raise ValueError("unknown text acceptance effort")
@@ -52,8 +56,9 @@ def validate(manifest):
                 or case.get("design") != DESIGN or case.get("previous_summary_is_fixed") is not True
                 or digest(case["source_input"]) != case["source_input_sha256"]
                 or digest(case["item_details"]) != case["item_details_sha256"]
-                or case["context_budget_tokens"] != manifest["settings"]["context_budget_tokens"]
-                or case["safety_margin_tokens"] != manifest["settings"]["context_safety_margin_tokens"]
+                or type(case["context_budget_tokens"]) is not int or case["context_budget_tokens"] <= 0
+                or type(case["safety_margin_tokens"]) is not int or case["safety_margin_tokens"] < 0
+                or digest(context_settings(case)) != case["context_settings_sha256"]
                 or set(case["requests"]) != set(VARIANTS)):
             raise ValueError("invalid frozen text source")
         identities.add(case["id"])
@@ -150,6 +155,7 @@ def freeze(sources: Path, destination: Path):
                     historical_request_sha256=digest(source["request"]))
         case["source_input_sha256"] = digest(case["source_input"])
         case["item_details_sha256"] = digest(case["item_details"])
+        case["context_settings_sha256"] = digest(context_settings(case))
         case["requests"] = {effort: build_request(case, effort) for effort in VARIANTS}
         case["request_sha256"] = {effort: digest(request) for effort, request in case["requests"].items()}
         result["cases"].append(case)

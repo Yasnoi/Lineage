@@ -28,10 +28,11 @@ def manifest():
             "context_budget_tokens": 65536, "safety_margin_tokens": 8192, "previous_summary_is_fixed": True}
     case["source_input_sha256"] = text.digest(case["source_input"])
     case["item_details_sha256"] = text.digest(case["item_details"])
+    case["context_settings_sha256"] = text.digest(text.context_settings(case))
     case["requests"] = {effort: text.build_request(case, effort) for effort in text.VARIANTS}
     case["request_sha256"] = {effort: text.digest(request) for effort, request in case["requests"].items()}
     return {"design": text.DESIGN, "input_format": INPUT_FORMAT, "limits": dict(text.LIMITS), "cases": [case],
-            "settings": {"model_name": "offline", "context_budget_tokens": 65536, "context_safety_margin_tokens": 8192}}
+            "settings": {"model_name": "offline", "context_budget_tokens": 250000, "context_safety_margin_tokens": 8192}}
 
 
 class TextAcceptanceTests(unittest.IsolatedAsyncioTestCase):
@@ -59,13 +60,14 @@ class TextAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("NEVER_SEND", body)
                 self.assertNotIn("new summary", body)
                 self.assertEqual(row["budget"]["opaque_items"], 0)
+                self.assertEqual(row["budget"]["limit_tokens"], 65536)
                 self.assertEqual(row["http_requests"], 1)
                 self.assertEqual(row["status"], "accepted")
         self.assertEqual(frozen, before)
         self.assertEqual([row["variant"] for row in schedule(frozen)], ["high", "max", "max", "high"])
 
     def test_modified_sources_labels_request_caps_or_limits_are_rejected(self):
-        for defect in ("source", "details", "cap", "instructions", "limits"):
+        for defect in ("source", "details", "cap", "instructions", "limits", "context_budget"):
             value = manifest()
             if defect == "source":
                 value["cases"][0]["source_input"][1]["content"] = "changed"
@@ -74,8 +76,10 @@ class TextAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             elif defect in ("cap", "instructions"):
                 request = value["cases"][0]["requests"]["high"]
                 request["max_output_tokens" if defect == "cap" else "instructions"] = 8192 if defect == "cap" else "old"
-            else:
+            elif defect == "limits":
                 value["limits"]["sdk_requests"] += 1
+            else:
+                value["cases"][0]["context_budget_tokens"] += 1
             with self.subTest(defect=defect), self.assertRaises(ValueError):
                 validate(value)
         with self.assertRaises(ValueError):
