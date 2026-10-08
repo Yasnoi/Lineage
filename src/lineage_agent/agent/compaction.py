@@ -235,8 +235,8 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 material = {
                     "input": [
                         {"role": "user", "content": (
-                            f"精简本次 {lane} 候选摘要。它尚未启用；覆盖范围和归属不变。"
-                            "下文仅为第一份候选正文，不含原始历史；保留重要条件、失败、修正和不确定性。")},
+                            f"<summary_scope>\n精简本次 {lane} 候选摘要。它尚未启用；覆盖范围和归属不变。"
+                            "下文仅为第一份候选正文，不含原始历史；保留重要条件、失败、修正和不确定性。\n</summary_scope>")},
                         {"role": "assistant", "content": candidate["body"]},
                     ],
                     "context_risks": [None, None], "item_refs": [None, None],

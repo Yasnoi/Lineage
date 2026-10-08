@@ -127,6 +127,8 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         before_file = self.journal.path("current").read_bytes()
         selection = await self.select(state)
         material = await self.context.material(selection, "R", state)
+        self.assertTrue(material["input"][0]["content"].startswith("<summary_scope>\n"))
+        self.assertTrue(material["input"][0]["content"].endswith("\n</summary_scope>"))
         self.assertEqual(set(material), {"input", "context_risks", "derived_spans", "item_refs"})
         self.assertEqual(material["input"][1:], initial + [{"role": "assistant", "content": old_body}] + native)
         self.assertEqual(material["item_refs"][1:3], initial_refs)
@@ -168,6 +170,8 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         state = self.state("current", items, [None] + original_refs + [None] + tail_refs + current_refs, active)
         selection = await self.select(state)
         material = await self.context.material(selection, "H", state)
+        self.assertTrue(material["input"][0]["content"].startswith("<summary_scope>\n"))
+        self.assertTrue(material["input"][0]["content"].endswith("\n</summary_scope>"))
         self.assertEqual(material["input"][1:], [{"role": "assistant", "content": "已知 H 正文"}, user,
             {"role": "assistant", "content": "旧轮次 R 正文"}, *tail])
         self.assertEqual([span["index"] for span in material["derived_spans"]], [1, 3])

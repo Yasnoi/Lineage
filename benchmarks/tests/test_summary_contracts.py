@@ -22,6 +22,19 @@ def result(text="Observed failure; retry remains unfinished."):
 
 
 class SummaryContractsTests(unittest.TestCase):
+    def test_tagged_guidance_separates_common_rules_from_lane_specific_scope(self):
+        import xml.etree.ElementTree as ET
+        from lineage_agent.models.summarization import _POLICY_MARKER
+        for lane in ("H", "R"):
+            request = prepare_summary_request(SETTINGS, [{"role": "user", "content": "source"}], lane=lane)
+            root = ET.fromstring("<instructions>" + request["instructions"].split(_POLICY_MARKER)[0] + "</instructions>")
+            self.assertEqual([child.tag for child in root], ["task", "source_interpretation", "preservation_rules",
+                                                          "lane_rules", "output_outline", "final_check"])
+            self.assertNotIn("read-only background", root.findtext("source_interpretation"))
+            self.assertEqual("read-only background" in root.findtext("lane_rules"), lane == "R")
+            self.assertIn("Source / evidence", root.findtext("output_outline"))
+            self.assertIn("Omit empty sections", root.findtext("output_outline"))
+
     def test_lane_caps_are_independent_of_business_output_allowance(self):
         settings = replace(SETTINGS, max_output_tokens=256)
         material = [{"role": "user", "content": "do not change 17 or the negation"}]

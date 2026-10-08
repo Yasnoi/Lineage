@@ -349,7 +349,7 @@ class ContextRecords:
                 f"{outcome}={count}" for outcome, count in sorted(dispositions.items())) + "。")
         if failures:
             note.append("非成功调用：" + "；".join(failures) + "。这些说明不补造缺失的协议结果。")
-        append({"role": "user", "content": "\n".join(note)})
+        append({"role": "user", "content": "<summary_scope>\n" + "\n".join(note) + "\n</summary_scope>"})
         if lane == "R":
             start = active["turn_start"]
             for index in range(start, start + active["initial_input_count"]):
