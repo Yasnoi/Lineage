@@ -1,6 +1,6 @@
 # 工程约定与迁移覆盖
 
-本文面向维护确定性检查的开发者。工程行为组的可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 17 条隔离行为链包含 184 个行为组；实际是否执行及结果以运行报告为准。`benchmarks/tests/` 另有可通过 `unittest` 执行的框架和专项检查，部分与工程行为组复用同一场景，不重复累加为覆盖数量。
+本文面向维护确定性检查的开发者。工程行为组的可执行清单为 [contracts.json](suites/agent_contracts/contracts.json)，模块按被测约定划分，不代表不同项目评测集。全量入口为 `python -m benchmarks run agent-contracts`。当前 17 条隔离行为链包含 189 个行为组；实际是否执行及结果以运行报告为准。`benchmarks/tests/` 另有可通过 `unittest` 执行的框架和专项检查，部分与工程行为组复用同一场景，不重复累加为覆盖数量。
 
 ## 模块与判断依据
 
@@ -9,7 +9,7 @@
 | `execution` | 19 | 输入/响应协议、批次继续、结果关联、调用额度和终态统计；直接比较实际请求、工具返回和 State。 |
 | `filesystem` | 36 | 目录与文本路径边界、读取额度、真实 I/O，以及 Artifact 快照、有界召回与会话隔离；核对实际文件和累计预算。 |
 | `sessions` | 25 | 历史准入、隔离、重置、并发拒绝、保存和关闭；核对原生检查点及后续请求。 |
-| `context` | 65 | 请求预算、风险计量、H/R 选源、三组保护、原始记录回读、保存屏障和活动版本；对照实际请求参数与记录。 |
+| `context` | 70 | 请求预算、风险计量、H/R 选源、三组保护、原始记录回读、保存屏障和活动版本；对照实际请求参数与记录。 |
 | `recording` | 39 | JSONL、过滤、usage 投影、序列化、上传异常和有限收尾；对照实际 SDK 载荷与故障观察。 |
 
 一次跨模块场景保留完整执行链，只按主要模块计一次；标签不作为根因结论。响应耗时、真实 token 与缓存字段由真实任务轨迹另外观测，替身 token 不算成本。没有统一总分。
@@ -18,7 +18,7 @@
 
 来源基线为 `c97467ed41bcd3a0232033f9160d15199b30069b`。14 个原 `scripts/check_*.py` 已移除，其检查函数和实际公共替身归入 Benchmark。ReAct 的执行检查与记录检查分开；Review 的输入协议、文件系统预算、追踪投影按职责分开，未拆断单个故障链。Session 两处异步入口后的 CLI 检查、fixture 收尾和五次摘要 Tracing exercise 均保留。data/usage 组经 recording.transport 调用，不另建隔离单元或重复计数。
 
-此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖当时的 138 组，不能解释为当前改造仍逐条保持 AST 不变，断言数量也不是覆盖率。后续动态恢复、Artifact 和观测治理扩展至 155 组；本次将旧 Compact 的 22 组替换为当前前缀、H/R、原始记录及保存边界的 51 组，合计 184 组。当前证据以实际事件、请求、状态及故障观察为准。
+此前脚本迁移核对中，基线 1,444 条 assert 有 1,443 条业务/边界断言的 AST 保持不变。原 Review `assert not failures` 是独立脚本聚合器收尾，现由组记录及失败停止策略承担。远端 usage 对比公共函数从 `verify_tracing.py` 提取，其一条既有断言归入公共代码，供诊断脚本和工程检查共同复用。该历史核对覆盖当时的 138 组，不能解释为当前改造仍逐条保持 AST 不变，断言数量也不是覆盖率。后续动态恢复、Artifact 和观测治理扩展至 155 组；本次将旧 Compact 的 22 组替换为当前前缀、H/R、原始记录及保存边界的 51 组，当时合计 184 组；历史文本化再增加 5 组，当前合计 189 组。当前证据以实际事件、请求、状态及故障观察为准。
 
 Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响应上限、关键词分页、会话及缓存路径隔离、关闭与故障行为，并用离线模型替身走通两轮工具调用及记录过滤。观测治理检查另行验证自动归档、结构化提示、默认召回工具和治理故障；两类检查均不以真实模型的上下文下降或回答质量作为结论。
 
@@ -26,7 +26,7 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 
 ## Compact 与历史召回的检查来源
 
-当前 Run 前缀恢复及原始记录回读使用下列 `unittest` 场景，入口为 `python -m unittest discover -s benchmarks/tests -v`。其中前缀 21 组、保存与请求边界 6 组、原始记录 13 组、配置 3 组和摘要协议 8 组也由 `context.compaction` 调用，共 51 个工程组；两种入口复用场景，不能视为两份独立覆盖。其余传输、追踪和 Benchmark 检查单独执行。
+当前 Run 前缀恢复及原始记录回读使用下列 `unittest` 场景，入口为 `python -m unittest discover -s benchmarks/tests -v`。其中前缀 21 组、保存与请求边界 6 组、原始记录 13 组、配置 3 组和摘要协议 8 组也由 `context.compaction` 调用，原共 51 个工程组，文本化另增加 5 组，现共 56 组；两种入口复用场景，不能视为两份独立覆盖。其余传输、追踪和 Benchmark 检查单独执行。
 
 | 检查来源 | 覆盖范围 |
 | --- | --- |
@@ -37,7 +37,7 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 | [test_compact_tracing.py](tests/test_compact_tracing.py) | H/R 和旧 R 按可信摘要位置过滤、普通伪造标记不触发过滤、元数据截断不遗漏正文过滤、两路指标与 CLI 阶段。 |
 | [test_compact_evidence.py](tests/test_compact_evidence.py)、[test_compact_entrypoint.py](tests/test_compact_entrypoint.py) | Benchmark 历史召回证据、存储指标与请求开销、统一运行入口和配置限制。 |
 
-新增文件持久化与第二阶段规则由以下专项测试补充，仍通过上述 unittest 入口执行，不重复计入 184 个工程组：
+新增文件持久化与第二阶段规则由以下专项测试补充，仍通过上述 unittest 入口执行，不重复计入工程组数量：
 
 - `test_record_journal.py`、`test_persistent_storage.py`：JSONL 受限编码、完整批次写入、确认边界、索引重建、短写及 fsync 故障、关闭后保留文件、Artifact 多绑定和 `.lineage` 路径隔离。
 - `test_record_runtime.py`：初始化、模型／工具返回后写入、终态写入和最终检查点确认故障；保留真实执行事实、不重跑工具、不发布未确认历史。
@@ -246,5 +246,20 @@ Artifact 检查验证完整原文保存、正文字符位置、精确 UTF-8 响�
 ### 摘要共享 effort 与结构指令
 
 - `test_summary_effort.py`：未设置及四个显式等级的配置、H/R 两次尝试与实际 HTTP 参数一致；业务恢复沿用同一 effort；推理不进入摘要正文，纯推理响应不能替代摘要。
-- `test_summary_contracts.py` / `test_native_context_material.py`：共同规则与 H/R 规则分区、灵活大纲、仅程序范围说明加标签；原生项、风险和已有摘要正文保持原有合同。
+- `test_summary_contracts.py` / `test_native_context_material.py`：共同规则与 H/R 规则分区、灵活大纲、确认来源顺序、已有摘要正文及原始记录不变；实际摘要请求改用文本化合同。
 - `test_summary_effort_comparison.py`：四组交错顺序、原生输入与旧摘要不变、只允许指令/首条范围说明/effort 差异、累计时间上限和冻结哈希检查。原有对照框架的失败计数、证据故障、认证停止和禁用重试检查继续适用。
+
+### 历史文本化与新版本验收
+
+- `test_summary_input.py`：以下五组纳入 `context.compaction`；不透明原文保留在文件，可读资料在文本输入中完整保留。
+- `test_compact_transport.py` / `test_compact_evidence.py`：实际 HTTP 文本等于预检对象，从确认文件和可信旧摘要身份重建文本并验证绑定；文本预算不继承未发送密文的预留。
+- `test_prefix_compaction.py`：实际运行的首轮和后续 R 均可从文件重新生成已发送文本；三组保护、第二次候选精简、失败不重放和原文召回继续验证。
+- `test_summary_text_acceptance.py`：只发送当前文本请求的 high/max，输出上限均为 16384；冻结输入、旧摘要和元数据不随实验输出变化，旧提示词不作为新实验组。
+
+| 稳定组 ID | 验证内容 |
+| --- | --- |
+| `context.compaction.text_interleaved_calls_reversed_results_and_reused_ids_across_runs` | 文本化保留交错工具配对、真实失败和跨 Run 调用身份 |
+| `context.compaction.text_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions` | 可读思考与推理摘要保留，不透明正文仅留存在标记 |
+| `context.compaction.text_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding` | 标签样式原文和长工具结果完整保留且不产生协议项 |
+| `context.compaction.text_scope_background_and_previous_summary_use_trusted_identity_only` | 范围、只读背景和旧摘要按可信身份呈现，不按标题判断 |
+| `context.compaction.text_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail` | 文本化不能绕过未闭合组、未知依赖或权限指令边界 |

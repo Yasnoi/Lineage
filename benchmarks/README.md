@@ -137,15 +137,17 @@ uv run --locked python -m benchmarks review logs/benchmarks/<运行ID> --prepare
 
 [项目任务说明](suites/wechat_reporting/README.md) 描述当前案例的 Research 目标、固定事实范围和机制条件。当前评测流程使用一个项目；更多项目可用于验证不同语言、规模与文档质量下的表现。当前任务不测试联网、代码执行修改、PDF 解析或跨进程恢复，也不把项目上的一次结果推广为通用能力。
 
-工程约定集包含 17 条隔离行为链、155 个行为组。工具调用检查对照实际模型请求中的 `observation`：小结果保留原文，大结果验证有界片段及 Artifact 引用；原始文件 I/O 和读取额度仍独立核对。Artifact 召回工具默认注册，完整请求预算检查继续生效。详细覆盖见 [COVERAGE.md](COVERAGE.md)。
+工程约定集包含 17 条隔离行为链、189 个行为组。工具调用检查对照实际模型请求中的 `observation`：小结果保留原文，大结果验证有界片段及 Artifact 引用；原始文件 I/O 和读取额度仍独立核对。Artifact 召回工具默认注册，完整请求预算检查继续生效。详细覆盖见 [COVERAGE.md](COVERAGE.md)。
 
-### 摘要 effort 与指令结构对照
+### 摘要历史文本化验收
 
-`summary_prompt_comparison` 的 `freeze-effort` 接收已捕获的基线目录（`baseline.json`、`p0-manifest.json`、`p0-results.json`），将上一轮 B 冻结为 P0。P1 使用当前指令与首条范围说明标签，其余原生输入和风险保持不变。运行前须提交候选并校验来源哈希。
+当前验收只运行已实现并提交的文本化版本，复用此前冻结的 10 份历史上下文（4 H、6 R）。已有摘要正文保持固定，不串接本轮新输出。原生来源、工具执行事实和归属通过原始文件及旧证据核对；实际请求使用生产序列化组件。
 
 ```powershell
-.\.venv\Scripts\python.exe -m benchmarks.core.summary_prompt_comparison freeze-effort <baseline-directory> <new-output-directory>
+.\.venv\Scripts\python.exe -m benchmarks.core.summary_prompt_comparison freeze-text <historical-manifest.json> <new-output-directory>
 .\.venv\Scripts\python.exe -m benchmarks.core.summary_prompt_comparison run <new-output-directory>
 ```
 
-新实验交错运行 P0/high、P0/max、P1/high、P1/max；10 份固定上下文各重复两次，共 80 个请求槽。总上限 80 次 SDK 请求、4800 秒，每次 120 秒；不重试或续跑同一账本。旧 P0/none 仅作历史参考，其缓存与延迟不能视为同条件随机对照。输出上限包含推理和可见文本，原始 usage 保留供核对；缓存占比应按输入 token 加权计算。协议接受、语义质量与完整 Agent 任务完成分别评价，标签与大纲作为组合改动比较，不声称各自的独立贡献。
+每份上下文在 high、max 各重复两次，共 40 个请求槽；H/R 输出上限均为 16384。总上限 40 次实际 SDK 请求、2400 秒，单请求 120 秒；预检拒绝不发送，已发起失败计入额度，不重试、不续跑或补齐失败槽。运行前检查候选文件哈希、工作区提交状态、实际导入位置、模型与端点，保存实际 HTTP 请求并与预检对象核对。
+
+旧 A/B、P0/P1 和 none 结果仅作历史参考，本实验不重新发送旧版本请求。历史 R 上限为 8192，当前为 16384；缓存、时序与输出上限差异不能归因于文本化。协议接受、是否执行摘要任务、语义质量和完整 Agent 任务完成分别评价，保留失败及未运行样本。原始 usage 留存，缓存占比按可获得的输入 token 加权计算。旧对照工具保留用于历史证据和框架回归，不用于当前文本化效果验收。

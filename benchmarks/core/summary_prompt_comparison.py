@@ -17,8 +17,9 @@ from uuid import uuid4
 
 from benchmarks.core.budgets import RequestBudget, WorkerAbort, read_ledger
 from benchmarks.core.files import ROOT, atomic_write_json, atomic_write_text, sha256_file, utc_now
+from benchmarks.core import summary_text_acceptance as text_acceptance
 from lineage_agent.config.settings import load_settings
-from lineage_agent.models import summarization
+from lineage_agent.models import summarization, summary_input
 from lineage_agent.models.budget import check_context_budget
 from lineage_agent.models.responses import ModelError, create_client, send_prepared_response
 from lineage_agent.models.summarization import (
@@ -99,6 +100,9 @@ def freeze_effort(baseline: Path, destination: Path):
 
 
 def validate(manifest):
+    if manifest.get("design") == text_acceptance.DESIGN:
+        text_acceptance.validate(manifest)
+        return
     effort = manifest.get("design") == EFFORT_DESIGN
     if manifest.get("design") not in (None, EFFORT_DESIGN):
         raise ValueError("unknown comparison design")
@@ -132,6 +136,13 @@ def validate(manifest):
 
 
 def prepare(case, variant):
+    if case.get("design") == text_acceptance.DESIGN:
+        request = text_acceptance.build_request(case, variant)
+        if request != case["requests"][variant] or digest(request) != case["request_sha256"][variant]:
+            raise ValueError("frozen text request changed")
+        settings = SummaryBudgetSettings(case["context_budget_tokens"], request["max_output_tokens"],
+                                         case["safety_margin_tokens"])
+        return request, check_context_budget(request, [None], settings)
     request = deepcopy(case["request"])
     request["instructions"] = case["instructions"][variant]
     if digest(without_instructions(request)) != case["fixed_request_sha256"]:
@@ -159,6 +170,8 @@ def schedule(manifest):
             if manifest.get("design") == EFFORT_DESIGN:
                 offset = (index + (repeat - 1) * 2) % 4
                 variants = EFFORT_VARIANTS[offset:] + EFFORT_VARIANTS[:offset]
+            elif manifest.get("design") == text_acceptance.DESIGN:
+                variants = text_acceptance.VARIANTS if (index + repeat) % 2 else text_acceptance.VARIANTS[::-1]
             for variant in variants:
                 rows.append({"case_index": index, "case": case["id"], "variant": variant,
                              "repeat": repeat, "status": "not_run", "review_id": uuid4().hex})
@@ -282,9 +295,15 @@ def main():
     effort_parser = sub.add_parser("freeze-effort")
     effort_parser.add_argument("baseline", type=Path)
     effort_parser.add_argument("destination", type=Path)
+    text_parser = sub.add_parser("freeze-text")
+    text_parser.add_argument("sources", type=Path)
+    text_parser.add_argument("destination", type=Path)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("directory", type=Path)
     args = parser.parse_args()
+    if args.action == "freeze-text":
+        text_acceptance.freeze(args.sources, args.destination)
+        return
     if args.action == "freeze-effort":
         freeze_effort(args.baseline, args.destination)
         return
@@ -295,11 +314,19 @@ def main():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validate(manifest)
     verify_sources(manifest)
-    if sha256_file(ROOT / "src/lineage_agent/models/summarization.py") != manifest["candidate_source_sha256"]:
+    candidate_files = manifest.get("candidate_files", {}) if manifest.get("design") == text_acceptance.DESIGN else {
+        "src/lineage_agent/models/summarization.py": manifest["candidate_source_sha256"]}
+    if any(sha256_file(ROOT / name) != expected for name, expected in candidate_files.items()):
         raise ValueError("candidate changed after freeze")
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip():
         raise ValueError("commit the verified candidate before real comparison")
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    modules = {"summarization": str(Path(summarization.__file__).resolve()),
+               "summary_input": str(Path(summary_input.__file__).resolve())}
+    if manifest.get("design") == text_acceptance.DESIGN and any(
+            Path(path) != (ROOT / "src/lineage_agent/models" / (name + ".py")).resolve()
+            for name, path in modules.items()):
+        raise ValueError("acceptance imported a different source checkout")
     settings = load_settings(ROOT / ".env")
     if any(getattr(settings, key) != manifest["settings"][key] for key in ("model_name", "base_url")):
         raise ValueError("comparison endpoint/model changed")
@@ -312,6 +339,7 @@ def main():
             return await compare(manifest, args.directory, client, provenance={
                 "candidate_commit": commit, "manifest_sha256": sha256_file(manifest_path),
                 "source_module": str(Path(summarization.__file__).resolve()),
+                "source_modules": modules,
             })
     result = asyncio.run(run())
     verify_sources(manifest)

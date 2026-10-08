@@ -161,6 +161,23 @@ async def check_summary_known_encrypted_reasoning_is_whole_group_only():
 async def check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers():
     await run_case(summary.GroupProtocolTests, "test_unrecognized_nontext_authority_and_incomplete_items_are_barriers")
 
+from benchmarks.tests import test_summary_input as text_input
+
+async def check_text_interleaved_calls_reversed_results_and_reused_ids_across_runs():
+    await run_case(text_input.SummaryInputTests, "test_interleaved_calls_reversed_results_and_reused_ids_across_runs")
+
+async def check_text_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions():
+    await run_case(text_input.SummaryInputTests, "test_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions")
+
+async def check_text_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding():
+    await run_case(text_input.SummaryInputTests, "test_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding")
+
+async def check_text_scope_background_and_previous_summary_use_trusted_identity_only():
+    await run_case(text_input.SummaryInputTests, "test_scope_background_and_previous_summary_use_trusted_identity_only")
+
+async def check_text_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail():
+    await run_case(text_input.SummaryInputTests, "test_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail")
+
 async def main():
     checks = (
         check_prefix_independent_long_run_recovers_current_prefix_and_protects_three_groups,
@@ -214,6 +231,11 @@ async def main():
         check_summary_complete_multi_tool_group_including_failure_is_allowed,
         check_summary_known_encrypted_reasoning_is_whole_group_only,
         check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers,
+        check_text_interleaved_calls_reversed_results_and_reused_ids_across_runs,
+        check_text_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions,
+        check_text_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding,
+        check_text_scope_background_and_previous_summary_use_trusted_identity_only,
+        check_text_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail,
     )
     for check in checks:
         with check_group(group_id(check)):

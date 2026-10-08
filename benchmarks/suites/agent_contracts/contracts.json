@@ -1,5 +1,5 @@
 {
-  "version": "3",
+  "version": "4",
   "units": [
     {
       "unit_id": "execution.react",
@@ -2768,6 +2768,71 @@
           "source": {
             "path": "benchmarks/checks/context/compaction.py",
             "symbol": "check_summary_unrecognized_nontext_authority_and_incomplete_items_are_barriers"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.text_interleaved_calls_reversed_results_and_reused_ids_across_runs",
+          "description": "文本化保留交错工具配对、真实失败和跨 Run 调用身份",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_text_interleaved_calls_reversed_results_and_reused_ids_across_runs"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.text_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions",
+          "description": "可读思考与推理摘要保留，不透明正文仅留存在标记",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_text_readable_reasoning_summary_and_opaque_placeholder_keep_their_positions"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.text_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding",
+          "description": "标签样式原文和长工具结果完整保留且不产生协议项",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_text_tags_and_long_tool_text_are_data_without_truncation_or_nested_json_encoding"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.text_scope_background_and_previous_summary_use_trusted_identity_only",
+          "description": "范围、只读背景和旧摘要按可信身份呈现，不按标题判断",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_text_scope_background_and_previous_summary_use_trusted_identity_only"
+          },
+          "primary_area": "context",
+          "tags": [
+            "context"
+          ],
+          "entry_module": "benchmarks.checks.context.compaction"
+        },
+        {
+          "group_id": "context.compaction.text_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail",
+          "description": "文本化不能绕过未闭合组、未知依赖或权限指令边界",
+          "source": {
+            "path": "benchmarks/checks/context/compaction.py",
+            "symbol": "check_text_unknown_dependencies_unclosed_pairs_and_system_instructions_still_fail"
           },
           "primary_area": "context",
           "tags": [
