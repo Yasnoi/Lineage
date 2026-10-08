@@ -54,6 +54,8 @@ def _settings_error(exc, path):
         constraint = "必须是含有效主机名的 HTTP(S) 地址，且不含凭据、查询或片段。"
     elif name == "model_name":
         constraint = "必须是非空字符串。"
+    elif name == "reasoning_effort":
+        constraint = "必须为 none、low、high、max，或 null 以使用端点默认值。"
     elif name == "context_budget_tokens":
         constraint = "必须是正整数，且大于 max_output_tokens 与 context_safety_margin_tokens 之和。"
     elif name in RETIRED_COMPACT_KEYS:

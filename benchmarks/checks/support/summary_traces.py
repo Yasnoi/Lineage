@@ -69,7 +69,7 @@ async def exercise(*, enabled=True, mode="ok", reply=None, label="normal", lane=
         ],
         lane=lane,
     )
-    assert is_summary_request(summary_request) and summary_request["reasoning"] == {"effort": "none"}
+    assert is_summary_request(summary_request) and "reasoning" not in summary_request
     assert summary_request["max_output_tokens"] == summary_budget_settings(SETTINGS, lane).max_output_tokens
     business_request = prepare_request(
         SETTINGS.model_name, [

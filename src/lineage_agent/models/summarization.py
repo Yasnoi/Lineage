@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from lineage_agent.config.settings import ModelSettings
+from lineage_agent.config.settings import ModelSettings, validate_reasoning_effort
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.responses import compactable_group_items
 from lineage_agent.models.types import ModelResult
@@ -85,8 +85,10 @@ _POLICY_MARKER = "\nCompact request policy: "
 _INPUT_FORMAT = "compact_native_v1"
 
 
-def _summary_instructions(output_tokens: int, lane: SummaryLane, attempt_no: int) -> str:
+def _summary_instructions(output_tokens: int, lane: SummaryLane, attempt_no: int,
+                          reasoning_effort: str | None = None) -> str:
     """Canonical request policy, shared by preparation and purpose recognition."""
+    validate_reasoning_effort(reasoning_effort)
     if (type(output_tokens) is not int or output_tokens <= 0 or type(lane) is not str or lane not in _LANE_INSTRUCTIONS
             or type(attempt_no) is not int or attempt_no not in (1, 2)):
         raise SummaryError("summary_measurement_error")
@@ -97,6 +99,7 @@ def _summary_instructions(output_tokens: int, lane: SummaryLane, attempt_no: int
                   if attempt_no == 2 else "")
     return SUMMARY_INSTRUCTIONS + _LANE_INSTRUCTIONS[lane] + shortening + _POLICY_MARKER + _compact_json({
         "format": _INPUT_FORMAT, "lane": lane, "attempt_no": attempt_no, "max_output_tokens": output_tokens,
+        "reasoning_effort": reasoning_effort,
     })
 
 
@@ -109,15 +112,17 @@ def summary_request_lane(request: dict[str, Any]) -> SummaryLane | None:
         if type(instructions) is not str or _POLICY_MARKER not in instructions:
             return None
         policy = json.loads(instructions.rsplit(_POLICY_MARKER, 1)[1])
-        if type(policy) is not dict or set(policy) != {"format", "lane", "attempt_no", "max_output_tokens"}:
+        if type(policy) is not dict or set(policy) != {"format", "lane", "attempt_no", "max_output_tokens", "reasoning_effort"}:
             return None
         lane = policy["lane"]
         valid = (
             policy["format"] == _INPUT_FORMAT
-            and instructions == _summary_instructions(policy["max_output_tokens"], lane, policy["attempt_no"])
+            and instructions == _summary_instructions(policy["max_output_tokens"], lane, policy["attempt_no"], policy["reasoning_effort"])
             and type(request.get("max_output_tokens")) is int
             and request.get("max_output_tokens") == policy["max_output_tokens"]
-            and request.get("reasoning") == {"effort": "none"}
+            and ((policy["reasoning_effort"] is None and "reasoning" not in request)
+                 or (policy["reasoning_effort"] is not None
+                     and request.get("reasoning") == {"effort": policy["reasoning_effort"]}))
             and request.get("tool_choice") == "none"
             and request.get("tools") in (None, [])
             and request.get("stream") is False and request.get("store") is False
@@ -175,11 +180,11 @@ def prepare_summary_request(
         request = prepare_request(
             settings.model_name,
             input,
-            instructions=_summary_instructions(output_tokens, lane, attempt_no),
+            instructions=_summary_instructions(output_tokens, lane, attempt_no, settings.reasoning_effort),
             tool_choice="none",
             max_output_tokens=output_tokens,
+            reasoning_effort=settings.reasoning_effort,
         )
-        request["reasoning"] = {"effort": "none"}
         return request
     except (TypeError, ValueError, UnicodeError, RecursionError):
         raise SummaryError("summary_measurement_error") from None

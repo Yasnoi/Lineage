@@ -19,6 +19,12 @@ DEFAULT_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 8192
+REASONING_EFFORTS = ("none", "low", "high", "max")
+
+
+def validate_reasoning_effort(value: str | None) -> None:
+    if value is not None and (type(value) is not str or value not in REASONING_EFFORTS):
+        raise ConfigurationError("REASONING_EFFORT 必须为 none、low、high、max，或不设置以使用端点默认值。")
 
 
 class ConfigurationError(ValueError):
@@ -63,6 +69,7 @@ class ModelSettings:
     context_keep_recent_groups: int = 3
     summary_history_max_output_tokens: int = DEFAULT_SUMMARY_HISTORY_MAX_OUTPUT_TOKENS
     summary_run_max_output_tokens: int = DEFAULT_SUMMARY_RUN_MAX_OUTPUT_TOKENS
+    reasoning_effort: str | None = None
     # Accept obsolete keywords only to give a precise migration error. InitVars
     # are not dataclass fields and never appear in asdict or saved configuration.
     context_trigger_percent: InitVar[object] = _REMOVED_OPTION
@@ -83,6 +90,7 @@ class ModelSettings:
         ), strict=True) if value is not _REMOVED_OPTION]
         if removed:
             raise _removed_configuration(removed)
+        validate_reasoning_effort(self.reasoning_effort)
         try:
             if not isinstance(self.base_url, str) or not self.base_url.strip():
                 raise ValueError
@@ -227,6 +235,7 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
     return ModelSettings(
         base_url=base_url,
         model_name=model_name,
+        reasoning_effort=os.environ.get("REASONING_EFFORT"),
         timeout_seconds=timeout_seconds,
         max_model_calls=max_model_calls,
         log_dir=log_dir,

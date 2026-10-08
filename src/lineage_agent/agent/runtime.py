@@ -344,6 +344,7 @@ async def _run_agent(
             return prepare_request(
                 settings.model_name, model_input, tools=available_tools or None,
                 max_output_tokens=settings.max_output_tokens, **options,
+                reasoning_effort=settings.reasoning_effort,
             )
 
         async def call_model(request):

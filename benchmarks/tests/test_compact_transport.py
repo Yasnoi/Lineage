@@ -187,7 +187,7 @@ class CompactTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(bodies[-1]["max_output_tokens"], cap)
                     self.assertNotIn("UTF-8 bytes", bodies[-1]["instructions"])
                     self.assertEqual(summary_request_lane(bodies[-1]), lane)
-                    self.assertEqual(bodies[-1]["reasoning"], {"effort": "none"})
+                    self.assertNotIn("reasoning", bodies[-1])
                     self.assertEqual(bodies[-1]["tool_choice"], "none")
                     self.assertNotIn("tools", bodies[-1])
                     self.assertTrue(is_summary_request(bodies[-1]))

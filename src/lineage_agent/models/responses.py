@@ -79,11 +79,13 @@ async def generate_response(
     instructions: str | None = None,
     tool_choice: str | None = None,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
 ) -> ModelResult:
     """Compatibility entry point for a standalone Responses call."""
     request = prepare_request(
         model_name, input, tools=tools, instructions=instructions,
         tool_choice=tool_choice, max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
     )
     return await send_prepared_response(client, request, tracer=tracer)
 

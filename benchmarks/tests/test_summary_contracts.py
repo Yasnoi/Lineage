@@ -35,7 +35,7 @@ class SummaryContractsTests(unittest.TestCase):
                     self.assertEqual(request["input"], material)
                     self.assertEqual(material, original)
                     self.assertIsNone(summary_request_lane({**request, "instructions": request["instructions"] + "x"}))
-                    self.assertEqual(request["reasoning"], {"effort": "none"})
+                    self.assertNotIn("reasoning", request)
                     self.assertEqual(request["tool_choice"], "none")
                     self.assertNotIn("tools", request)
         historical = prepare_summary_request(settings, material, lane="H")
