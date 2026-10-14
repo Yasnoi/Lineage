@@ -149,7 +149,9 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 and state["record_revision"] == saved.get("record_revision") == snapshot["record_revision"]
                 and state["active_context"]["version_id"] == saved.get("active_context", {}).get("version_id")
                 == snapshot["active_version_id"]
-                and state["record_files"] == saved.get("record_files") == snapshot["record_files"])
+                and state["record_files"] == saved.get("record_files") == snapshot["record_files"]
+                and state["input"] == saved.get("input") == snapshot["input"]
+                and state["context_risks"] == saved.get("context_risks") == snapshot["context_risks"])
 
     async def source_changed(state, compaction):
         # A newer confirmed view wins. Paid summary facts still belong to this Run.
@@ -157,6 +159,7 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         update = {field: deepcopy(latest[field]) for field in (
             "context_risks", "active_context", "history_end", "record_revision", "record_sequence",
             "record_admitted_through", "execution_facts", "run_call_ids", "history_scopes", "record_files",
+            "resource_view_id",
         )}
         update["input"] = Overwrite(deepcopy(latest["input"]))
         return stop(state, compaction, "source_changed", failed=True, update=update)
@@ -354,9 +357,17 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         saved = await records.snapshot(checkpoint_id)
         if saved.get("compaction") != compaction or compaction["status"] != "validated":
             raise CheckpointError("checkpoint_read_error")
-        for selected in compaction["lanes"].values():
+        view_id = records.store._head()
+        for lane, selected in compaction["lanes"].items():
             if selected["status"] != "empty":
-                await records.store.scope(selected["scope"]["history_ref"], checkpoint_id=checkpoint_id)
+                await records.store.scope(selected["scope"]["history_ref"], view_id=view_id)
+                body = await records.summary({
+                    "summary_id": selected["summary_id"], "lane": lane,
+                    "history_ref": selected["scope"]["history_ref"], "ranges": selected["scope"]["ranges"],
+                    "checkpoint_id": checkpoint_id,
+                }, view_id=view_id)
+                if body != selected["body"]:
+                    raise CheckpointError("checkpoint_read_error")
                 for bounds in selected["scope"]["ranges"]:
                     try:
                         records.saver.history_journal(records.session_id).verify(

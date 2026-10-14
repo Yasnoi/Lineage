@@ -1,11 +1,12 @@
 """Run-bound diagnostics and fail-closed writes for native in-memory checkpoints."""
 
+from copy import deepcopy
 from typing import Any
-from secrets import token_bytes
 
 from langgraph.checkpoint.memory import InMemorySaver
 
 from lineage_agent.recording.recorder import RunRecorder
+from lineage_agent.archive import ArchiveError, ArchiveStore
 
 
 CHECKPOINT_ERRORS = {
@@ -17,6 +18,12 @@ CHECKPOINT_ERRORS = {
     "record_read_error": "原始记录文件无法读取。",
     "record_integrity_error": "原始记录文件或确认范围校验失败。",
     "record_encoding_error": "原始记录包含不支持保存的值。",
+    "archive_create_error": "业务归档无法创建，已停止本次请求。",
+    "archive_write_error": "业务归档未能确认保存，已停止后续调用。",
+    "archive_read_error": "业务归档无法读取。",
+    "archive_integrity_error": "业务归档或资源关联校验失败。",
+    "archive_version_error": "业务归档格式版本不兼容。",
+    "artifact_write_error": "工具结果正文或登记未能保存，已停止后续调用。",
 }
 
 
@@ -48,14 +55,116 @@ class SessionCheckpointer(InMemorySaver):
         self._confirmed: dict[str, str] = {}
         self._confirmed_ids: dict[str, set[str]] = {}
         self._recorders: dict[str, RunRecorder] = {}
-        self._history_cursor_keys: dict[str, bytes] = {}
         self._history_journals: dict[str, Any] = {}
+        self._archives: dict[str, ArchiveStore] = {}
+        self._views: dict[str, str] = {}
+        self._artifact_bindings: dict[str, Any] = {}
 
     def bind_history(self, thread_id: str, journal) -> None:
         previous = self._history_journals.get(thread_id)
         if previous is not None and previous.directory != journal.directory:
             raise CheckpointError("record_integrity_error")
+        if thread_id not in self._archives:
+            try:
+                self._archives[thread_id] = ArchiveStore(journal.directory.parent)
+            except ArchiveError as exc:
+                raise CheckpointError(exc.code) from None
         self._history_journals[thread_id] = journal
+
+    def archive(self, thread_id: str) -> ArchiveStore:
+        if thread_id not in self._archives:
+            raise CheckpointError("archive_read_error")
+        return self._archives[thread_id]
+
+    def confirmed_view(self, thread_id: str) -> str:
+        if thread_id not in self._views:
+            raise CheckpointError("archive_read_error")
+        return self._views[thread_id]
+
+    def bind_artifacts(self, thread_id: str, artifacts) -> None:
+        self._artifact_bindings[thread_id] = artifacts
+
+    def unbind_artifacts(self, thread_id: str) -> None:
+        self._artifact_bindings.pop(thread_id, None)
+
+    def verify_artifact_writes(self, thread_id: str) -> None:
+        binding = self._artifact_bindings.get(thread_id)
+        if binding is not None and binding.persistence_error() is not None:
+            raise self._failed(thread_id, "artifact_write_error", "artifact_save")
+
+    def block(self, thread_id: str, code: str) -> None:
+        self._failed(thread_id, code, "archive_finalization")
+
+    def prepare_state(self, thread_id: str, state: dict) -> str:
+        """Stage a business view; only a later successful aput grants access."""
+        self._healthy(thread_id)
+        self.verify_artifact_writes(thread_id)
+        try:
+            archive = self.archive(thread_id)
+            parent_id = self._views.get(thread_id)
+            parent = archive.view(parent_id) if parent_id else {}
+            summaries = set(parent.get("summaries", []))
+            for scope in state.get("history_scopes", {}).values():
+                archive.save_scope(scope)
+            compaction = state.get("compaction") or {}
+            for lane, selected in compaction.get("lanes", {}).items():
+                if selected.get("status") not in {"generated", "reused"} or not selected.get("body"):
+                    continue
+                scope = selected["scope"]
+                prior = selected.get("previous", [])
+                candidate = selected.get("candidate_input")
+                if candidate is not None:
+                    prior = [{"summary_id": candidate["summary_id"]}]
+                archive.save_summary({
+                    "summary_id": selected["summary_id"], "lane": lane,
+                    "body": selected["body"], "run_id": state["run_id"],
+                    "history_ref": scope["history_ref"], "ranges": deepcopy(scope["ranges"]),
+                    "previous": [ref["summary_id"] for ref in prior],
+                    "source_refs": [] if candidate is not None else deepcopy(selected.get("source_refs", [])),
+                })
+                summaries.add(selected["summary_id"])
+            artifacts = set(parent.get("artifacts", []))
+            binding = self._artifact_bindings.get(thread_id)
+            if binding is not None:
+                artifacts.update(binding.registered_refs())
+            fact_ends = dict(parent.get("fact_ends", {}))
+            if run_id := state.get("run_id"):
+                fact_ends[run_id] = archive.event_end(run_id)
+            return archive.prepare_view(
+                record_files=state.get("record_files", {}),
+                history_scopes=state.get("history_scopes", {}),
+                summaries=sorted(summaries), artifacts=sorted(artifacts),
+                parent_id=parent_id, fact_ends=fact_ends,
+            )
+        except ArchiveError as exc:
+            raise self._failed(thread_id, exc.code, "archive_prepare") from None
+
+    def archive_facts(self, thread_id: str, state: dict, update: dict, node: str) -> None:
+        """Record actual results once, before any later History/checkpoint failure."""
+        archive = self.archive(thread_id)
+        run_id = state["run_id"]
+        try:
+            if update.get("model_calls", 0) > state.get("model_calls", 0):
+                count = update["model_calls"]
+                archive.append_event(run_id, "model_result", {
+                    "model_call": count, "result": deepcopy(update.get("result")),
+                    "checkpoint_id": None, "error_code": update.get("error_code"),
+                }, key=f"model:{count}")
+            if update.get("summary_calls", 0) > state.get("summary_calls", 0):
+                count = update["summary_calls"]
+                archive.append_event(run_id, "summary_result", {
+                    "summary_call": count, "result": deepcopy(update.get("summary_result")),
+                    "compaction": deepcopy(update.get("compaction", state.get("compaction"))),
+                    "checkpoint_id": None,
+                }, key=f"summary:{count}")
+            before = len(state.get("execution_facts", []))
+            facts = update.get("execution_facts", [])[before:]
+            if facts:
+                archive.append_event(run_id, "execution_facts", {"facts": deepcopy(facts)})
+            if "compaction" in update and update["compaction"] != state.get("compaction"):
+                archive.append_event(run_id, "compaction", {"node": node, "compaction": deepcopy(update["compaction"])})
+        except ArchiveError as exc:
+            raise self._failed(thread_id, exc.code, "archive_facts") from None
 
     def history_journal(self, thread_id: str):
         if thread_id not in self._history_journals:
@@ -67,9 +176,7 @@ class SessionCheckpointer(InMemorySaver):
 
     def history_cursor_key(self, thread_id: str) -> bytes:
         """Keep opaque recall cursors valid for the storage scope's lifetime."""
-        if thread_id not in self._history_cursor_keys:
-            self._history_cursor_keys[thread_id] = token_bytes(32)
-        return self._history_cursor_keys[thread_id]
+        return self.archive(thread_id).cursor_key()
 
     def release(self, thread_id: str) -> None:
         """Release private Run storage without affecting another session."""
@@ -78,10 +185,14 @@ class SessionCheckpointer(InMemorySaver):
         self._confirmed.pop(thread_id, None)
         self._confirmed_ids.pop(thread_id, None)
         self._recorders.pop(thread_id, None)
-        self._history_cursor_keys.pop(thread_id, None)
+        self._views.pop(thread_id, None)
+        self._artifact_bindings.pop(thread_id, None)
         journal = self._history_journals.pop(thread_id, None)
         if journal is not None:
             journal.close()
+        archive = self._archives.pop(thread_id, None)
+        if archive is not None:
+            archive.close()
 
     def unbind_run(self, thread_id: str) -> None:
         self._recorders.pop(thread_id, None)
@@ -166,13 +277,44 @@ class SessionCheckpointer(InMemorySaver):
         self._healthy(thread_id)
         try:
             self._verify_records(thread_id, checkpoint["channel_values"])
+            view_id = checkpoint["channel_values"].get("resource_view_id")
+            if view_id:
+                archive = self.archive(thread_id)
+                archive.verify_view(view_id, confirmed=False)
+                view = archive.view(view_id, confirmed=False)
+                values = checkpoint["channel_values"]
+                if (view["record_files"] != values.get("record_files", {})
+                        or view["record_order"] != list(values.get("record_files", {}))
+                        or view["history_scopes"] != values.get("history_scopes", {})
+                        or values.get("conversation_id", archive.conversation_id) != archive.conversation_id):
+                    raise CheckpointError("archive_integrity_error")
+                active = values.get("active_context") or {}
+                references = [active.get("history_summary"), active.get("run_summary")]
+                references += [span["reference"] for span in active.get("summary_spans", [])]
+                if any(ref is not None and ref["summary_id"] not in view["summaries"] for ref in references):
+                    raise CheckpointError("archive_integrity_error")
+                for ref in references:
+                    if ref is None:
+                        continue
+                    summary = archive.summary(ref["summary_id"], view_id, confirmed=False)
+                    if any(ref.get(key) != summary.get(key) for key in ("lane", "history_ref", "ranges")):
+                        raise CheckpointError("archive_integrity_error")
+                if any(span.get("summary_id") != span["reference"].get("summary_id")
+                       or span.get("lane") != span["reference"].get("lane")
+                       for span in active.get("summary_spans", [])):
+                    raise CheckpointError("archive_integrity_error")
             saved_config = self.put(config, checkpoint, metadata, new_versions)
+            checkpoint_id = saved_config["configurable"]["checkpoint_id"]
+            if view_id:
+                self.archive(thread_id).confirm_view(view_id, checkpoint_id)
         except Exception as exc:
             code = getattr(exc, "code", "checkpoint_write_error")
             raise self._failed(thread_id, code, "checkpoint_write") from None
         checkpoint_id = saved_config["configurable"]["checkpoint_id"]
         self._confirmed[thread_id] = checkpoint_id
         self._confirmed_ids.setdefault(thread_id, set()).add(checkpoint_id)
+        if view_id:
+            self._views[thread_id] = view_id
         details: dict[str, Any] = {"checkpoint_id": checkpoint_id}
         if type(metadata.get("step")) is int:
             details["checkpoint_step"] = metadata["step"]

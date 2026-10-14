@@ -12,8 +12,10 @@ from uuid import uuid4
 from langgraph.checkpoint.base import empty_checkpoint
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
+from lineage_agent.agent.context import ContextRecords, new_context, read_archived_record
 from lineage_agent.agent.records import RecordStore, make_record_batch, record_projection
 from lineage_agent.agent.record_journal import JournalError, RecordJournal
+from lineage_agent.archive import ArchiveError, ArchiveStore
 from lineage_agent.observations.manager import ObservationManager
 from lineage_agent.tools.execution import execute_calls
 from lineage_agent.tools.history import HISTORY_TOOLS, HISTORY_TOOL_NAMES, HistoryExecutor
@@ -35,6 +37,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary.cleanup)
         self.journal = RecordJournal(Path(self.temporary.name) / ".lineage" / self.sid / "history")
         self.saver.bind_history(self.sid, self.journal)
+        self.addCleanup(self.saver.release, self.sid)
         self.records = RecordStore(self.saver, self.sid)
         self.config = {"configurable": {"thread_id": self.sid, "checkpoint_ns": ""}}
         self.values = {"run_id": self.run, "record_batch": [], "record_files": {}, "record_sequence": 0, "history_scopes": {}}
@@ -48,6 +51,7 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             updates["record_files"] = {**self.values["record_files"], self.run: watermark}
             updates["record_sequence"] = watermark["record_count"]
         self.values.update(deepcopy(updates))
+        self.values["resource_view_id"] = self.saver.prepare_state(self.sid, self.values)
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = deepcopy(self.values)
         checkpoint["channel_versions"] = dict.fromkeys(self.values, self.version)
@@ -73,6 +77,24 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             await self.records.get(second[0]["source_ref"], first_id)
         self.records.clear_index()
         self.assertEqual(await self.records.records(self.run), result)
+
+    async def test_multi_run_history_order_survives_sorted_archive_encoding(self):
+        self.run = "z-first-run"
+        first = make_record_batch(self.run, 0, [{"role": "user", "content": "first turn"}])
+        await self.save(run_id=self.run, record_batch=first)
+        self.run = "a-later-run"
+        second = make_record_batch(self.run, 0, [{"role": "user", "content": "later turn"}])
+        await self.save(run_id=self.run, record_batch=second)
+        archive = self.saver.archive(self.sid)
+        view_id = self.saver.confirmed_view(self.sid)
+        view = archive.view(view_id)
+        self.assertEqual(list(view["record_files"]), ["a-later-run", "z-first-run"])
+        self.assertEqual(view["record_order"], ["z-first-run", "a-later-run"])
+        rebuilt = RecordStore(archive=archive, view_id=view_id)
+        self.addCleanup(rebuilt.close)
+        self.assertEqual(await rebuilt.records(), first + second)
+        scope = await rebuilt.register_scope([second[0]["source_ref"], first[0]["source_ref"]])
+        self.assertEqual([bounds["run_id"] for bounds in scope["ranges"]], ["z-first-run", "a-later-run"])
 
     async def test_original_record_creation_preserves_invalid_input_for_admission(self):
         items = [{"type": "function_call", "name": "tool", "call_id": [], "arguments": "{}"}]
@@ -137,6 +159,24 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CheckpointError):
             await self.save(history_scopes={scope["history_ref"]: altered})
 
+    async def test_scope_registration_failure_blocks_saver_without_publishing_scope(self):
+        batch, old_scope = await self.seed(["accepted original"])
+        old_view = self.saver.confirmed_view(self.sid)
+        new_ref = f"history://scope/{uuid4()}"
+        with patch.object(self.records.archive, "save_scope", side_effect=ArchiveError("archive_write_error")):
+            with self.assertRaises(CheckpointError) as failure:
+                await self.records.register_scope([batch[0]["source_ref"]], history_ref=new_ref)
+        self.assertEqual(failure.exception.code, "archive_write_error")
+        self.assertEqual(self.saver.failure(self.sid).code, "archive_write_error")
+        self.assertEqual(self.saver.confirmed_view(self.sid), old_view)
+        self.assertEqual(await self.records.records(), batch)
+        self.assertEqual((await self.records.search(old_scope["history_ref"], ["accepted"]))["query_status"], "matched")
+        with self.assertRaises(ToolExecutionError):
+            await self.records.search(new_ref, ["accepted"])
+        with self.assertRaises(CheckpointError) as blocked:
+            self.saver.prepare_state(self.sid, self.values)
+        self.assertEqual(blocked.exception.code, "archive_write_error")
+
     async def test_read_unicode_escape_pagination_matches_fixed_projection(self):
         batch, _ = await self.seed(['中😀"\\\t\nKEY' * 4000])
         expected, omitted = record_projection(batch[0])
@@ -193,6 +233,154 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
             await other.read(batch[0]["source_ref"], 0)
         with self.assertRaises(ToolExecutionError):
             await other.search(scope["history_ref"], ["private"])
+
+    async def test_rebuild_preserves_references_ranges_and_cursor_without_checkpoints(self):
+        batch, scope = await self.seed(["KEY " * 25, "KEY original tail"])
+        first = await self.records.search(scope["history_ref"], ["KEY"])
+        cursor = first["next_cursor"]
+        self.assertIsNotNone(cursor)
+        expected = await self.records.search(scope["history_ref"], ["KEY"], cursor)
+        view_id = self.saver.confirmed_view(self.sid)
+        checkpoint_id = self.saver.last_confirmed(self.sid)
+        directory = self.journal.directory.parent
+        self.saver.delete_thread(self.sid)
+        self.assertEqual(await self.records.records(checkpoint_id=checkpoint_id), batch)
+        self.saver.release(self.sid)
+        archive = ArchiveStore(directory, create=False)
+        self.addCleanup(archive.close)
+        rebuilt = RecordStore(archive=archive, view_id=view_id)
+        self.addCleanup(rebuilt.close)
+        self.assertEqual(await rebuilt.search(scope["history_ref"], ["KEY"], cursor), expected)
+        self.assertEqual(await rebuilt.records(), batch)
+        self.assertEqual((await rebuilt.read(batch[-1]["source_ref"], 0))["complete"], True)
+
+    async def test_confirmed_summary_is_readable_before_run_seal_without_old_checkpoint(self):
+        batch, scope = await self.seed(["original detail"])
+        summary_id = str(uuid4())
+        await self.save(compaction={"lanes": {"R": {"summary_id": summary_id, "status": "generated",
+            "body": "actual summary body", "scope": scope, "previous": [],
+            "source_refs": [batch[0]["source_ref"]]}}})
+        reference = {"summary_id": summary_id, "lane": "R", "history_ref": scope["history_ref"],
+                     "ranges": deepcopy(scope["ranges"]), "checkpoint_id": "unavailable-old-checkpoint"}
+        self.saver.delete_thread(self.sid)
+        context = ContextRecords(self.saver, self.sid)
+        self.assertEqual(await context.summary(reference), "actual summary body")
+        changed = deepcopy(reference)
+        changed["ranges"][0]["end"] += 1
+        with self.assertRaises(CheckpointError):
+            await context.summary(changed)
+
+    async def _reject_changed_summary_reference(self, change):
+        batch, scope = await self.seed(["original detail"])
+        summary_id = str(uuid4())
+        reference = {"summary_id": summary_id, "lane": "R", "history_ref": scope["history_ref"],
+                     "ranges": deepcopy(scope["ranges"]), "checkpoint_id": "diagnostic-only"}
+        active = new_context()
+        active.update(run_summary=reference, current_run_id=self.run,
+                      summary_spans=[{"index": 0, "lane": "R", "summary_id": summary_id,
+                                      "run_id": self.run, "reference": reference}])
+        await self.save(active_context=active, compaction={"lanes": {"R": {
+            "summary_id": summary_id, "status": "generated", "body": "archived summary",
+            "scope": scope, "previous": [], "source_refs": [batch[0]["source_ref"]]}}})
+        old_view = self.saver.confirmed_view(self.sid)
+        changed = deepcopy(active)
+        if change == "ranges":
+            changed["run_summary"]["ranges"][0]["end"] += 1
+        elif change == "history_ref":
+            changed["run_summary"]["history_ref"] = f"history://scope/{uuid4()}"
+        elif change == "span_summary_id":
+            changed["summary_spans"][0]["summary_id"] = str(uuid4())
+        else:
+            changed["summary_spans"][0]["lane"] = "H"
+        with self.assertRaises(CheckpointError) as rejected:
+            await self.save(active_context=changed)
+        self.assertEqual(rejected.exception.code, "archive_integrity_error")
+        self.assertEqual(self.saver.confirmed_view(self.sid), old_view)
+        self.assertEqual(await ContextRecords(self.saver, self.sid).summary(reference), "archived summary")
+        with self.assertRaises(ArchiveError):
+            self.saver.archive(self.sid).view(self.values["resource_view_id"])
+
+    async def test_summary_reference_changed_ranges_cannot_be_committed(self):
+        await self._reject_changed_summary_reference("ranges")
+
+    async def test_summary_reference_changed_history_ref_cannot_be_committed(self):
+        await self._reject_changed_summary_reference("history_ref")
+
+    async def test_summary_span_changed_identity_cannot_be_committed(self):
+        await self._reject_changed_summary_reference("span_summary_id")
+
+    async def test_summary_span_changed_lane_cannot_be_committed(self):
+        await self._reject_changed_summary_reference("span_lane")
+
+    async def test_rebuilt_scope_excludes_unconfirmed_tail_and_later_confirmed_records(self):
+        batch, scope = await self.seed(["KEY accepted"])
+        old_view = self.saver.confirmed_view(self.sid)
+        later = make_record_batch(self.run, 1, [{"role": "user", "content": "KEY later confirmed"}])
+        await self.save(record_batch=later)
+        tail = make_record_batch(self.run, 2, [{"role": "user", "content": "KEY unconfirmed tail"}])
+        self.journal.append(self.run, tail)
+        rebuilt = RecordStore(archive=self.saver.archive(self.sid), view_id=old_view)
+        self.addCleanup(rebuilt.close)
+        self.assertEqual(await rebuilt.records(), batch)
+        self.assertEqual([hit["source_ref"] for hit in (await self.records.search(scope["history_ref"], ["KEY"]))["hits"]],
+                         [batch[0]["source_ref"]])
+        with self.assertRaises(CheckpointError):
+            await rebuilt.get(later[0]["source_ref"])
+        with self.assertRaises(CheckpointError):
+            await self.records.get(tail[0]["source_ref"])
+
+    async def test_cached_rebuilt_reader_detects_tampering_and_missing_body(self):
+        batch, scope = await self.seed(["confirmed original"])
+        rebuilt = RecordStore(archive=self.saver.archive(self.sid), view_id=self.saver.confirmed_view(self.sid))
+        self.addCleanup(rebuilt.close)
+        self.assertEqual(await rebuilt.records(), batch)
+        path = self.journal.path(self.run)
+        original = path.read_bytes()
+        path.write_bytes(original.replace(b"original", b"modified"))
+        with self.assertRaises(ToolExecutionError):
+            await rebuilt.read(batch[0]["source_ref"], 0)
+        path.write_bytes(original[:-1])
+        with self.assertRaises(ToolExecutionError):
+            await rebuilt.search(scope["history_ref"], ["original"])
+        path.unlink()
+        with self.assertRaises(CheckpointError):
+            await rebuilt.records()
+
+    async def test_sealed_run_details_rebuild_without_graph_or_checkpoint_mapping(self):
+        archive = self.saver.archive(self.sid)
+        first = {"model_call": 1, "result": {"text": "first", "usage": None},
+                 "error_code": None, "checkpoint_id": None}
+        second = {"model_call": 2, "result": {"text": "second", "usage": {"total_tokens": 7}},
+                  "error_code": "model_error", "checkpoint_id": None}
+        summary = {"summary_call": 1, "result": {"text": "unused", "usage": None},
+                   "compaction": {"status": "failed", "reason": "invalid_summary"}, "checkpoint_id": None}
+        for kind, payload in (("model_result", first), ("summary_result", summary), ("model_result", second)):
+            archive.append_event(self.run, kind, payload)
+        items = [{"role": "user", "content": "request"}, {"role": "assistant", "content": "actual response"}]
+        batch = make_record_batch(self.run, 0, items)
+        active = new_context()
+        active["turns"] = [{"run_id": self.run, "item_count": len(items), "record_end": len(batch)}]
+        checkpoint = await self.save(record_batch=batch, input=items, active_context=active,
+                                     history_end=len(items), record_admitted_through=len(batch),
+                                     model_calls=2, summary_calls=1, usage_totals={"total_tokens": 7},
+                                     stop_reason="error", error_code="model_error")
+        view_id = self.saver.confirmed_view(self.sid)
+        staged = archive.stage_run(self.run, {"final_state": deepcopy(self.values), "fact_end": 3})
+        archive.seal_run(staged, view_id, checkpoint)
+        archive.append_event(self.run, "model_result", {**second, "model_call": 3})
+        directory = archive.directory
+        self.saver.release(self.sid)
+        rebuilt = ArchiveStore(directory, create=False)
+        self.addCleanup(rebuilt.close)
+        # These mappings are only diagnostic after the run has been sealed.
+        with rebuilt._connection:
+            rebuilt._connection.execute("DELETE FROM checkpoints")
+        result = await read_archived_record(rebuilt, self.run, view_id)
+        self.assertEqual(result["input"], items)
+        self.assertEqual([item["model_call"] for item in result["model_results"]], [1, 2])
+        self.assertIsNone(result["model_results"][0]["result"]["usage"])
+        self.assertEqual(result["summary_results"][0]["compaction"]["status"], "failed")
+        self.assertIsNone(result["summary_results"][0]["result"]["usage"])
 
     async def test_native_history_recall_has_no_artifact_or_file_budget(self):
         batch, scope = await self.seed(["small original detail " * 400])

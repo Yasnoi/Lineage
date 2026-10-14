@@ -3,7 +3,7 @@
 import json
 import math
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Callable, NoReturn
 
 from lineage_agent.models.types import FunctionCall, ToolDefinition
 from lineage_agent.observations.hints import split_observation
@@ -65,6 +65,7 @@ async def execute_calls(
     recorder: RunRecorder | None = None,
     step_id: str | None = None,
     tracer: "RunTrace | None" = None,
+    verify_persistence: Callable[[], None] | None = None,
 ) -> ToolBatchResult:
     """Recover from tool errors; stop remaining calls if their record fails."""
     available_tools = {
@@ -85,26 +86,26 @@ async def execute_calls(
             return True
         return recorder.emit(event, step_id=step_id, node="tools", **details)
 
-    def skip_remaining(first_index: int, *, first_traced: bool = False) -> None:
+    def skip_remaining(first_index: int, *, first_traced: bool = False, reason: str = "logging_error") -> None:
         outcomes["skipped"] += len(calls) - first_index
         for index in range(first_index, len(calls)):
             call_facts.append({
                 "call_id": calls[index]["call_id"], "name": calls[index]["name"],
                 "request_index": index + 1, "outcome": "skipped", "stage": "execution",
-                "reason_code": "logging_error", "executor_entered": False,
+                "reason_code": reason, "executor_entered": False,
                 "protocol_output_created": False, "output": None,
             })
             record(
                 "tool.skipped",
                 **tool_identity(calls[index], index + 1),
                 stage="execution",
-                reason="logging_error",
-                error_code="logging_error",
+                reason=reason,
+                error_code=reason,
             )
             if tracer is not None and not (first_traced and index == first_index):
                 tracer.tool_skipped(
                     calls[index], step_id=step_id, request_index=index + 1,
-                    reason="logging_error",
+                    reason=reason,
                 )
 
     for index, call in enumerate(calls):
@@ -271,6 +272,18 @@ async def execute_calls(
         if reason_code is not None:
             result_details.update(reason_code=reason_code, reason_message=reason_message)
         result_recorded = record("tool.result_created", **result_details)
+        if verify_persistence is not None:
+            try:
+                verify_persistence()
+            except Exception as failure:
+                # The tool has already executed. Retain that fact and stop the
+                # remaining batch before graph adoption can authorize new data.
+                skip_remaining(index + 1, reason=getattr(failure, "code", "artifact_write_error"))
+                failure.tool_batch = {
+                    "output_items": deepcopy(output_items), "tool_calls": tool_calls,
+                    "tool_outcomes": outcomes.copy(), "call_facts": deepcopy(call_facts), "error": None,
+                }
+                raise
         if not outcome_recorded or not result_recorded:
             skip_remaining(index + 1)
             error = LOG_FAILURE_MESSAGE

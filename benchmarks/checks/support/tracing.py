@@ -117,6 +117,10 @@ def stable(state):
         assert isinstance(conversation_id, str) and str(UUID(conversation_id)) == conversation_id
         value["conversation_id"] = (identity(conversation_id) if conversation_id == state["run_id"]
                                     else "<session-conversation>")
+    resource_view_id = value.get("resource_view_id")
+    if resource_view_id is not None:
+        assert isinstance(resource_view_id, str) and str(UUID(resource_view_id)) == resource_view_id
+        value["resource_view_id"] = "<confirmed-resource-view>"
 
     digests = {}
     def digest(value):

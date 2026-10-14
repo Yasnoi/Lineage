@@ -1,6 +1,7 @@
 """Immutable raw snapshots and bounded character-based retrieval.
 
-Only the in-memory index grants access; files are never discovered or imported.
+Trusted handles and confirmed resource views grant access; files are never
+discovered or implicitly imported.
 The filesystem boundary assumes stable local paths, like the project tools. It
 does not provide an OS sandbox against a hostile process replacing paths.
 """
@@ -17,6 +18,7 @@ from threading import RLock
 from typing import Any, NoReturn
 from uuid import uuid4
 
+from lineage_agent.archive import ArchiveStore
 from lineage_agent.tools.filesystem import paths
 from lineage_agent.storage import conversation_paths, ensure_storage_directory, storage_identifier
 from lineage_agent.tools.types import (
@@ -104,7 +106,7 @@ def _index(value: object, length: int) -> bool:
 
 
 class ArtifactStore:
-    """Persistent files with process-local access handles and session isolation."""
+    """Persistent registrations with explicit handles and session isolation."""
 
     def __init__(self) -> None:
         self._lock = RLock()
@@ -112,6 +114,9 @@ class ArtifactStore:
         self._records: dict[str, dict[str, _Record]] = {}
         self._application_root = Path.cwd()
         self._directories: dict[str, Path] = {}
+        self._archives: dict[str, ArchiveStore] = {}
+        self._owned_archives: dict[str, ArchiveStore] = {}
+        self._write_failures: set[str] = set()
 
     @property
     def _directory(self) -> Path:
@@ -143,15 +148,57 @@ class ArtifactStore:
                     path = ensure_storage_directory(path)
                 if session_id in self._directories and self._directories[session_id] != path:
                     raise ValueError("session directory changed")
+                if session_id not in self._archives:
+                    archive = ArchiveStore(path.parent, create=True)
+                    self._archives[session_id] = archive
+                    self._owned_archives[session_id] = archive
                 self._directories[session_id] = path
                 self._records.setdefault(session_id, {})
             except Exception:
                 raise ArtifactError("artifact_write_error") from None
             return SessionArtifacts(self, session_id)
 
-    def _put(self, session_id: str, raw: str, tool_name: str) -> dict[str, Any]:
+    def restore_session(self, session_id: str, *, archive: ArchiveStore,
+                        view_id: str) -> "SessionArtifacts":
+        """Rebuild only registrations authorized by an explicitly supplied view.
+
+        The archive is borrowed. Closing this store does not close that handle.
+        Normal ``bind_session`` deliberately never performs this import.
+        """
         with self._lock:
             self._ensure_open()
+            if type(session_id) is not str or not session_id:
+                raise ArtifactError("invalid_artifact_session")
+            try:
+                directory = Path(archive.directory).absolute() / "artifacts"
+                if (directory.parent.parent.name.casefold() != ".lineage"
+                        or session_id in self._directories):
+                    raise ValueError("invalid or existing binding")
+                storage_identifier(directory.parent.name)
+                _check_path(directory, directory=True)
+                view = archive.view(view_id)
+                records = {}
+                for ref in view["artifacts"]:
+                    item = archive.artifact(ref, view_id=view_id)
+                    records[ref] = self._record_from_archive(archive, item)
+                self._directories[session_id] = directory
+                self._archives[session_id] = archive
+                self._records[session_id] = records
+            except Exception:
+                raise ArtifactError("artifact_read_error") from None
+            return SessionArtifacts(self, session_id)
+
+    @staticmethod
+    def _record_from_archive(archive: ArchiveStore, item: dict[str, Any]) -> _Record:
+        return _Record(Path(archive.directory) / item["path"],
+                       bytes.fromhex(item["sha256"]), deepcopy(item["metadata"]))
+
+    def _put(self, session_id: str, raw: str, tool_name: str,
+             origin: dict[str, str] | None = None) -> dict[str, Any]:
+        with self._lock:
+            self._ensure_open()
+            if session_id in self._write_failures:
+                raise ArtifactError("artifact_write_error")
             try:
                 if type(raw) is not str or type(tool_name) is not str or not tool_name:
                     raise ValueError
@@ -168,6 +215,9 @@ class ArtifactStore:
             }
             if reason is not None:
                 metadata["degradation_reason"] = reason
+            registered_metadata = deepcopy(metadata)
+            if origin:
+                registered_metadata["origin"] = deepcopy(origin)
             directory = self._directories[session_id]
             destination = directory / f"{identifier}.raw"
             temporary = directory / f"{identifier}.tmp"
@@ -187,9 +237,17 @@ class ArtifactStore:
                 # precheck covers ordinary collisions on other supported hosts.
                 temporary.rename(destination)
                 _check_path(destination, directory=False)
-                record = _Record(destination, hashlib.sha256(data).digest(), metadata)
+                digest = hashlib.sha256(data).digest()
+                archive = self._archives[session_id]
+                archive.save_artifact({
+                    "artifact_ref": ref,
+                    "path": destination.relative_to(archive.directory).as_posix(),
+                    "sha256": digest.hex(), "metadata": registered_metadata,
+                })
+                record = _Record(destination, digest, registered_metadata)
                 self._records[session_id][ref] = record
             except Exception:
+                self._write_failures.add(session_id)
                 # Never register an incomplete result, even if cleanup also fails.
                 try:
                     if temporary_owned:
@@ -199,7 +257,8 @@ class ArtifactStore:
                 raise ArtifactError("artifact_write_error") from None
             return deepcopy(metadata)
 
-    def _load(self, session_id: str, ref: str) -> tuple[_Record, str]:
+    def _load(self, session_id: str, ref: str,
+              view_id: str | None = None) -> tuple[_Record, str]:
         self._ensure_open()
         if type(ref) is not str or _REF.fullmatch(ref) is None:
             raise ArtifactError("invalid_artifact_ref")
@@ -207,6 +266,12 @@ class ArtifactStore:
         if record is None:
             raise ArtifactError("artifact_not_found")
         try:
+            archive = self._archives[session_id]
+            if view_id is not None and ref not in archive.view(view_id)["artifacts"]:
+                raise ArtifactError("artifact_not_found")
+            registered = archive.artifact(ref, view_id=view_id)
+            if self._record_from_archive(archive, registered) != record:
+                raise ValueError("registration differs")
             _check_path(record.path, directory=False)
             data = record.path.read_bytes()
             if hashlib.sha256(data).digest() != record.sha256:
@@ -214,12 +279,15 @@ class ArtifactStore:
             raw = data.decode("utf-8")
             content, _, _ = tool_result_view(raw, record.metadata["tool_name"])
             return record, content
+        except ArtifactError:
+            raise
         except Exception:
             raise ArtifactError("artifact_read_error") from None
 
-    def _read(self, session_id: str, ref: str, start: int, end: int | None) -> dict[str, Any]:
+    def _read(self, session_id: str, ref: str, start: int, end: int | None,
+              view_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            record, content = self._load(session_id, ref)
+            record, content = self._load(session_id, ref, view_id)
             requested_end = len(content) if end is None else end
             if not (_index(start, len(content)) and _index(requested_end, len(content))
                     and start <= requested_end):
@@ -254,9 +322,10 @@ class ArtifactStore:
                 raise ArtifactError("artifact_read_error")
             return result
 
-    def _search(self, session_id: str, ref: str, keywords: list[str], start: int) -> dict[str, Any]:
+    def _search(self, session_id: str, ref: str, keywords: list[str], start: int,
+                view_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            record, content = self._load(session_id, ref)
+            record, content = self._load(session_id, ref, view_id)
             if not _index(start, len(content)):
                 raise ArtifactError("invalid_artifact_range")
             if (type(keywords) is not list or not 1 <= len(keywords) <= MAX_KEYWORDS
@@ -302,8 +371,18 @@ class ArtifactStore:
         with self._lock:
             self._closed = True
             self._records.clear()
+            failed = False
+            for archive in self._owned_archives.values():
+                try:
+                    archive.close()
+                except Exception:
+                    failed = True
+            self._owned_archives.clear()
+            self._archives.clear()
             # Published files belong to the conversation, not the handle. No
             # implicit import, deletion, or cross-process recovery occurs here.
+            if failed:
+                raise ArtifactError("artifact_cleanup_error")
 
     def __enter__(self) -> "ArtifactStore":
         self._ensure_open()
@@ -316,14 +395,37 @@ class ArtifactStore:
 class SessionArtifacts:
     """Trusted application handle; model tools never accept its session ID."""
 
-    def __init__(self, store: ArtifactStore, session_id: str) -> None:
+    def __init__(self, store: ArtifactStore, session_id: str,
+                 origin: dict[str, str] | None = None) -> None:
         self._store, self._session_id = store, session_id
+        self._origin = origin
+
+    def bind_origin(self, run_id: str) -> "SessionArtifacts":
+        """Return a per-run writer without changing the shared session handle."""
+        storage_identifier(run_id)
+        return SessionArtifacts(self._store, self._session_id, {"run_id": run_id})
+
+    def registered_refs(self) -> list[str]:
+        with self._store._lock:
+            self._store._ensure_open()
+            return list(self._store._records.get(self._session_id, {}))
+
+    def persistence_error(self) -> str | None:
+        """Report a real body/registration failure even if preview policy caught it."""
+        with self._store._lock:
+            return "artifact_write_error" if self._session_id in self._store._write_failures else None
+
+    def check_persistence(self) -> None:
+        if code := self.persistence_error():
+            raise ArtifactError(code)
 
     def put(self, raw_result: str, *, tool_name: str) -> dict[str, Any]:
-        return self._store._put(self._session_id, raw_result, tool_name)
+        return self._store._put(self._session_id, raw_result, tool_name, self._origin)
 
-    def read(self, artifact_ref: str, start: int, end: int | None = None) -> dict[str, Any]:
-        return self._store._read(self._session_id, artifact_ref, start, end)
+    def read(self, artifact_ref: str, start: int, end: int | None = None, *,
+             view_id: str | None = None) -> dict[str, Any]:
+        return self._store._read(self._session_id, artifact_ref, start, end, view_id)
 
-    def search(self, artifact_ref: str, keywords: list[str], start: int = 0) -> dict[str, Any]:
-        return self._store._search(self._session_id, artifact_ref, keywords, start)
+    def search(self, artifact_ref: str, keywords: list[str], start: int = 0, *,
+               view_id: str | None = None) -> dict[str, Any]:
+        return self._store._search(self._session_id, artifact_ref, keywords, start, view_id)

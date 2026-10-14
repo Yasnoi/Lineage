@@ -1,6 +1,7 @@
 """Explicit artifact recall tools bound to one application's session."""
 
 from inspect import getattr_static
+from collections.abc import Callable
 from typing import Any, NoReturn
 
 from lineage_agent.artifacts.store import ArtifactError, SessionArtifacts
@@ -79,9 +80,15 @@ def _raise_tool_error(error: ArtifactError) -> NoReturn:
 class ArtifactExecutor:
     """Keep session access while rebinding the delegate's per-run budgets."""
 
-    def __init__(self, artifacts: SessionArtifacts, delegate: ToolExecutor | None = None) -> None:
+    def __init__(self, artifacts: SessionArtifacts, delegate: ToolExecutor | None = None,
+                 *, view_provider: Callable[[], str | None] | None = None) -> None:
         self._artifacts = artifacts
         self._delegate = delegate
+        self._view_provider = view_provider
+
+    def bind_access(self, view_provider: Callable[[], str | None]) -> "ArtifactExecutor":
+        """Bind confirmed access without restricting the trusted writer handle."""
+        return ArtifactExecutor(self._artifacts, self._delegate, view_provider=view_provider)
 
     def bind_run(self) -> "ArtifactExecutor":
         delegate = self._delegate
@@ -90,7 +97,7 @@ class ArtifactExecutor:
             delegate = bind_run()
             if not callable(delegate):
                 raise ConfigurationError("工具执行器 bind_run 必须返回可调用的运行实例。")
-        return ArtifactExecutor(self._artifacts, delegate)
+        return ArtifactExecutor(self._artifacts, delegate, view_provider=self._view_provider)
 
     @property
     def read_budget(self) -> dict[str, int] | None:
@@ -115,13 +122,20 @@ class ArtifactExecutor:
         if not isinstance(arguments, dict) or set(arguments) != expected:
             raise ToolArgumentError(reason_code="invalid_artifact_arguments")
         try:
+            view_id = None
+            if self._view_provider is not None:
+                view_id = self._view_provider()
+                if type(view_id) is not str or not view_id:
+                    raise ArtifactError("artifact_not_found")
             if name == ARTIFACT_READ_TOOL["name"]:
                 result = self._artifacts.read(
                     arguments["artifact_ref"], arguments["start"], arguments["end"],
+                    view_id=view_id,
                 )
             else:
                 result = self._artifacts.search(
                     arguments["artifact_ref"], arguments["keywords"], arguments["start"],
+                    view_id=view_id,
                 )
         except ArtifactError as error:
             _raise_tool_error(error)

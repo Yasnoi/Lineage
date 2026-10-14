@@ -54,7 +54,7 @@ CompactionStatus = Literal[
 
 
 class CompactionState(TypedDict):
-    """One complete H/R attempt; original facts remain in the checkpoint chain."""
+    """One complete H/R attempt; original facts have independent business archives."""
 
     request_no: int
     attempt_no: int
@@ -100,6 +100,7 @@ class AgentState(TypedDict):
     context_risks: list[ContextRisk | None]
     context_budget: ContextBudget | None
     active_context: ActiveContext
+    resource_view_id: str | None
     compaction: CompactionState | None
     compaction_events: list[dict[str, Any]]
     record_batch: list[dict[str, Any]]

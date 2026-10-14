@@ -14,6 +14,7 @@ from lineage_agent.agent.records import make_record_batch
 from lineage_agent.agent.record_journal import JournalError, RecordJournal
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
+from lineage_agent.archive import ArchiveError
 from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
 from lineage_agent.artifacts.tools import ARTIFACT_TOOLS, ArtifactExecutor
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
@@ -258,6 +259,7 @@ async def _run_agent(
             ),
             "context_budget": None,
             "active_context": new_context(),
+            "resource_view_id": None,
             "compaction": None,
             "compaction_events": [],
             "record_batch": [], "record_files": {},
@@ -302,8 +304,8 @@ async def _run_agent(
             receipts, watermark = journal.append(recorder.run_id, initial_batch)
             state["record_batch"] = receipts
             state["record_files"] = {recorder.run_id: watermark}
-        except (StorageError, JournalError) as exc:
-            code = exc.code if isinstance(exc, JournalError) else "record_create_error"
+        except (StorageError, JournalError, CheckpointError) as exc:
+            code = exc.code if isinstance(exc, (JournalError, CheckpointError)) else "record_create_error"
             state.update(stop_reason="error", error_code=code, error=str(CheckpointError(code)))
             recorder.emit("run.initialization_failed", stage="history_init", error_code=code)
             state["log_complete"] = recorder.close()
@@ -333,7 +335,10 @@ async def _run_agent(
             if artifacts is None:
                 owned_store = ArtifactStore()
                 artifacts = owned_store.bind_session(recorder.run_id, directory=paths.artifacts)
-                execute_tool = ArtifactExecutor(artifacts, execute_tool)
+            artifacts = artifacts.bind_origin(recorder.run_id)
+            checkpointer.bind_artifacts(scope_id, artifacts)
+            execute_tool = ArtifactExecutor(artifacts, execute_tool,
+                view_provider=lambda: checkpointer.confirmed_view(scope_id))
             observation_manager = ObservationManager(artifacts)
         except Exception:
             artifact_initialization_failed = True
@@ -404,6 +409,7 @@ async def _run_agent(
                         own_files = state["record_files"]
                         state.update(inherit_context(saved.values, input_items, state["context_risks"], run_id=recorder.run_id))
                         state["record_files"].update(own_files)
+                state["resource_view_id"] = checkpointer.prepare_state(scope_id, state)
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
                 elif artifact_initialization_failed:
@@ -471,6 +477,7 @@ async def _run_agent(
                         primary_error = exc
             if owned_store is not None:
                 store_close_attempted = True
+                checkpointer.unbind_artifacts(scope_id)
                 try:
                     owned_store.close()
                 except BaseException as exc:
@@ -510,6 +517,7 @@ async def _run_agent(
                                  record_sequence=state["record_sequence"] + len(terminal),
                                  record_revision=state["record_revision"] + 1)
                     state["record_files"][state["run_id"]] = watermark
+                    state["resource_view_id"] = checkpointer.prepare_state(scope_id, state)
                     with tracing_context(enabled=False, parent=False):
                         await graph.aupdate_state(
                             {"configurable": {"thread_id": scope_id}},
@@ -621,6 +629,16 @@ async def _run_agent(
                     final_state = deepcopy(state)
                     if state["stop_reason"] == "completed":
                         final_state["active_context"] = completed_context(state)
+                    archive = checkpointer.archive(scope_id)
+                    archive.append_event(state["run_id"], "run_final", {
+                        "stop_reason": state["stop_reason"], "error_code": state["error_code"],
+                        "cleanup_error": state["cleanup_error"], "log_complete": state["log_complete"],
+                        "usage_totals": state["usage_totals"], "summary_usage_totals": state["summary_usage_totals"],
+                    }, key="final")
+                    final_state["resource_view_id"] = checkpointer.prepare_state(scope_id, final_state)
+                    run_record_id = archive.stage_run(state["run_id"], {
+                        "final_state": deepcopy(final_state), "fact_end": archive.event_end(state["run_id"]),
+                    })
                     with tracing_context(enabled=False, parent=False):
                         saved_config = await graph.aupdate_state(
                             final_config, {**final_state, "input": Overwrite(deepcopy(final_state["input"]))},
@@ -630,12 +648,16 @@ async def _run_agent(
                     confirmed = await checkpointer.read_confirmed(scope_id, candidate_id)
                     saved_values = confirmed.checkpoint["channel_values"]
                     if any(saved_values.get(key) != final_state[key] for key in (
-                            "run_id", "active_context", "record_files", "record_revision", "stop_reason")):
+                            "run_id", "active_context", "record_files", "record_revision", "stop_reason", "resource_view_id")):
                         raise CheckpointError("checkpoint_read_error")
+                    archive.seal_run(run_record_id, final_state["resource_view_id"], candidate_id)
                     final_checkpoint_id = candidate_id
                     state = final_state
                 except CheckpointError as exc:
                     checkpoint_error = exc.code
+                except ArchiveError as exc:
+                    checkpoint_error = exc.code
+                    checkpointer.block(scope_id, exc.code)
                 except Exception:
                     checkpoint_error = "checkpoint_write_error"
                 except BaseException:

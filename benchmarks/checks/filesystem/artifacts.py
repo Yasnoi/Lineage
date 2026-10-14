@@ -318,26 +318,32 @@ def check_lifecycle():
 
 
 def check_faults():
+    for failure in ("open", "fsync", "rename"):
+        with fixture(), ArtifactStore() as store:
+            view = store.bind_session(str(uuid4()))
+            before = set(store._directory.iterdir())
+            original_open = Path.open
+
+            def failing_write(path, mode="r", *args, **kwargs):
+                if path.parent == store._directory and any(flag in mode for flag in "wx"):
+                    raise OSError(PRIVATE)
+                return original_open(path, mode, *args, **kwargs)
+
+            injected = (
+                patch.object(Path, "open", failing_write) if failure == "open" else
+                patch("lineage_agent.artifacts.store.os.fsync", side_effect=OSError(PRIVATE))
+                if failure == "fsync" else patch.object(Path, "rename", side_effect=OSError(PRIVATE))
+            )
+            with injected, error("artifact_write_error"):
+                view.put("must not publish", tool_name="custom_tool")
+            assert set(store._directory.iterdir()) == before
+            assert view.persistence_error() == "artifact_write_error"
+            with error("artifact_write_error"):
+                view.put("must not silently continue", tool_name="custom_tool")
+
     with fixture(), ArtifactStore() as store:
         view = store.bind_session(str(uuid4()))
-        before = set(store._directory.iterdir())
         original_open = Path.open
-
-        def failing_write(path, mode="r", *args, **kwargs):
-            if path.parent == store._directory and any(flag in mode for flag in "wx"):
-                raise OSError(PRIVATE)
-            return original_open(path, mode, *args, **kwargs)
-
-        with patch.object(Path, "open", failing_write), error("artifact_write_error"):
-            view.put("must not publish", tool_name="custom_tool")
-        assert set(store._directory.iterdir()) == before
-        # A failure after physical write must also remove the unpublished temp file.
-        with patch("lineage_agent.artifacts.store.os.fsync", side_effect=OSError(PRIVATE)), error("artifact_write_error"):
-            view.put("written but not durable", tool_name="custom_tool")
-        assert set(store._directory.iterdir()) == before
-        with patch.object(Path, "rename", side_effect=OSError(PRIVATE)), error("artifact_write_error"):
-            view.put("written but not published", tool_name="custom_tool")
-        assert set(store._directory.iterdir()) == before
         good = view.put("retained", tool_name="custom_tool")
         saved = raw_path(store, good)
 

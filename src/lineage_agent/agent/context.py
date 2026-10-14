@@ -1,4 +1,4 @@
-"""Immutable checkpoint references and bounded, contiguous context selection."""
+"""Archived business records and bounded, contiguous context selection."""
 
 from copy import deepcopy
 from hashlib import sha256
@@ -6,10 +6,9 @@ import json
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
-from langgraph.checkpoint.base import CheckpointTuple
-
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
 from lineage_agent.agent.records import RecordStore
+from lineage_agent.archive import ArchiveError, ArchiveStore
 from lineage_agent.agent.state import (
     ActiveContext, AgentState, RecordReference, SummaryReference,
 )
@@ -37,20 +36,33 @@ def json_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
-async def _read_final_turn(
-    saver: SessionCheckpointer, session_id: str, ref: RecordReference,
-) -> tuple[CheckpointTuple, int, int]:
-    """Load one fixed final checkpoint and validate its run and turn boundaries."""
-    saved = await saver.read_confirmed(session_id, ref["checkpoint_id"])
-    final = saved.checkpoint["channel_values"]
-    if final.get("run_id") != ref["run_id"]:
+def _read_archived_turn(archive: ArchiveStore, run_id: str, view_id: str) -> tuple[dict, int, int]:
+    """Validate access to a sealed run against an explicit confirmed view."""
+    try:
+        saved = archive.read_run(run_id)
+        archive.verify_view(view_id)
+        view = archive.view(view_id)
+        sealed = archive.view(saved["view_id"])
+        if (view["fact_ends"].get(run_id, -1) < saved["fact_end"]
+                or any(run not in view["record_files"]
+                       or watermark["record_count"] > view["record_files"][run]["record_count"]
+                       or watermark["byte_end"] > view["record_files"][run]["byte_end"]
+                       for run, watermark in sealed["record_files"].items())
+                or not set(sealed["summaries"]).issubset(view["summaries"])
+                or not set(sealed["artifacts"]).issubset(view["artifacts"])
+                or any(view["history_scopes"].get(ref) != scope for ref, scope in sealed["history_scopes"].items())):
+            raise CheckpointError("archive_integrity_error")
+    except ArchiveError as error:
+        raise CheckpointError(error.code) from None
+    final = saved["final_state"]
+    if final.get("run_id") != run_id:
         raise CheckpointError("checkpoint_read_error")
     active = final.get("active_context")
     start = active.get("turn_start") if isinstance(active, dict) else None
     if isinstance(active, dict) and active.get("current_run_id") is None:
         offset = 1 if active.get("history_summary") else 0
         for turn in active["turns"]:
-            if turn["run_id"] == ref["run_id"]:
+            if turn["run_id"] == run_id:
                 start = offset
                 break
             offset += turn["item_count"]
@@ -64,13 +76,9 @@ async def _read_final_turn(
 async def read_turn_slice(
     saver: SessionCheckpointer, session_id: str, ref: RecordReference,
 ) -> TurnSlice:
-    """Select facts without reconstructing the run's model/summary call archive.
-
-    The native saver still deserializes the final checkpoint. Do not traverse
-    its parents or copy unrelated raw responses just to select this turn.
-    """
-    saved, start, boundary = await _read_final_turn(saver, session_id, ref)
-    final = saved.checkpoint["channel_values"]
+    """Select admitted turn facts from the independent final run record."""
+    saved, start, boundary = _read_archived_turn(saver.archive(session_id), ref["run_id"], saver.confirmed_view(session_id))
+    final = saved["final_state"]
     return deepcopy({
         "admitted_input": final["input"][start:boundary],
         "stop_reason": final.get("stop_reason"),
@@ -82,43 +90,34 @@ async def read_turn_slice(
 async def read_record(
     saver: SessionCheckpointer, session_id: str, ref: RecordReference,
 ) -> dict[str, Any]:
-    """Read only confirmed snapshots; never resume, reset, or heal a failed thread."""
-    saved, start, boundary = await _read_final_turn(saver, session_id, ref)
-    final = saved.checkpoint["channel_values"]
-    originals = await RecordStore(saver, session_id).records(ref["run_id"], checkpoint_id=ref["checkpoint_id"])
+    return await read_archived_record(saver.archive(session_id), ref["run_id"], saver.confirmed_view(session_id))
+
+
+async def read_archived_record(archive: ArchiveStore, run_id: str, view_id: str) -> dict[str, Any]:
+    """Read a sealed run and its fixed event prefix, without graph traversal."""
+    saved, _, _ = _read_archived_turn(archive, run_id, view_id)
+    final = saved["final_state"]
+    store = RecordStore(archive=archive, view_id=saved["view_id"])
+    try:
+        originals = await store.records(run_id)
+    finally:
+        store.close()
     items = [record["item"] for record in originals if record.get("item") is not None]
     admitted = [record["item"] for record in originals if record.get("item") is not None
                 and record["sequence"] < final.get("record_admitted_through", 0)]
     model_results, summary_results = {}, {}
-    cursor = saved
-    seen = set()
-    while cursor is not None:
-        checkpoint_id = cursor.config["configurable"]["checkpoint_id"]
-        if checkpoint_id in seen:
-            raise CheckpointError("checkpoint_read_error")
-        seen.add(checkpoint_id)
-        values = cursor.checkpoint["channel_values"]
-        if values.get("run_id") != ref["run_id"]:
-            break
-        count = values.get("model_calls", 0)
-        if count:
-            # Walking backwards ends at the node that produced this attempt;
-            # later tool/summary errors must not relabel the model's outcome.
-            model_results[count] = {
-                "model_call": count, "result": values.get("result"),
-                "checkpoint_id": checkpoint_id, "error_code": values.get("error_code"),
-            }
-        count = values.get("summary_calls", 0)
-        attempt = values.get("compaction") or {}
-        if count and attempt.get("summary_call") == count:
-            summary_results[count] = {
-                "summary_call": count, "result": values.get("summary_result"),
-                "compaction": attempt, "checkpoint_id": checkpoint_id,
-            }
-        parent = cursor.parent_config
-        cursor = (await saver.read_confirmed(session_id, parent["configurable"]["checkpoint_id"])) if parent else None
+    try:
+        events = archive.events(run_id, end=saved["fact_end"])
+    except ArchiveError as error:
+        raise CheckpointError(error.code) from None
+    for event in events:
+        payload = event["payload"]
+        if event["kind"] == "model_result":
+            model_results.setdefault(payload["model_call"], payload)
+        elif event["kind"] == "summary_result":
+            summary_results.setdefault(payload["summary_call"], payload)
     return deepcopy({
-        "run_id": ref["run_id"], "checkpoint_id": ref["checkpoint_id"],
+        "run_id": run_id, "checkpoint_id": saved["checkpoint_id"],
         "input": items, "admitted_input": admitted,
         "history_end": len(admitted), "records": originals,
         "groups": sorted({record["group_id"] for record in originals if record.get("group_id")}),
@@ -149,14 +148,18 @@ class ContextRecords:
         saved = await self.saver.read_confirmed(self.session_id, checkpoint_id)
         return saved.checkpoint["channel_values"]
 
-    async def summary(self, ref: SummaryReference | None) -> str | None:
+    async def summary(self, ref: SummaryReference | None, *, view_id: str | None = None) -> str | None:
         if ref is None:
             return None
-        values = await self.snapshot(ref["checkpoint_id"])
-        lane = (values.get("compaction") or {}).get("lanes", {}).get(ref["lane"], {})
-        if lane.get("summary_id") != ref["summary_id"] or not isinstance(lane.get("body"), str) or not lane["body"].strip():
+        try:
+            record = self.store.archive.summary(ref["summary_id"], self.store._head(view_id=view_id))
+        except ArchiveError as error:
+            raise CheckpointError(error.code) from None
+        if (record.get("summary_id") != ref["summary_id"] or record.get("lane") != ref["lane"]
+                or record.get("history_ref") != ref["history_ref"] or record.get("ranges") != ref["ranges"]
+                or not isinstance(record.get("body"), str) or not record["body"].strip()):
             raise CheckpointError("checkpoint_read_error")
-        return lane["body"]
+        return record["body"]
 
     async def select(self, state: AgentState, settings: ModelSettings) -> tuple[dict | None, str | None]:
         from lineage_agent.models.responses import compactable_group_items
@@ -168,6 +171,7 @@ class ContextRecords:
                 or saved.get("record_revision") != state["record_revision"]
                 or saved.get("active_context", {}).get("version_id") != active["version_id"]):
             return None, "source_changed"
+        view_id = self.store._head()
         groups = active["groups"] if active["current_run_id"] is not None else []
         closed = [g for g in groups if g["closed"]]
         protected = settings.context_keep_recent_groups
@@ -194,7 +198,7 @@ class ContextRecords:
             background = state["input"][start:start + active["initial_input_count"]]
             if not compactable_group_items(background, require_response=False):
                 return None, "unsupported_protocol_boundary"
-        all_records = await self.store.records(checkpoint_id=checkpoint_id)
+        all_records = await self.store.records(view_id=view_id)
         by_ref = {r["source_ref"]: r for r in all_records}
         lanes = {}
         for lane, indices, previous in (
@@ -218,13 +222,13 @@ class ContextRecords:
                 r["run_id"] == bounds["run_id"] and bounds["start"] <= r["sequence"] < bounds["end"]
                 for bounds in ranges))
             covered.update(visible)
-            bodies = [await self.summary(ref) for ref in prior]
+            bodies = [await self.summary(ref, view_id=view_id) for ref in prior]
             if not covered.issubset(by_ref):
                 raise CheckpointError("checkpoint_read_error")
             if not covered:
                 lanes[lane] = {"status": "empty", "source_refs": [], "previous": []}
                 continue
-            scope = await self.store.register_scope(sorted(covered), checkpoint_id=checkpoint_id)
+            scope = await self.store.register_scope(sorted(covered), view_id=view_id)
             visible_refs = set(visible)
             lanes[lane] = {
                 "status": "selected", "source_refs": [r["source_ref"] for r in all_records
@@ -250,8 +254,11 @@ class ContextRecords:
                            if span["run_id"] == state["run_id"] and span["lane"] == "R")
         return {
             "snapshot": {"run_id": state["run_id"], "source_checkpoint_id": checkpoint_id,
+                         "resource_view_id": view_id,
                          "record_revision": state["record_revision"], "active_version_id": active["version_id"],
-                         "record_files": deepcopy(state["record_files"])},
+                         "record_files": deepcopy(state["record_files"]),
+                         "input": deepcopy(state["input"]), "context_risks": deepcopy(state["context_risks"]),
+                         "active_context": deepcopy(active)},
             "lanes": lanes, "removed_indices": sorted(removed), "removed_turns": len(turns),
             "removed_groups": [g["group_id"] for g in remove_groups],
         }, None
@@ -264,14 +271,14 @@ class ContextRecords:
         only the saved body, never an inferred heading or provenance suffix.
         """
         selected = compaction["lanes"][lane]
-        checkpoint_id = compaction["snapshot"]["source_checkpoint_id"]
-        saved = await self.snapshot(checkpoint_id)
+        saved = compaction["snapshot"]
+        view_id = saved["resource_view_id"]
         active = saved["active_context"]
         indices = selected["source_indices"]
         spans = {span["index"]: span for span in active["summary_spans"]}
         originals = {}
         for source_ref in selected["source_refs"]:
-            originals[source_ref] = await self.store.get(source_ref, checkpoint_id=checkpoint_id)
+            originals[source_ref] = await self.store.get(source_ref, view_id=view_id)
         material = {"input": [], "context_risks": [], "derived_spans": [], "item_refs": [], "item_details": []}
 
         def append(item: dict, risk=None, item_ref=None, details=None) -> None:
@@ -288,7 +295,7 @@ class ContextRecords:
                         or ref["summary_id"] != span["summary_id"]
                         or active["item_refs"][index] is not None):
                     raise CheckpointError("checkpoint_read_error")
-                body = await self.summary(ref)
+                body = await self.summary(ref, view_id=view_id)
                 material["derived_spans"].append({
                     **deepcopy(span), "index": len(material["input"]),
                     "body_sha256": sha256(body.encode("utf-8")).hexdigest(),
@@ -300,7 +307,7 @@ class ContextRecords:
                 return
             item_ref = active["item_refs"][index]
             if item_ref not in originals:
-                originals[item_ref] = await self.store.get(item_ref, checkpoint_id=checkpoint_id)
+                originals[item_ref] = await self.store.get(item_ref, view_id=view_id)
             record = originals[item_ref]
             if record.get("item") != saved["input"][index]:
                 raise CheckpointError("checkpoint_read_error")

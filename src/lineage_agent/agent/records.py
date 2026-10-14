@@ -11,7 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpointer
-from lineage_agent.agent.record_journal import JournalError
+from lineage_agent.agent.record_journal import JournalError, RecordJournal
+from lineage_agent.archive import ArchiveError, ArchiveStore
 from lineage_agent.tools.types import (
     MAX_RECALL_BYTES, ToolArgumentError, ToolExecutionError, inline_tool_output,
     serialize_tool_output, tool_output_bytes,
@@ -160,51 +161,90 @@ class _Index:
 
 
 class RecordStore:
-    """File-backed bodies admitted by one exact confirmed checkpoint."""
+    """File-backed bodies admitted by an explicit confirmed resource view.
 
-    def __init__(self, saver: SessionCheckpointer, scope_id: str) -> None:
+    A live store follows the saver’s confirmed view. A rebuilt store is pinned
+    to the supplied view and needs neither a graph nor historical checkpoints.
+    """
+
+    def __init__(self, saver: SessionCheckpointer | None = None, scope_id: str | None = None,
+                 *, archive: ArchiveStore | None = None, view_id: str | None = None) -> None:
+        if archive is None and (saver is None or scope_id is None):
+            raise ValueError("a live storage binding or an archive and view is required")
+        if archive is not None and view_id is None:
+            raise ValueError("rebuilt readers require an explicit confirmed view")
         self.saver, self.scope_id = saver, scope_id
+        self._archive_store, self._view_id = archive, view_id
+        self._journal_store = RecordJournal(archive.directory / "history") if archive is not None else None
+        if archive is not None:
+            archive.view(view_id)
         self._indices: dict[str, _Index] = {}
-        self._cursor_key = saver.history_cursor_key(scope_id)
+
+    @property
+    def archive(self) -> ArchiveStore:
+        return self._archive_store if self._archive_store is not None else self.saver.archive(self.scope_id)
+
+    @property
+    def journal(self) -> RecordJournal:
+        return self._journal_store if self._journal_store is not None else self.saver.history_journal(self.scope_id)
+
+    def close(self) -> None:
+        self.clear_index()
+        if self._journal_store is not None:
+            self._journal_store.close()
 
     def clear_index(self) -> None:
         self._indices.clear()
 
-    def _head(self, checkpoint_id: str | None) -> str:
-        head = checkpoint_id or self.saver.last_confirmed(self.scope_id)
+    def _head(self, checkpoint_id: str | None = None, *, view_id: str | None = None) -> str:
+        if checkpoint_id is not None and view_id is not None:
+            raise CheckpointError("checkpoint_read_error")
+        try:
+            head = (view_id or (self.archive.view_for_checkpoint(checkpoint_id) if checkpoint_id else None)
+                    or self._view_id or (self.saver.confirmed_view(self.scope_id) if self.saver else None))
+        except ArchiveError as error:
+            raise CheckpointError(error.code) from None
         if head is None:
             raise CheckpointError("checkpoint_read_error")
         return head
 
-    async def _index(self, checkpoint_id: str | None = None) -> _Index:
-        head = self._head(checkpoint_id)
+    def _file_index(self, files: dict, scopes: dict | None = None,
+                    order: list[str] | None = None) -> _Index:
+        if type(files) is not dict:
+            raise ValueError("invalid file manifest")
+        order = list(files) if order is None else order
+        if (type(order) is not list or len(order) != len(set(order))
+                or set(order) != set(files)):
+            raise ValueError("invalid file order")
+        locations, ordered = {}, []
+        for run_id in order:
+            watermark = files[run_id]
+            self.journal.verify(run_id, watermark)
+            for sequence in range(watermark["record_count"]):
+                ref = source_ref(run_id, sequence)
+                ordered.append(ref)
+                locations[ref] = _Location(run_id, deepcopy(watermark))
+        return _Index(locations, ordered, deepcopy(scopes or {}))
+
+    async def _index(self, checkpoint_id: str | None = None, *, view_id: str | None = None) -> _Index:
+        head = self._head(checkpoint_id, view_id=view_id)
         try:
-            saved = await self.saver.read_confirmed(self.scope_id, head)
-            values = saved.checkpoint["channel_values"]
-            journal = self.saver.history_journal(self.scope_id)
-            files = values.get("record_files", {})
+            values = self.archive.view(head)
+            files = values["record_files"]
             if type(files) is not dict:
                 raise ValueError("invalid file manifest")
             # A cached metadata index never bypasses fresh file integrity checks.
             for run_id, watermark in files.items():
-                journal.verify(run_id, watermark)
+                self.journal.verify(run_id, watermark)
             if head in self._indices:
                 return self._indices[head]
-            locations: dict[str, _Location] = {}
-            ordered: list[str] = []
-            for run_id, watermark in files.items():
-                for sequence in range(watermark["record_count"]):
-                    ref = source_ref(run_id, sequence)
-                    ordered.append(ref)
-                    locations[ref] = _Location(run_id, deepcopy(watermark))
-            scopes = deepcopy(values.get("history_scopes", {}))
-        except JournalError as error:
+            index = self._file_index(files, values.get("history_scopes", {}), values["record_order"])
+        except (JournalError, ArchiveError) as error:
             raise CheckpointError(error.code) from None
         except CheckpointError:
             raise
         except Exception:
             raise CheckpointError("checkpoint_read_error") from None
-        index = _Index(locations, ordered, scopes)
         self._indices[head] = index
         if len(self._indices) > 16:
             self._indices.pop(next(iter(self._indices)))
@@ -213,7 +253,7 @@ class RecordStore:
     async def _load(self, ref: str, index: _Index) -> dict[str, Any]:
         try:
             location = index.locations[ref]
-            return self.saver.history_journal(self.scope_id).get(ref, location.watermark)
+            return self.journal.get(ref, location.watermark)
         except JournalError as error:
             raise CheckpointError(error.code) from None
         except CheckpointError:
@@ -221,21 +261,23 @@ class RecordStore:
         except Exception:
             raise CheckpointError("checkpoint_read_error") from None
 
-    async def records(self, run_id: str | None = None, checkpoint_id: str | None = None) -> list[dict[str, Any]]:
-        index = await self._index(checkpoint_id)
+    async def records(self, run_id: str | None = None, checkpoint_id: str | None = None,
+                      *, view_id: str | None = None) -> list[dict[str, Any]]:
+        index = await self._index(checkpoint_id, view_id=view_id)
         return [await self._load(ref, index) for ref in index.ordered_refs
                 if run_id is None or parse_source_ref(ref)[0] == run_id]
 
-    async def get(self, ref: str, checkpoint_id: str | None = None) -> dict[str, Any]:
-        return await self._load(ref, await self._index(checkpoint_id))
+    async def get(self, ref: str, checkpoint_id: str | None = None,
+                  *, view_id: str | None = None) -> dict[str, Any]:
+        return await self._load(ref, await self._index(checkpoint_id, view_id=view_id))
 
     async def register_scope(
         self, source_refs: list[str], *, checkpoint_id: str | None = None,
-        history_ref: str | None = None,
+        history_ref: str | None = None, view_id: str | None = None,
     ) -> dict[str, Any]:
         """Build verified metadata; the caller publishes it in a saved candidate."""
-        head = self._head(checkpoint_id)
-        index = await self._index(head)
+        head = self._head(checkpoint_id, view_id=view_id)
+        index = await self._index(view_id=head)
         selected = set(source_refs)
         if not selected or not selected.issubset(index.locations):
             raise CheckpointError("checkpoint_read_error")
@@ -252,18 +294,31 @@ class RecordStore:
         history_ref = history_ref or f"history://scope/{uuid4()}"
         if type(history_ref) is not str or _SCOPE.fullmatch(history_ref) is None:
             raise CheckpointError("checkpoint_read_error")
-        result = {"history_ref": history_ref, "source_checkpoint_id": head, "ranges": ranges}
+        files = {interval["run_id"]: deepcopy(index.locations[source_ref(interval["run_id"], interval["start"])].watermark)
+                 for interval in ranges}
+        result = {"history_ref": history_ref, "source_checkpoint_id": checkpoint_id,
+                  "source_view_id": head, "ranges": ranges, "record_files": files}
         if history_ref in index.scopes and index.scopes[history_ref] != result:
             raise CheckpointError("checkpoint_read_error")
+        try:
+            self.archive.save_scope(result)
+        except ArchiveError as error:
+            if self.saver is not None:
+                self.saver.block(self.scope_id, error.code)
+            raise CheckpointError(error.code) from None
         return result
 
-    async def scope(self, history_ref: str, checkpoint_id: str | None = None) -> dict[str, Any]:
-        index = await self._index(checkpoint_id)
+    async def scope(self, history_ref: str, checkpoint_id: str | None = None,
+                    *, view_id: str | None = None) -> dict[str, Any]:
+        head = self._head(checkpoint_id, view_id=view_id)
+        index = await self._index(view_id=head)
         try:
-            metadata = deepcopy(index.scopes[history_ref])
+            metadata = self.archive.scope(history_ref, head)
+            if metadata != index.scopes[history_ref]:
+                raise ValueError("scope registration mismatch")
             if metadata["history_ref"] != history_ref:
                 raise ValueError("scope mismatch")
-            source_index = await self._index(metadata["source_checkpoint_id"])
+            source_index = self._file_index(metadata["record_files"])
             seen = set()
             for interval in metadata["ranges"]:
                 start, end = interval["start"], interval["end"]
@@ -279,6 +334,8 @@ class RecordStore:
             if not seen:
                 raise ValueError("empty scope")
             return metadata
+        except (ArchiveError, JournalError) as error:
+            raise CheckpointError(error.code) from None
         except CheckpointError:
             raise
         except Exception:
@@ -328,7 +385,7 @@ class RecordStore:
         # sized, so the reserved continuation envelope also fits after moving
         # across a record boundary or to a larger character offset.
         payload = _canonical([1, history_ref, fingerprint, f"{index:020d}", f"{position:020d}"])
-        signature = hmac.new(self._cursor_key, payload, hashlib.sha256).digest()
+        signature = hmac.new(self.archive.cursor_key(), payload, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(payload + signature).rstrip(b"=").decode("ascii")
 
     def _decode_cursor(self, cursor: str, history_ref: str, fingerprint: str) -> tuple[int, int]:
@@ -337,7 +394,7 @@ class RecordStore:
                 raise ValueError("invalid cursor")
             raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
             payload, signature = raw[:-32], raw[-32:]
-            if not hmac.compare_digest(signature, hmac.new(self._cursor_key, payload, hashlib.sha256).digest()):
+            if not hmac.compare_digest(signature, hmac.new(self.archive.cursor_key(), payload, hashlib.sha256).digest()):
                 raise ValueError("invalid cursor signature")
             version, scope, query, index, position = json.loads(payload)
             if (version != 1 or scope != history_ref or query != fingerprint
@@ -346,6 +403,8 @@ class RecordStore:
                     or re.fullmatch(r"[0-9]{20}", position) is None):
                 raise ValueError("cursor mismatch")
             return int(index), int(position)
+        except (ArchiveError, CheckpointError):
+            raise ToolExecutionError(reason_code="history_read_error") from None
         except Exception:
             raise ToolArgumentError(reason_code="invalid_history_cursor") from None
 
@@ -361,8 +420,9 @@ class RecordStore:
             raise ToolArgumentError(reason_code="invalid_history_keywords") from None
         first_index, first_position = self._decode_cursor(cursor, history_ref, fingerprint) if cursor is not None else (0, 0)
         try:
-            metadata = await self.scope(history_ref)
-            snapshot = await self._index(metadata["source_checkpoint_id"])
+            head = self._head()
+            metadata = await self.scope(history_ref, view_id=head)
+            snapshot = self._file_index(metadata["record_files"])
             refs = [source_ref(interval["run_id"], sequence) for interval in metadata["ranges"]
                     for sequence in range(interval["start"], interval["end"])]
             if first_index >= len(refs):
@@ -408,5 +468,5 @@ class RecordStore:
                     for index in indices:
                         positions[index] = text.find(keywords[index], match_start + 1)
             return result
-        except CheckpointError:
+        except (CheckpointError, JournalError, ArchiveError):
             raise ToolExecutionError(reason_code="history_read_error") from None

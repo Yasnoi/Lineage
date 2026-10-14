@@ -133,8 +133,10 @@ uv run --locked lineage-agent
 | `/exit` | 退出交互模式 |
 
 会话的执行状态和可继续使用的检查点只存在于当前进程，退出后不能通过旧会话 ID 恢复任务。
-原始交互与工具结果会保留在应用目录的 `.lineage/` 下，运行日志也保留在磁盘上；
-这些留存材料与可恢复的完整任务状态是不同的，重新启动不会自动载入旧会话。
+摘要、History 查询范围、工具结果登记及逐次运行事实保存在
+`.lineage/<会话ID>/conversation.sqlite`，原始交互和工具结果正文分别保存在同目录的
+`history/` 与 `artifacts/` 中。业务归档可凭明确的已确认资源视图重新建立读取模块，
+无需历史检查点；运行日志也继续保留在磁盘上。重新启动仍不会自动载入或继续旧会话。
 
 ## 源码阅读入口
 
@@ -148,6 +150,7 @@ uv run --locked lineage-agent
 - [`tools/filesystem/`](src/lineage_agent/tools/filesystem/)：目录列举、文本读取与路径访问边界。
 - [`observations/`](src/lineage_agent/observations/) 与 [`artifacts/`](src/lineage_agent/artifacts/)：工具结果入模处理、完整结果保存与召回。
 - [`recording/`](src/lineage_agent/recording/)：本地运行记录与可选追踪。
+- [`archive/`](src/lineage_agent/archive/)：独立业务归档、资源视图及完整性校验；[`agent/records.py`](src/lineage_agent/agent/records.py) 提供受视图约束的 History 读取。
 
 ## 验证与资料入口
 

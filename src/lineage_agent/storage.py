@@ -42,6 +42,10 @@ class ConversationPaths:
     history: Path
     artifacts: Path
 
+    @property
+    def database(self) -> Path:
+        return self.directory / "conversation.sqlite"
+
 
 def conversation_paths(application_root: Path, conversation_id: str) -> ConversationPaths:
     try:

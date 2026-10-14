@@ -21,25 +21,27 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.journal.close)
         self.files = {}
         self.snapshots = {}
+        self.summaries = {}
         self.context = ContextRecords.__new__(ContextRecords)
         self.context.session_id = "scope"
         self.context.saver = SimpleNamespace(history_journal=lambda _: self.journal)
         self.context.confirmed = lambda: "source"
         self.context.snapshot = self.snapshot
-        self.context.store = SimpleNamespace(get=self.get, records=self.records, register_scope=self.register_scope)
+        self.context.store = SimpleNamespace(get=self.get, records=self.records, register_scope=self.register_scope,
+            _head=lambda **_: "view", archive=SimpleNamespace(summary=lambda identity, view: deepcopy(self.summaries[identity])))
 
     async def snapshot(self, checkpoint_id):
         return deepcopy(self.snapshots[checkpoint_id])
 
-    async def get(self, source_ref, *, checkpoint_id=None):
+    async def get(self, source_ref, *, checkpoint_id=None, view_id=None):
         run_id = source_ref.rsplit("/", 2)[1]
         return self.journal.get(source_ref, self.files[run_id])
 
-    async def records(self, *, checkpoint_id=None):
+    async def records(self, *, checkpoint_id=None, view_id=None):
         return [record for run_id, watermark in self.files.items()
                 for record in self.journal.records(run_id, watermark)]
 
-    async def register_scope(self, refs, *, checkpoint_id):
+    async def register_scope(self, refs, *, checkpoint_id=None, view_id=None):
         ranges = []
         for record in await self.records():
             if record["source_ref"] not in refs:
@@ -48,7 +50,8 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
                 ranges[-1]["end"] += 1
             else:
                 ranges.append({"run_id": record["run_id"], "start": record["sequence"], "end": record["sequence"] + 1})
-        return {"history_ref": "history://scope/test", "source_checkpoint_id": checkpoint_id, "ranges": ranges}
+        return {"history_ref": "history://scope/test", "source_checkpoint_id": checkpoint_id,
+                "source_view_id": view_id, "record_files": deepcopy(self.files), "ranges": ranges}
 
     def add(self, run_id, items, *, group_id=None, kind="input", facts=None):
         batch = make_record_batch(run_id, self.files.get(run_id, {}).get("record_count", 0), items,
@@ -60,7 +63,8 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
     def summary(self, lane, owner, body, ranges):
         summary_id = f"summary-{owner}-{lane}"
         checkpoint_id = f"saved-{summary_id}"
-        self.snapshots[checkpoint_id] = {"compaction": {"lanes": {lane: {"summary_id": summary_id, "body": body}}}}
+        self.summaries[summary_id] = {"summary_id": summary_id, "lane": lane, "body": body,
+            "history_ref": f"history://scope/{owner}-{lane}", "ranges": deepcopy(ranges)}
         return {"summary_id": summary_id, "checkpoint_id": checkpoint_id, "lane": lane,
                 "history_ref": f"history://scope/{owner}-{lane}", "ranges": ranges}
 
@@ -126,6 +130,9 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         before_state = deepcopy(state)
         before_file = self.journal.path("current").read_bytes()
         selection = await self.select(state)
+        # Selection owns its immutable source. Old graph snapshots may vanish
+        # before material is rendered and archived summary bodies still resolve.
+        source_snapshot = self.snapshots.pop("source")
         material = await self.context.material(selection, "R", state)
         self.assertEqual(material["item_details"][0], {"kind": "scope"})
         self.assertEqual(set(material), {"input", "context_risks", "derived_spans", "item_refs", "item_details"})
@@ -142,7 +149,7 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         material["input"][4]["encrypted_content"] = "changed isolated copy"
         self.assertEqual(state, before_state)
         self.assertEqual(self.journal.path("current").read_bytes(), before_file)
-        self.assertEqual(self.snapshots["source"], before_state)
+        self.assertEqual(source_snapshot, before_state)
 
     async def test_h_keeps_old_r_inside_its_turn_and_never_strips_similar_ordinary_text(self):
         old_h = self.summary("H", "previous", "已知 H 正文", [{"run_id": "archived", "start": 0, "end": 1}])
@@ -215,7 +222,8 @@ class NativeContextMaterialTests(unittest.IsolatedAsyncioTestCase):
         active = new_context()
         active.update(current_run_id="current", initial_input_count=1)
         state = self.state("current", [{"role": "user", "content": "changed snapshot"}], refs, active)
-        compaction = {"snapshot": {"source_checkpoint_id": "source"}, "removed_groups": [], "removed_turns": 0,
+        compaction = {"snapshot": {**deepcopy(state), "source_checkpoint_id": "source", "resource_view_id": "view"},
+                      "removed_groups": [], "removed_turns": 0,
                       "lanes": {"R": {"source_indices": [], "source_refs": [], "previous": []}}}
         with self.assertRaises(CheckpointError):
             await self.context.material(compaction, "R", state)

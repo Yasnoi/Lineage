@@ -117,6 +117,8 @@ def build_graph(
             observed["input"] = new_input.value if isinstance(new_input, Overwrite) else state["input"] + new_input
             observe_state(deepcopy(observed), node, step_id)
         observe()
+        if context_records is not None:
+            context_records.saver.archive_facts(context_records.session_id, state, update, node)
         if batch and context_records is not None:
             try:
                 journal = context_records.saver.history_journal(context_records.session_id)
@@ -126,6 +128,9 @@ def build_graph(
             except JournalError as exc:
                 raise CheckpointError(exc.code) from None
             observe()
+        if context_records is not None:
+            prospective = {**state, **update}
+            update["resource_view_id"] = context_records.saver.prepare_state(context_records.session_id, prospective)
         return update
 
     def emit(event: str, step_id: str | None, node: str, **details: Any) -> bool:
@@ -148,7 +153,10 @@ def build_graph(
             compaction.update(status="confirmed", confirmed_checkpoint_id=checkpoint_id)
             # The fact observer also retains this confirmed acknowledgement if
             # the next log write fails before a business request is attempted.
-            state = {**state, "compaction": compaction}
+            if observe_state is not None:
+                observe_state(deepcopy({**state, "compaction": compaction}), "model", step_id)
+            context_records.saver.archive_facts(context_records.session_id, state, {"compaction": compaction}, "model")
+            state = {**state, "compaction": deepcopy(compaction)}
             if tracer is not None:
                 tracer.observe_compaction(compaction)
             if not emit("compaction.activated", step_id, "model", summary_id=compaction["summary_id"],
@@ -390,6 +398,8 @@ def build_graph(
                 observation_manager=observation_manager,
                 observation_hint_tools=observation_hint_tools,
                 native_recall_tools=native_recall_tools,
+                verify_persistence=(lambda: context_records.saver.verify_artifact_writes(context_records.session_id))
+                    if context_records is not None else None,
             )
         except BaseException as exc:
             batch = getattr(exc, "tool_batch", None)
