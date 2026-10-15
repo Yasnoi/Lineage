@@ -6,7 +6,7 @@ from typing import Any
 from lineage_agent.config.settings import (
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_TEXT_MAX_BYTES, DEFAULT_TEXT_TOTAL_MAX_BYTES,
 )
-from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, directory_executor
+from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL, DirectoryExecutor, directory_executor
 from lineage_agent.tools.filesystem.paths import bind_project_root
 from lineage_agent.tools.filesystem.text import TEXT_TOOL, TextExecutor
 from lineage_agent.tools.types import ToolArgumentError, ToolExecutor
@@ -33,6 +33,15 @@ class FilesystemExecutor:
 
     def bind_run(self) -> "FilesystemExecutor":
         return FilesystemExecutor(self._directory, self._text.bind_run())
+
+    def describe_binding(self) -> dict[str, Any] | None:
+        if type(self._directory) is not DirectoryExecutor or type(self._text) is not TextExecutor:
+            return None
+        directory, text = self._directory.describe_binding(), self._text.describe_binding()
+        if directory["options"]["root"] != text["options"]["root"]:
+            return None
+        return {"provider": "builtin.filesystem", "version": 1,
+                "options": {**directory["options"], **text["options"]}}
 
     @property
     def read_budget(self) -> dict[str, int]:

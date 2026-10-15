@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 import json
+import logging
 
 from langsmith import tracing_context
 from langgraph.types import Overwrite
@@ -12,12 +13,14 @@ from lineage_agent.agent.checkpointing import CheckpointError, SessionCheckpoint
 from lineage_agent.agent.context import ContextRecords, new_context
 from lineage_agent.agent.records import make_record_batch
 from lineage_agent.agent.record_journal import JournalError, RecordJournal
+from lineage_agent.agent.record_codec import encode_record
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
-from lineage_agent.archive import ArchiveError
+from lineage_agent.archive import ArchiveError, ArchiveStore
 from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
 from lineage_agent.artifacts.tools import ARTIFACT_TOOLS, ArtifactExecutor
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
+from lineage_agent.config.recovery import serialize_settings, describe_tools
 from lineage_agent.models.budget import annotate_context_risks
 from lineage_agent.models.requests import prepare_request
 from lineage_agent.models.responses import create_client, send_prepared_response
@@ -29,7 +32,7 @@ from lineage_agent.recording.summaries import tool_identity
 from lineage_agent.recording.tracing import start_trace
 from lineage_agent.tools.types import ToolExecutor, read_budget_snapshot
 from lineage_agent.tools.history import HISTORY_TOOLS, HISTORY_TOOL_NAMES, HistoryExecutor
-from lineage_agent.storage import StorageError, conversation_paths
+from lineage_agent.storage import StorageError, conversation_paths, ConversationLease
 
 
 CLIENT_CLOSE_MESSAGE = "模型客户端关闭失败；已取得的回答与统计予以保留。"
@@ -218,11 +221,19 @@ async def _run_agent(
     checkpointer: SessionCheckpointer | None = None,
     checkpoint_id: str | None = None,
     artifacts: SessionArtifacts | None = None,
+    source_snapshot_id: str | None = None,
+    publication: dict | None = None,
 ) -> tuple[AgentState, str | None, str | None]:
     """Share execution and cleanup; sessions add only the checkpoint lifecycle."""
     input_items = normalize_input(input)
+    publication = publication if publication is not None else {}
+    publication.update(snapshot_id=None, snapshot_status="not_published")
     try:
         available_tools = validate_tools(tools, execute_tool)
+        registration = ({"settings": serialize_settings(settings),
+                         "binding": describe_tools(available_tools, execute_tool)}
+                        if session_id is None else None)
+        original_tools = deepcopy(available_tools)
         if session_id is None:
             native_names = {tool["name"] for tool in ARTIFACT_TOOLS}
             if any(tool["name"] in native_names for tool in available_tools):
@@ -237,6 +248,10 @@ async def _run_agent(
             execute_tool = bind_run()
             if not callable(execute_tool):
                 raise ConfigurationError("工具执行器 bind_run 必须返回可调用的运行实例。")
+        # Constructing the client validates credentials without making a request.
+        # Rejected protocol input keeps its existing recorded rejection behavior.
+        prepared_client = (None if _input_shape_error(input_items) or _input_association_error(input_items)
+                           else create_client(settings))
     except ConfigurationError:
         raise PreExecutionConfigurationError() from None
 
@@ -245,6 +260,8 @@ async def _run_agent(
     propagating_error = False
     owned_store = None
     store_close_attempted = False
+    client_close_attempted = False
+    lease = None
     private_checkpointer = checkpointer is None
     scope_id = session_id or "run:" + recorder.run_id
     conversation_id = session_id or recorder.run_id
@@ -299,13 +316,20 @@ async def _run_agent(
         checkpointer.bind_run(scope_id, recorder)
         try:
             paths = conversation_paths(settings.application_root, conversation_id)
+            if private_checkpointer:
+                lease = ConversationLease.acquire(paths.directory, create=True)
+                archive = ArchiveStore(paths.directory)
+                checkpointer.bind_archive(scope_id, archive)
+                archive.register_conversation(registration, original_tools)
+            archive = checkpointer.archive(scope_id)
+            archive.begin_run(recorder.run_id, source_snapshot_id)
             journal = RecordJournal(paths.history)
             checkpointer.bind_history(scope_id, journal)
             receipts, watermark = journal.append(recorder.run_id, initial_batch)
             state["record_batch"] = receipts
             state["record_files"] = {recorder.run_id: watermark}
-        except (StorageError, JournalError, CheckpointError) as exc:
-            code = exc.code if isinstance(exc, (JournalError, CheckpointError)) else "record_create_error"
+        except (StorageError, JournalError, CheckpointError, ArchiveError) as exc:
+            code = exc.code if isinstance(exc, (JournalError, CheckpointError, ArchiveError)) else "record_create_error"
             state.update(stop_reason="error", error_code=code, error=str(CheckpointError(code)))
             recorder.emit("run.initialization_failed", stage="history_init", error_code=code)
             state["log_complete"] = recorder.close()
@@ -324,7 +348,7 @@ async def _run_agent(
             config["metadata"]["session_id"] = session_id
         checkpoint_error: str | None = None
         final_checkpoint_id: str | None = None
-        client_manager = None
+        client_manager = prepared_client
         client = None
         last_node: str | None = None
         last_step_id: str | None = None
@@ -334,7 +358,7 @@ async def _run_agent(
         try:
             if artifacts is None:
                 owned_store = ArtifactStore()
-                artifacts = owned_store.bind_session(recorder.run_id, directory=paths.artifacts)
+                artifacts = owned_store.bind_session(recorder.run_id, directory=paths.artifacts, lease=lease)
             artifacts = artifacts.bind_origin(recorder.run_id)
             checkpointer.bind_artifacts(scope_id, artifacts)
             execute_tool = ArtifactExecutor(artifacts, execute_tool,
@@ -423,10 +447,6 @@ async def _run_agent(
                         error=INVALID_INPUT_MESSAGE if code == "invalid_input" else "初始上下文中的工具请求与结果无法唯一关联。",
                     )
                 else:
-                    try:
-                        client_manager = create_client(settings)
-                    except ConfigurationError:
-                        raise PreExecutionConfigurationError() from None
                     client = await client_manager.__aenter__()
                     graph_input = {**state, "input": Overwrite(deepcopy(state["input"]))} if checkpointer is not None else state
                     state = await graph.ainvoke(
@@ -461,6 +481,7 @@ async def _run_agent(
             primary_error = exc
         finally:
             if client_manager is not None:
+                client_close_attempted = True
                 try:
                     await client_manager.__aexit__(
                         type(primary_error) if primary_error is not None else None,
@@ -501,6 +522,8 @@ async def _run_agent(
             # Preserve cancellation/configuration exceptions without logging their text.
             # There is no completed record if execution did not return a final State.
             configuration_rejected = isinstance(primary_error, PreExecutionConfigurationError)
+            if configuration_rejected:
+                archive.reject_run(state["run_id"])
             failure_code = "pre_execution_configuration_error" if configuration_rejected else "run_interrupted"
             if not configuration_rejected and checkpointer.failure(scope_id) is None and last_node is not None:
                 # A cancelled tool batch may have produced real results before
@@ -647,16 +670,22 @@ async def _run_agent(
                     candidate_id = saved_config["configurable"]["checkpoint_id"]
                     confirmed = await checkpointer.read_confirmed(scope_id, candidate_id)
                     saved_values = confirmed.checkpoint["channel_values"]
-                    if any(saved_values.get(key) != final_state[key] for key in (
-                            "run_id", "active_context", "record_files", "record_revision", "stop_reason", "resource_view_id")):
+                    if encode_record({key: saved_values.get(key) for key in final_state}) != encode_record(final_state):
                         raise CheckpointError("checkpoint_read_error")
-                    archive.seal_run(run_record_id, final_state["resource_view_id"], candidate_id)
+                    from lineage_agent.agent.recovery import validate_snapshot_state
+                    validate_snapshot_state(final_state, archive, final_state["resource_view_id"])
+                    snapshot = archive.publish_snapshot(run_record_id, final_state["resource_view_id"],
+                                                        candidate_id, source_snapshot_id)
+                    publication.update(snapshot_id=snapshot["snapshot_id"], snapshot_status="published",
+                                       checkpoint_id=candidate_id, run_id=state["run_id"])
                     final_checkpoint_id = candidate_id
                     state = final_state
                 except CheckpointError as exc:
                     checkpoint_error = exc.code
                 except ArchiveError as exc:
                     checkpoint_error = exc.code
+                    if exc.code == "archive_publication_unknown":
+                        publication["snapshot_status"] = "unknown"
                     checkpointer.block(scope_id, exc.code)
                 except Exception:
                     checkpoint_error = "checkpoint_write_error"
@@ -672,9 +701,19 @@ async def _run_agent(
             if checkpoint_error is not None and private_checkpointer:
                 state.update(stop_reason="error", error_code=checkpoint_error,
                              error=str(CheckpointError(checkpoint_error)))
-            tracer.finish_checkpoint(final_checkpoint_id, checkpoint_error)
-        tracer.finish(state, read_budget=end_budget, read_budget_error=end_budget_error)
-        await tracer.close()
+            try:
+                tracer.finish_checkpoint(final_checkpoint_id, checkpoint_error)
+            except Exception:
+                if publication["snapshot_status"] != "published":
+                    raise
+                logging.getLogger(__name__).warning("快照已发布；追踪收尾未完成，不影响已确认的恢复点。")
+        try:
+            tracer.finish(state, read_budget=end_budget, read_budget_error=end_budget_error)
+            await tracer.close()
+        except Exception:
+            if publication["snapshot_status"] != "published":
+                raise
+            logging.getLogger(__name__).warning("快照已发布；追踪收尾未完成，不影响已确认的恢复点。")
         return deepcopy(state), final_checkpoint_id, checkpoint_error
     except BaseException:
         propagating_error = True
@@ -683,6 +722,11 @@ async def _run_agent(
         # Independently attempt every cleanup even if execution, final saving,
         # or an earlier cleanup failed. Never replace an in-flight primary error.
         cleanup_error = None
+        if prepared_client is not None and not client_close_attempted:
+            try:
+                await prepared_client.__aexit__(None, None, None)
+            except BaseException as exc:
+                cleanup_error = exc
         if owned_store is not None and not store_close_attempted:
             try:
                 owned_store.close()
@@ -712,5 +756,14 @@ async def _run_agent(
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+        if lease is not None:
+            try:
+                lease.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         if cleanup_error is not None and not propagating_error:
-            raise cleanup_error
+            if publication["snapshot_status"] == "published" and isinstance(cleanup_error, Exception):
+                logging.getLogger(__name__).warning("快照已发布；运行句柄清理未完成，恢复点仍然有效。")
+            else:
+                raise cleanup_error

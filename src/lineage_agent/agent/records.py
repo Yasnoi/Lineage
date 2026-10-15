@@ -175,7 +175,7 @@ class RecordStore:
             raise ValueError("rebuilt readers require an explicit confirmed view")
         self.saver, self.scope_id = saver, scope_id
         self._archive_store, self._view_id = archive, view_id
-        self._journal_store = RecordJournal(archive.directory / "history") if archive is not None else None
+        self._journal_store = RecordJournal(archive.directory / "history", create=False) if archive is not None else None
         if archive is not None:
             archive.view(view_id)
         self._indices: dict[str, _Index] = {}

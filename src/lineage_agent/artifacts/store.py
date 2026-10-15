@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from lineage_agent.archive import ArchiveStore
 from lineage_agent.tools.filesystem import paths
-from lineage_agent.storage import conversation_paths, ensure_storage_directory, storage_identifier
+from lineage_agent.storage import ConversationLease, conversation_paths, ensure_storage_directory, storage_identifier
 from lineage_agent.tools.types import (
     MAX_RECALL_BYTES, inline_tool_output, serialize_tool_output, tool_output_bytes,
 )
@@ -117,6 +117,9 @@ class ArtifactStore:
         self._archives: dict[str, ArchiveStore] = {}
         self._owned_archives: dict[str, ArchiveStore] = {}
         self._write_failures: set[str] = set()
+        self._sessions: dict[str, str] = {}
+        self._released: set[str] = set()
+        self._leases: dict[str, ConversationLease] = {}
 
     @property
     def _directory(self) -> Path:
@@ -130,14 +133,19 @@ class ArtifactStore:
         if self._closed:
             raise ArtifactError("artifact_store_closed")
 
-    def bind_session(self, session_id: str, *, directory: Path | None = None) -> "SessionArtifacts":
+    def bind_session(self, session_id: str, *, directory: Path | None = None,
+                     lease: ConversationLease | None = None) -> "SessionArtifacts":
         with self._lock:
             self._ensure_open()
             if type(session_id) is not str or not session_id:
                 raise ArtifactError("invalid_artifact_session")
             try:
+                previous = self._sessions.get(session_id)
+                binding = previous if previous not in self._released else None
+                if lease is not None and not lease.active:
+                    raise ValueError("released conversation lease")
                 if directory is None:
-                    path = self._directories.get(session_id)
+                    path = self._directories.get(previous)
                     if path is None:
                         path = conversation_paths(self._application_root, str(uuid4())).artifacts
                 else:
@@ -146,33 +154,43 @@ class ArtifactStore:
                         raise ValueError("invalid artifact directory")
                     storage_identifier(path.parent.name)
                     path = ensure_storage_directory(path)
-                if session_id in self._directories and self._directories[session_id] != path:
+                if binding in self._directories and self._directories[binding] != path:
                     raise ValueError("session directory changed")
-                if session_id not in self._archives:
+                if binding is None:
+                    binding = uuid4().hex
                     archive = ArchiveStore(path.parent, create=True)
-                    self._archives[session_id] = archive
-                    self._owned_archives[session_id] = archive
-                self._directories[session_id] = path
-                self._records.setdefault(session_id, {})
+                    self._archives[binding] = archive
+                    self._owned_archives[binding] = archive
+                    self._sessions[session_id] = binding
+                elif lease is not None and self._leases.get(binding) not in (None, lease):
+                    raise ValueError("binding lease changed")
+                self._directories[binding] = path
+                self._records.setdefault(binding, {})
+                if lease is not None:
+                    self._leases[binding] = lease
             except Exception:
                 raise ArtifactError("artifact_write_error") from None
-            return SessionArtifacts(self, session_id)
+            return SessionArtifacts(self, session_id, binding_id=binding)
 
     def restore_session(self, session_id: str, *, archive: ArchiveStore,
-                        view_id: str) -> "SessionArtifacts":
+                        view_id: str, lease: ConversationLease | None = None) -> "SessionArtifacts":
         """Rebuild only registrations authorized by an explicitly supplied view.
 
-        The archive is borrowed. Closing this store does not close that handle.
-        Normal ``bind_session`` deliberately never performs this import.
+        The supplied archive is borrowed for validation. The binding owns its
+        own connection, so released handles remain readable after the session's
+        connection closes. Normal ``bind_session`` never performs this import.
         """
         with self._lock:
             self._ensure_open()
             if type(session_id) is not str or not session_id:
                 raise ArtifactError("invalid_artifact_session")
+            owned = None
             try:
                 directory = Path(archive.directory).absolute() / "artifacts"
+                previous = self._sessions.get(session_id)
                 if (directory.parent.parent.name.casefold() != ".lineage"
-                        or session_id in self._directories):
+                        or (previous is not None and previous not in self._released)
+                        or (lease is not None and not lease.active)):
                     raise ValueError("invalid or existing binding")
                 storage_identifier(directory.parent.name)
                 _check_path(directory, directory=True)
@@ -181,12 +199,46 @@ class ArtifactStore:
                 for ref in view["artifacts"]:
                     item = archive.artifact(ref, view_id=view_id)
                     records[ref] = self._record_from_archive(archive, item)
-                self._directories[session_id] = directory
-                self._archives[session_id] = archive
-                self._records[session_id] = records
+                owned = ArchiveStore(archive.directory, create=False)
+                binding = uuid4().hex
+                self._directories[binding] = directory
+                self._archives[binding] = owned
+                self._owned_archives[binding] = owned
+                self._records[binding] = records
+                self._sessions[session_id] = binding
+                if lease is not None:
+                    self._leases[binding] = lease
             except Exception:
+                if owned is not None:
+                    owned.close()
                 raise ArtifactError("artifact_read_error") from None
-            return SessionArtifacts(self, session_id)
+            return SessionArtifacts(self, session_id, binding_id=binding)
+
+    def _release(self, binding_id: str) -> None:
+        with self._lock:
+            self._released.add(binding_id)
+
+    def _discard(self, binding_id: str) -> None:
+        """Dispose an unexposed temporary binding after creation/open failed."""
+        with self._lock:
+            self._released.add(binding_id)
+            archive = self._owned_archives.pop(binding_id, None)
+            self._archives.pop(binding_id, None)
+            self._records.pop(binding_id, None)
+            self._directories.pop(binding_id, None)
+            self._leases.pop(binding_id, None)
+            for session_id, current in list(self._sessions.items()):
+                if current == binding_id:
+                    del self._sessions[session_id]
+            if archive is not None:
+                try:
+                    archive.close()
+                except Exception:
+                    raise ArtifactError("artifact_cleanup_error") from None
+
+    def _writable(self, binding_id: str) -> bool:
+        lease = self._leases.get(binding_id)
+        return binding_id not in self._released and (lease is None or lease.active)
 
     @staticmethod
     def _record_from_archive(archive: ArchiveStore, item: dict[str, Any]) -> _Record:
@@ -197,7 +249,7 @@ class ArtifactStore:
              origin: dict[str, str] | None = None) -> dict[str, Any]:
         with self._lock:
             self._ensure_open()
-            if session_id in self._write_failures:
+            if session_id in self._write_failures or not self._writable(session_id):
                 raise ArtifactError("artifact_write_error")
             try:
                 if type(raw) is not str or type(tool_name) is not str or not tool_name:
@@ -379,6 +431,8 @@ class ArtifactStore:
                     failed = True
             self._owned_archives.clear()
             self._archives.clear()
+            self._sessions.clear()
+            self._leases.clear()
             # Published files belong to the conversation, not the handle. No
             # implicit import, deletion, or cross-process recovery occurs here.
             if failed:
@@ -396,36 +450,45 @@ class SessionArtifacts:
     """Trusted application handle; model tools never accept its session ID."""
 
     def __init__(self, store: ArtifactStore, session_id: str,
-                 origin: dict[str, str] | None = None) -> None:
+                 origin: dict[str, str] | None = None, *, binding_id: str | None = None) -> None:
         self._store, self._session_id = store, session_id
+        self._binding_id = binding_id if binding_id is not None else store._sessions[session_id]
         self._origin = origin
 
     def bind_origin(self, run_id: str) -> "SessionArtifacts":
         """Return a per-run writer without changing the shared session handle."""
         storage_identifier(run_id)
-        return SessionArtifacts(self._store, self._session_id, {"run_id": run_id})
+        return SessionArtifacts(self._store, self._session_id, {"run_id": run_id}, binding_id=self._binding_id)
+
+    def release(self) -> None:
+        """Revoke this binding generation's writers, retaining its read scope."""
+        self._store._release(self._binding_id)
+
+    def discard(self) -> None:
+        """Release a temporary binding's resources without closing its store."""
+        self._store._discard(self._binding_id)
 
     def registered_refs(self) -> list[str]:
         with self._store._lock:
             self._store._ensure_open()
-            return list(self._store._records.get(self._session_id, {}))
+            return list(self._store._records.get(self._binding_id, {}))
 
     def persistence_error(self) -> str | None:
         """Report a real body/registration failure even if preview policy caught it."""
         with self._store._lock:
-            return "artifact_write_error" if self._session_id in self._store._write_failures else None
+            return "artifact_write_error" if self._binding_id in self._store._write_failures else None
 
     def check_persistence(self) -> None:
         if code := self.persistence_error():
             raise ArtifactError(code)
 
     def put(self, raw_result: str, *, tool_name: str) -> dict[str, Any]:
-        return self._store._put(self._session_id, raw_result, tool_name, self._origin)
+        return self._store._put(self._binding_id, raw_result, tool_name, self._origin)
 
     def read(self, artifact_ref: str, start: int, end: int | None = None, *,
              view_id: str | None = None) -> dict[str, Any]:
-        return self._store._read(self._session_id, artifact_ref, start, end, view_id)
+        return self._store._read(self._binding_id, artifact_ref, start, end, view_id)
 
     def search(self, artifact_ref: str, keywords: list[str], start: int = 0, *,
                view_id: str | None = None) -> dict[str, Any]:
-        return self._store._search(self._session_id, artifact_ref, keywords, start, view_id)
+        return self._store._search(self._binding_id, artifact_ref, keywords, start, view_id)

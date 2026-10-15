@@ -447,7 +447,11 @@ async def check_prepare_and_final_save_secondary_errors():
         else:
             raise AssertionError("secondary tracing close error replaced the preparation rejection")
     closed_resources(manager, sid, observed)
-    assert factory.call_count == 1 and len(close_calls) == 1
+    # Credential rejection now precedes Run registration, logs and tracing.
+    assert factory.call_count == 1 and not close_calls and not any(observed) and not transport.sent
+    archive = manager._checkpointer.archive(sid)
+    assert not archive.unfinished_runs()
+    assert archive.conversation()["current_snapshot_id"] == first.snapshot_id
     assert manager._checkpointer.storage[sid] == committed
     assert manager._sessions[sid].last_checkpoint_id == first.checkpoint_id
     assert not manager._sessions[sid].blocked
@@ -549,8 +553,11 @@ def check_cli_preconfiguration_retry():
         os.environ, {"API_KEY": ""},
     ), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
         assert cli.main() == 2
-    with patch("sys.argv", ["lineage-agent"]), patch.object(cli, "load_settings", side_effect=ConfigurationError("配置无效。")), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-        assert cli.main() == 2
+    with patch("sys.argv", ["lineage-agent"]), patch("builtins.input", side_effect=["/new", "/exit"]), \
+            patch.object(cli, "load_settings", side_effect=ConfigurationError("配置无效。")), \
+            redirect_stdout(StringIO()), redirect_stderr(StringIO()) as errors:
+        assert cli.main() == 0
+    assert "配置无效。" in errors.getvalue()
 
 async def main():
     checks = (

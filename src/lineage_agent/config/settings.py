@@ -246,3 +246,56 @@ def load_settings(env_file: str | Path | None = None) -> ModelSettings:
         text_total_max_bytes=text_total_max_bytes,
         **budget_values,
     )
+
+
+def load_local_paths(env_file: str | Path | None = None, *,
+                     application_root: str | Path | None = None) -> dict[str, Path | None]:
+    """Load storage/log locations and current directory authority without a model.
+
+    An explicit application root changes the storage location, not the .env
+    search location or the meaning of relative paths inside that .env.
+    """
+    dotenv_path = Path(env_file) if env_file is not None else Path.cwd() / ".env"
+    try:
+        load_dotenv(dotenv_path=dotenv_path, override=False, encoding="utf-8")
+        root = dotenv_path.parent if application_root is None else Path(application_root)
+        if isinstance(application_root, str) and not application_root.strip():
+            raise ValueError
+        log_value = os.environ.get("LOG_DIR", "logs").strip()
+        if not log_value:
+            raise ValueError
+        log_dir = Path(log_value)
+        if not log_dir.is_absolute():
+            log_dir = dotenv_path.parent / log_dir
+        project_value = os.environ.get("PROJECT_ROOT", "").strip()
+        project_root = Path(project_value) if project_value else None
+        if project_root is not None and not project_root.is_absolute():
+            project_root = dotenv_path.parent / project_root
+        return {"application_root": root.absolute(), "log_dir": log_dir.absolute(),
+                "project_root": project_root.absolute() if project_root is not None else None}
+    except (OSError, TypeError, ValueError, UnicodeError):
+        raise ConfigurationError("无法读取本地存储、日志或目录授权配置。") from None
+
+
+def load_current_limits(env_file: str | Path | None = None) -> dict[str, int | float]:
+    """Read comparison values only; saved conversations retain their own limits."""
+    load_local_paths(env_file)
+    values = {}
+    names = (
+        "timeout_seconds", "max_model_calls", "directory_max_entries", "text_max_bytes",
+        "text_total_max_bytes", "context_budget_tokens", "max_output_tokens",
+        "context_safety_margin_tokens", "opaque_fallback_tokens", "context_keep_recent_groups",
+        "summary_history_max_output_tokens", "summary_run_max_output_tokens",
+    )
+    for name in names:
+        default = ModelSettings.__dataclass_fields__[name].default
+        try:
+            text = os.environ.get(name.upper(), str(default))
+            value = float(text) if name == "timeout_seconds" else int(text)
+            allow_zero = name == "context_safety_margin_tokens"
+            if not math.isfinite(value) or (value < 0 if allow_zero else value <= 0):
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            raise ConfigurationError(f"{name.upper()} 的当前数值配置无效。") from None
+        values[name] = value
+    return values

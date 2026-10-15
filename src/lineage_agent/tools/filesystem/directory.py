@@ -62,10 +62,23 @@ def create_directory_executor(root: str | Path, *, max_entries: int = DEFAULT_DI
 
 def directory_executor(project_root: Path, *, max_entries: int) -> ToolExecutor:
     """Construct from a validated root shared with other filesystem tools."""
-    if type(max_entries) is not int or max_entries <= 0:
-        raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。")
+    return DirectoryExecutor(project_root, max_entries)
 
-    async def execute_tool(name: str, arguments: dict[str, Any]) -> str:
+
+class DirectoryExecutor:
+    """A directory binding whose actual parameters can be described safely."""
+
+    def __init__(self, project_root: Path, max_entries: int) -> None:
+        if type(max_entries) is not int or max_entries <= 0:
+            raise ConfigurationError("DIRECTORY_MAX_ENTRIES 必须是正整数。")
+        self._root, self._max_entries = project_root, max_entries
+
+    def describe_binding(self) -> dict[str, Any]:
+        return {"provider": "builtin.directory", "version": 1,
+                "options": {"root": str(self._root), "max_entries": self._max_entries}}
+
+    async def __call__(self, name: str, arguments: dict[str, Any]) -> str:
+        project_root, max_entries = self._root, self._max_entries
         if (
             name != DIRECTORY_TOOL["name"]
             or not isinstance(arguments, dict)
@@ -113,5 +126,3 @@ def directory_executor(project_root: Path, *, max_entries: int) -> ToolExecutor:
             "limit": max_entries, "truncated": truncated,
             "after": after, "next_after": entries[-1]["name"] if truncated else None,
         }, ensure_ascii=False, allow_nan=False)
-
-    return execute_tool

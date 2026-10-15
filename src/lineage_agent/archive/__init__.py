@@ -12,11 +12,18 @@ Consumers must retain a confirmed view_id separately from this binding:
 
 Runtime writers append events and register bodies before prepare_view. State
 save precedes confirm_view; both must succeed before advancing live access.
-stage_run/seal_run separately publish final run details after State readback.
+register_conversation records the non-secret recovery descriptor; begin_run
+records an attempt before business execution. After State readback,
+publish_snapshot atomically seals the staged Run, publishes its immutable
+snapshot and advances current_snapshot_id. Resource views never imply a new
+recovery point. read_snapshot validates the selected point and published_runs
+returns only its recognized ancestors. accept_recovery records an explicit
+choice to leave unfinished attempts outside that ancestry.
+stage_run/seal_run remain lower-level business-detail APIs.
 The raw events/read_run APIs are trusted archive inspection interfaces, not
 model tools or permission to adopt unconfirmed facts. No method resumes a graph.
 """
 
-from lineage_agent.archive.store import ArchiveError, ArchiveStore
+from lineage_agent.archive.store import ArchiveError, ArchiveStore, FORMAT_VERSION, RECOVERY_VERSION
 
-__all__ = ["ArchiveError", "ArchiveStore"]
+__all__ = ["ArchiveError", "ArchiveStore", "FORMAT_VERSION", "RECOVERY_VERSION"]

@@ -167,7 +167,7 @@ class ArchiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await manager.run_turn(sid, "blocked")
 
     async def test_archive_failure_boundaries_preserve_facts_and_old_access(self):
-        for failure in ("append_event", "prepare_view", "confirm_view", "seal_run"):
+        for failure in ("append_event", "prepare_view", "confirm_view", "publish_snapshot"):
             with self.subTest(failure=failure), SessionManager() as manager:
                 sid = manager.create_session(self.settings)
                 original = getattr(ArchiveStore, failure)

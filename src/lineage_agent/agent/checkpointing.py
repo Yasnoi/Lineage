@@ -23,6 +23,7 @@ CHECKPOINT_ERRORS = {
     "archive_read_error": "业务归档无法读取。",
     "archive_integrity_error": "业务归档或资源关联校验失败。",
     "archive_version_error": "业务归档格式版本不兼容。",
+    "archive_publication_unknown": "轮次发布结果无法确认，当前会话已阻断。",
     "artifact_write_error": "工具结果正文或登记未能保存，已停止后续调用。",
 }
 
@@ -59,6 +60,82 @@ class SessionCheckpointer(InMemorySaver):
         self._archives: dict[str, ArchiveStore] = {}
         self._views: dict[str, str] = {}
         self._artifact_bindings: dict[str, Any] = {}
+        self._restoring: dict[str, str] = {}
+
+    def bind_archive(self, thread_id: str, archive: ArchiveStore) -> None:
+        """Transfer an already opened archive to this scope's lifecycle."""
+        if thread_id in self._archives and self._archives[thread_id] is not archive:
+            raise CheckpointError("archive_integrity_error")
+        journal = self._history_journals.get(thread_id)
+        if journal is not None and journal.directory.parent != archive.directory:
+            raise CheckpointError("archive_integrity_error")
+        self._archives[thread_id] = archive
+
+    async def restore_state(self, thread_id: str, state: dict, *,
+                            archive: ArchiveStore, artifacts) -> str:
+        """Import a validated snapshot into a fresh, idle in-memory graph.
+
+        Only public graph state-update/read APIs build and inspect the native
+        checkpoint. No node is invoked and no existing business view is
+        published again. Ownership of ``archive`` transfers only on success.
+        """
+        from langgraph.graph import END, START, StateGraph
+        from langgraph.types import Overwrite
+        from lineage_agent.agent.recovery import validate_snapshot_state
+        from lineage_agent.agent.record_codec import encode_record
+        from lineage_agent.agent.record_journal import RecordJournal
+        from lineage_agent.agent.state import AgentState
+
+        if (thread_id in self._archives or thread_id in self._history_journals
+                or thread_id in self._confirmed or thread_id in self._failures
+                or self.get_tuple({"configurable": {"thread_id": thread_id}}) is not None):
+            raise CheckpointError("checkpoint_create_error")
+        journal = None
+        try:
+            frozen = deepcopy(state)
+            view_id = frozen["resource_view_id"]
+            validate_snapshot_state(frozen, archive, view_id)
+            journal = RecordJournal(archive.directory / "history", create=False)
+            self.bind_archive(thread_id, archive)
+            self.bind_history(thread_id, journal)
+            self.bind_artifacts(thread_id, artifacts)
+            self._restoring[thread_id] = view_id
+            builder = StateGraph(AgentState)
+
+            def imported(_state):
+                raise AssertionError("snapshot import must not execute a graph node")
+
+            builder.add_node("import_snapshot", imported)
+            builder.add_edge(START, "import_snapshot")
+            builder.add_edge("import_snapshot", END)
+            graph = builder.compile(checkpointer=self)
+            config = {"configurable": {"thread_id": thread_id}}
+            saved = await graph.aupdate_state(
+                config, {**frozen, "input": Overwrite(deepcopy(frozen["input"]))},
+                as_node="import_snapshot",
+            )
+            snapshot = await graph.aget_state(saved)
+            checkpoint_id = saved["configurable"]["checkpoint_id"]
+            if (snapshot.next or snapshot.tasks or encode_record(snapshot.values) != encode_record(frozen)
+                    or self.last_confirmed(thread_id) != checkpoint_id
+                    or self.confirmed_view(thread_id) != view_id):
+                raise CheckpointError("checkpoint_read_error")
+            return checkpoint_id
+        except BaseException as exc:
+            # The caller still owns the borrowed archive and Artifact binding
+            # on a failed import. Remove every temporary native handle first.
+            self._archives.pop(thread_id, None)
+            self._history_journals.pop(thread_id, None)
+            try:
+                self.release(thread_id)
+            finally:
+                if journal is not None:
+                    journal.close()
+            if not isinstance(exc, Exception):
+                raise
+            raise CheckpointError(getattr(exc, "code", "checkpoint_create_error")) from None
+        finally:
+            self._restoring.pop(thread_id, None)
 
     def bind_history(self, thread_id: str, journal) -> None:
         previous = self._history_journals.get(thread_id)
@@ -69,6 +146,8 @@ class SessionCheckpointer(InMemorySaver):
                 self._archives[thread_id] = ArchiveStore(journal.directory.parent)
             except ArchiveError as exc:
                 raise CheckpointError(exc.code) from None
+        elif self._archives[thread_id].directory != journal.directory.parent:
+            raise CheckpointError("record_integrity_error")
         self._history_journals[thread_id] = journal
 
     def archive(self, thread_id: str) -> ArchiveStore:
@@ -187,6 +266,7 @@ class SessionCheckpointer(InMemorySaver):
         self._recorders.pop(thread_id, None)
         self._views.pop(thread_id, None)
         self._artifact_bindings.pop(thread_id, None)
+        self._restoring.pop(thread_id, None)
         journal = self._history_journals.pop(thread_id, None)
         if journal is not None:
             journal.close()
@@ -278,10 +358,13 @@ class SessionCheckpointer(InMemorySaver):
         try:
             self._verify_records(thread_id, checkpoint["channel_values"])
             view_id = checkpoint["channel_values"].get("resource_view_id")
+            restoring = self._restoring.get(thread_id)
+            if restoring is not None and view_id != restoring:
+                raise CheckpointError("archive_integrity_error")
             if view_id:
                 archive = self.archive(thread_id)
-                archive.verify_view(view_id, confirmed=False)
-                view = archive.view(view_id, confirmed=False)
+                archive.verify_view(view_id, confirmed=restoring is not None)
+                view = archive.view(view_id, confirmed=restoring is not None)
                 values = checkpoint["channel_values"]
                 if (view["record_files"] != values.get("record_files", {})
                         or view["record_order"] != list(values.get("record_files", {}))
@@ -305,7 +388,7 @@ class SessionCheckpointer(InMemorySaver):
                     raise CheckpointError("archive_integrity_error")
             saved_config = self.put(config, checkpoint, metadata, new_versions)
             checkpoint_id = saved_config["configurable"]["checkpoint_id"]
-            if view_id:
+            if view_id and restoring is None:
                 self.archive(thread_id).confirm_view(view_id, checkpoint_id)
         except Exception as exc:
             code = getattr(exc, "code", "checkpoint_write_error")

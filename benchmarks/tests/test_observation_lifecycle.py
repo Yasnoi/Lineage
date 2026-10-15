@@ -105,16 +105,16 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(event["event"] == "run.aborted" for event in events))
         self.assertNotIn(PRIVATE, json.dumps(events))
 
-    async def test_preexecution_configuration_stays_primary_during_cleanup_failure(self):
+    async def test_preexecution_configuration_allocates_no_run_or_store(self):
         close, attempts = self.failing_store_close()
         with patch.object(runtime, "create_client", side_effect=ConfigurationError(PRIVATE)), \
                 patch.object(ArtifactStore, "close", close):
             with self.assertRaises(runtime.PreExecutionConfigurationError):
                 await runtime.run_agent("invalid connection", self.settings)
-        self.assertEqual(len(attempts), 1)
-        self.assertTrue(attempts[0]._directory.exists())
+        self.assertFalse(attempts)
         events = self.events()
-        self.assertTrue(any(event["event"] == "run.configuration_rejected" for event in events))
+        self.assertFalse(events)
+        self.assertFalse((self.root / ".lineage").exists())
         self.assertNotIn(PRIVATE, json.dumps(events))
 
     async def test_bind_initialization_failure_closes_owned_store_without_model_call(self):
@@ -125,15 +125,17 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             stores.append(store)
             return store
 
+        client = LocalClient([])
         with patch.object(runtime, "ArtifactStore", side_effect=factory), \
                 patch.object(ArtifactStore, "bind_session", side_effect=ArtifactError("artifact_write_error")), \
-                patch.object(runtime, "create_client") as create_client:
+                patch.object(runtime, "create_client", return_value=client):
             state = await runtime.run_agent("cannot bind", self.settings)
 
         self.assertEqual(state["error_code"], "artifact_store_init_error")
         self.assertEqual(state["model_calls"], 0)
         self.assertEqual(state["tool_calls"], 0)
-        create_client.assert_not_called()
+        self.assertFalse(client.requests)
+        self.assertTrue(client.closed)
         self.assertEqual(len(stores), 1)
         self.assertFalse(stores[0]._directory.exists())
 

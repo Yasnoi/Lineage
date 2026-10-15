@@ -350,7 +350,7 @@ class ArchiveTests(unittest.TestCase):
             ArchiveStore(self.paths.directory, create=False)
         self.assertEqual(caught.exception.code, "archive_version_error")
         with closing(sqlite3.connect(self.paths.database)) as connection, connection:
-            connection.execute("PRAGMA user_version=1")
+            connection.execute("PRAGMA user_version=2")
         other = conversation_paths(Path(self.temporary.name), "other")
         other.database.write_bytes(self.paths.database.read_bytes())
         with self.assertRaises(ArchiveError):

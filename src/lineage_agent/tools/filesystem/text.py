@@ -59,6 +59,11 @@ class TextExecutor:
     def bind_run(self) -> "TextExecutor":
         return TextExecutor(self._root, self._max_bytes, self._max_total_bytes)
 
+    def describe_binding(self) -> dict[str, Any]:
+        return {"provider": "builtin.text", "version": 1,
+                "options": {"root": str(self._root), "max_bytes": self._max_bytes,
+                            "max_total_bytes": self._max_total_bytes}}
+
     @property
     def read_budget(self) -> dict[str, int]:
         return {

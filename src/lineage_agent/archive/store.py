@@ -7,6 +7,7 @@ save succeeds. Opening this database does not open or resume an Agent session.
 
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -29,7 +30,13 @@ _ERRORS = {
     "archive_read_error": "业务归档无法读取。",
     "archive_integrity_error": "业务归档身份、引用或完整性校验失败。",
     "archive_version_error": "业务归档格式版本不受支持。",
+    "archive_publication_unknown": "无法确认对话快照是否已经发布；请重新打开并核验会话。",
+    "archive_publication_conflict": "对话恢复点或未完成轮次已经变化，本次操作未发布。",
+    "archive_no_snapshot": "该会话尚无已发布的恢复点。",
+    "archive_unregistered": "该归档尚未登记为可恢复会话。",
 }
+FORMAT_VERSION = 2
+RECOVERY_VERSION = 1
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SCOPE = re.compile(r"history://scope/[0-9a-f-]{36}\Z")
 _SOURCE = re.compile(r"history://record/([A-Za-z0-9_-]{1,128})/(0|[1-9][0-9]*)\Z")
@@ -49,6 +56,16 @@ CREATE TABLE runs (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload BLOB NOT N
                    sha256 TEXT NOT NULL, sealed INTEGER NOT NULL DEFAULT 0,
                    view_id TEXT, checkpoint_id TEXT);
 CREATE UNIQUE INDEX sealed_run ON runs(run_id) WHERE sealed=1;
+CREATE TABLE conversation (id INTEGER PRIMARY KEY CHECK(id=1), payload BLOB NOT NULL,
+                           sha256 TEXT NOT NULL, current_snapshot_id TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE snapshots (id TEXT PRIMARY KEY REFERENCES runs(id), sequence INTEGER NOT NULL UNIQUE,
+                        parent_id TEXT REFERENCES snapshots(id), run_id TEXT NOT NULL UNIQUE,
+                        view_id TEXT NOT NULL REFERENCES views(id), payload BLOB NOT NULL, sha256 TEXT NOT NULL);
+CREATE TABLE run_lifecycle (run_id TEXT PRIMARY KEY, source_snapshot_id TEXT REFERENCES snapshots(id),
+                            status TEXT NOT NULL CHECK(status IN ('started','published','abandoned','rejected')),
+                            started_at TEXT NOT NULL, completed_at TEXT, snapshot_id TEXT REFERENCES snapshots(id),
+                            choice_id TEXT);
+CREATE TABLE recovery_choices (id TEXT PRIMARY KEY, payload BLOB NOT NULL, sha256 TEXT NOT NULL);
 """
 
 
@@ -61,6 +78,15 @@ class ArchiveError(Exception):
 def _check(condition: bool) -> None:
     if not condition:
         raise ArchiveError("archive_integrity_error")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _conflict(condition: bool) -> None:
+    if not condition:
+        raise ArchiveError("archive_publication_conflict")
 
 
 def _encoded(value: dict[str, Any]) -> tuple[bytes, str]:
@@ -92,14 +118,16 @@ def _covers(ranges: list[dict[str, Any]], interval: dict[str, Any]) -> bool:
 class ArchiveStore:
     """Trusted conversation-directory binding; no directory discovery or import."""
 
-    def __init__(self, directory: Path, *, create: bool = True) -> None:
+    def __init__(self, directory: Path, *, create: bool = True, read_only: bool = False) -> None:
         self._lock = RLock()
         self._closed = False
         self._operation_depth = 0
         self._validated_files: set[tuple[str, bytes]] = set()
         self._validated_artifacts: set[bytes] = set()
         self._connection: sqlite3.Connection | None = None
+        self.read_only = read_only
         try:
+            _check(not (create and read_only))
             self.directory = Path(directory).absolute()
             self.conversation_id = storage_identifier(self.directory.name)
             if create:
@@ -112,24 +140,24 @@ class ArchiveStore:
             if not existed and not create:
                 raise ArchiveError("archive_read_error")
             # URI mode prevents a supposedly read-existing binding creating a DB.
-            uri = self.path.as_uri() + ("?mode=rw" if existed else "?mode=rwc")
+            uri = self.path.as_uri() + ("?mode=ro" if read_only else "?mode=rw" if existed else "?mode=rwc")
             self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
             self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.execute("PRAGMA synchronous=FULL")
             if not existed:
                 with self._connection:
                     self._connection.executescript(_SCHEMA)
-                    data, digest = _encoded({"schema_version": 1, "conversation_id": self.conversation_id,
+                    data, digest = _encoded({"schema_version": FORMAT_VERSION, "conversation_id": self.conversation_id,
                                              "cursor_key": os.urandom(32)})
                     self._connection.execute("INSERT INTO metadata VALUES ('identity',?,?)", (data, digest))
-                    self._connection.execute("PRAGMA user_version=1")
+                    self._connection.execute(f"PRAGMA user_version={FORMAT_VERSION}")
             version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-            if version != 1:
+            if version != FORMAT_VERSION:
                 raise ArchiveError("archive_version_error")
             row = self._connection.execute("SELECT payload,sha256 FROM metadata WHERE key='identity'").fetchone()
             _check(row is not None)
             identity = _decoded(*row)
-            _check(identity.get("schema_version") == 1 and identity.get("conversation_id") == self.conversation_id
+            _check(identity.get("schema_version") == FORMAT_VERSION and identity.get("conversation_id") == self.conversation_id
                    and type(identity.get("cursor_key")) is bytes and len(identity["cursor_key"]) == 32)
         except Exception as error:
             if self._connection is not None:
@@ -148,7 +176,7 @@ class ArchiveStore:
                 _check(stat.S_ISREG(_check_components(path).st_mode))
 
     @contextmanager
-    def _operation(self, *, write: bool = False):
+    def _operation(self, *, write: bool = False, immediate: bool = False):
         with self._lock:
             outermost = self._operation_depth == 0
             if outermost:
@@ -158,10 +186,18 @@ class ArchiveStore:
             try:
                 if self._closed or self._connection is None:
                     raise ArchiveError("archive_write_error" if write else "archive_read_error")
+                if write and self.read_only:
+                    raise ArchiveError("archive_write_error")
                 self._check_paths()
                 if write:
-                    with self._connection:
+                    try:
+                        if immediate:
+                            self._connection.execute("BEGIN IMMEDIATE")
                         yield self._connection
+                        self._commit()
+                    except BaseException:
+                        self._connection.rollback()
+                        raise
                 else:
                     yield self._connection
             except ArchiveError:
@@ -178,6 +214,10 @@ class ArchiveStore:
                     # re-open the body even if all registration metadata agrees.
                     self._validated_files.clear()
                     self._validated_artifacts.clear()
+
+    def _commit(self) -> None:
+        """One commit boundary, also usable for failure-injection tests."""
+        self._connection.commit()
 
     def _path(self, relative: str) -> Path:
         _check(type(relative) is str and bool(relative) and "\\" not in relative)
@@ -212,7 +252,7 @@ class ArchiveStore:
         if not files:
             return
         _check(stat.S_ISDIR(_check_components(self.directory / "history").st_mode))
-        journal = RecordJournal(self.directory / "history")
+        journal = RecordJournal(self.directory / "history", create=False)
         try:
             for run_id, watermark in files.items():
                 storage_identifier(run_id)
@@ -486,18 +526,24 @@ class ArchiveStore:
 
     def seal_run(self, record_id: str, view_id: str, checkpoint_id: str) -> None:
         with self._operation(write=True):
-            view = self._verify_view(view_id, True)
-            row = self._connection.execute("SELECT run_id,payload,sha256,sealed,view_id,checkpoint_id FROM runs WHERE id=?", (record_id,)).fetchone()
-            _check(row is not None)
-            payload = _decoded(row[1], row[2])
-            _check(self.view_for_checkpoint(checkpoint_id) == view_id)
-            if row[3]:
-                _check(row[4:] == (view_id, checkpoint_id))
-                return
+            self._seal_run_rows(record_id, view_id, checkpoint_id)
+
+    def _seal_run_rows(self, record_id: str, view_id: str, checkpoint_id: str) -> tuple[str, dict, str]:
+        """Use the caller's transaction; never commit during snapshot publication."""
+        view = self._verify_view(view_id, True)
+        row = self._connection.execute("SELECT run_id,payload,sha256,sealed,view_id,checkpoint_id FROM runs WHERE id=?", (record_id,)).fetchone()
+        _check(row is not None)
+        payload = _decoded(row[1], row[2])
+        mapping = self._connection.execute("SELECT view_id FROM checkpoints WHERE id=?", (checkpoint_id,)).fetchone()
+        _check(mapping is not None and mapping[0] == view_id)
+        if row[3]:
+            _check(row[4:] == (view_id, checkpoint_id))
+        else:
             if "fact_end" in payload:
                 _check(payload["fact_end"] == view["fact_ends"].get(row[0], 0))
                 self._events(row[0], payload["fact_end"])
             self._connection.execute("UPDATE runs SET sealed=1,view_id=?,checkpoint_id=? WHERE id=?", (view_id, checkpoint_id, record_id))
+        return row[0], payload, row[2]
 
     def read_run(self, run_id: str) -> dict[str, Any]:
         with self._operation():
@@ -513,6 +559,301 @@ class ArchiveStore:
             if "resource_view_id" in final:
                 _check(final["resource_view_id"] == row[2])
             return {**payload, "view_id": row[2], "checkpoint_id": row[3]}
+
+    def register_conversation(self, configuration: dict, tools: list[dict]) -> dict[str, Any]:
+        """Register the caller's allowlisted, non-secret runtime descriptor once."""
+        with self._operation(write=True, immediate=True):
+            _check(type(configuration) is dict and type(tools) is list and all(type(tool) is dict for tool in tools))
+            row = self._connection.execute("SELECT payload,sha256 FROM conversation WHERE id=1").fetchone()
+            if row is not None:
+                value = _decoded(*row)
+                _check(value.get("configuration") == configuration and value.get("tools") == tools)
+                return self._conversation()
+            now = _now()
+            value = {"conversation_id": self.conversation_id, "configuration": deepcopy(configuration),
+                     "tools": deepcopy(tools), "format_version": FORMAT_VERSION,
+                     "recovery_version": RECOVERY_VERSION, "created_at": now}
+            data, digest = _encoded(value)
+            self._connection.execute("INSERT INTO conversation VALUES (1,?,?,NULL,?)", (data, digest, now))
+            return {**value, "current_snapshot_id": None, "updated_at": now}
+
+    def _conversation(self) -> dict[str, Any]:
+        # Read the explicit pointer and row count in one SQLite statement, so
+        # read-only catalogues cannot observe different publication commits.
+        row = self._connection.execute(
+            "SELECT payload,sha256,current_snapshot_id,updated_at,(SELECT COUNT(*) FROM snapshots) "
+            "FROM conversation WHERE id=1").fetchone()
+        if row is None:
+            raise ArchiveError("archive_unregistered")
+        value = _decoded(row[0], row[1])
+        _check(value.get("conversation_id") == self.conversation_id and value.get("format_version") == FORMAT_VERSION
+               and type(value.get("configuration")) is dict and type(value.get("tools")) is list)
+        if value.get("recovery_version") != RECOVERY_VERSION:
+            raise ArchiveError("archive_version_error")
+        if row[4] == 0:
+            _check(row[2] is None)
+        else:
+            _check(type(row[2]) is str and len(self._snapshot_chain(row[2])) == row[4])
+        return {**value, "current_snapshot_id": row[2], "updated_at": row[3]}
+
+    def conversation(self) -> dict[str, Any]:
+        with self._operation():
+            return self._conversation()
+
+    def _lifecycle(self, run_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute("SELECT run_id,source_snapshot_id,status,started_at,completed_at,snapshot_id,choice_id "
+                                       "FROM run_lifecycle WHERE run_id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("run_id", "source_snapshot_id", "status", "started_at", "completed_at", "snapshot_id", "choice_id"), row))
+
+    def _unfinished_runs(self) -> list[dict[str, Any]]:
+        rows = self._connection.execute("SELECT run_id FROM run_lifecycle WHERE status='started' ORDER BY started_at,run_id").fetchall()
+        return [self._lifecycle(row[0]) for row in rows]
+
+    def unfinished_runs(self) -> list[dict[str, Any]]:
+        with self._operation():
+            self._conversation()
+            return self._unfinished_runs()
+
+    def begin_run(self, run_id: str, source_snapshot_id: str | None) -> dict[str, Any]:
+        """Durably identify an attempt before its first body or business call."""
+        with self._operation(write=True, immediate=True):
+            storage_identifier(run_id)
+            current = self._conversation()["current_snapshot_id"]
+            _conflict(current == source_snapshot_id)
+            existing = self._lifecycle(run_id)
+            if existing is not None:
+                _conflict(existing["status"] == "started" and existing["source_snapshot_id"] == source_snapshot_id)
+                return existing
+            _conflict(not self._unfinished_runs())
+            if source_snapshot_id is not None:
+                self._snapshot_chain(source_snapshot_id)
+            self._connection.execute("INSERT INTO run_lifecycle(run_id,source_snapshot_id,status,started_at) VALUES (?,?,'started',?)",
+                                     (run_id, source_snapshot_id, _now()))
+            return self._lifecycle(run_id)
+
+    def reject_run(self, run_id: str) -> None:
+        """Close a pre-execution configuration rejection, never a paid attempt."""
+        with self._operation(write=True, immediate=True):
+            run = self._lifecycle(run_id)
+            _check(run is not None)
+            if run["status"] == "rejected":
+                return
+            _conflict(run["status"] == "started")
+            _check(not self._events(run_id, None))
+            _check(self._connection.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone() is None)
+            self._connection.execute("UPDATE run_lifecycle SET status='rejected',completed_at=? WHERE run_id=?", (_now(), run_id))
+
+    def accept_recovery(self, snapshot_id: str, unfinished_run_ids: list[str]) -> str:
+        """Record an explicit choice of the exact current snapshot and pending set."""
+        with self._operation(write=True, immediate=True):
+            _check(type(unfinished_run_ids) is list and bool(unfinished_run_ids)
+                   and all(type(run) is str for run in unfinished_run_ids)
+                   and len(unfinished_run_ids) == len(set(unfinished_run_ids)))
+            current = self._conversation()["current_snapshot_id"]
+            if current is None:
+                raise ArchiveError("archive_no_snapshot")
+            _conflict(snapshot_id == current)
+            _conflict(set(unfinished_run_ids) == {run["run_id"] for run in self._unfinished_runs()})
+            self._read_snapshot(snapshot_id)
+            identity, now = str(uuid4()), _now()
+            data, digest = _encoded({"choice_id": identity, "snapshot_id": snapshot_id,
+                                     "unfinished_run_ids": sorted(unfinished_run_ids), "created_at": now})
+            self._connection.execute("INSERT INTO recovery_choices VALUES (?,?,?)", (identity, data, digest))
+            self._connection.executemany("UPDATE run_lifecycle SET status='abandoned',completed_at=?,choice_id=? WHERE run_id=?",
+                                         [(now, identity, run) for run in unfinished_run_ids])
+            return identity
+
+    def recovery_choices(self) -> list[dict[str, Any]]:
+        with self._operation():
+            return [_decoded(data, digest) for data, digest in self._connection.execute(
+                "SELECT payload,sha256 FROM recovery_choices ORDER BY rowid").fetchall()]
+
+    def _snapshot_meta(self, snapshot_id: str) -> dict[str, Any]:
+        row = self._connection.execute("SELECT sequence,parent_id,run_id,view_id,payload,sha256 FROM snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        _check(row is not None)
+        value = _decoded(row[4], row[5])
+        _check(value.get("snapshot_id") == snapshot_id and value.get("conversation_id") == self.conversation_id
+               and (value.get("sequence"), value.get("parent_id"), value.get("run_id"), value.get("view_id")) == row[:4]
+               and type(row[0]) is int and row[0] > 0)
+        if value.get("recovery_version") != RECOVERY_VERSION:
+            raise ArchiveError("archive_version_error")
+        return value
+
+    def _snapshot_chain(self, snapshot_id: str) -> list[dict[str, Any]]:
+        chain, seen = [], set()
+        expected = None
+        while snapshot_id is not None:
+            _check(snapshot_id not in seen)
+            seen.add(snapshot_id)
+            current = self._snapshot_meta(snapshot_id)
+            _check(expected is None or current["sequence"] == expected)
+            lifecycle = self._lifecycle(current["run_id"])
+            _check(lifecycle is not None and lifecycle["status"] == "published"
+                   and lifecycle["snapshot_id"] == snapshot_id and lifecycle["source_snapshot_id"] == current["parent_id"])
+            chain.append(current)
+            expected = current["sequence"] - 1
+            snapshot_id = current["parent_id"]
+        _check(expected == 0)
+        return list(reversed(chain))
+
+    def _validate_snapshot_state(self, payload: dict, run_id: str, view_id: str) -> dict[str, Any]:
+        view = self._verify_view(view_id, True)
+        final = payload.get("final_state")
+        _check(type(final) is dict and final.get("run_id") == run_id
+               and final.get("conversation_id") == self.conversation_id and final.get("resource_view_id") == view_id
+               and final.get("record_files") == view["record_files"] and final.get("history_scopes") == view["history_scopes"]
+               and final.get("stop_reason") in {"completed", "max_model_calls", "context_budget_exceeded", "error"}
+               and type(payload.get("fact_end")) is int and payload["fact_end"] == view["fact_ends"].get(run_id, 0))
+        items, boundary, active = final.get("input"), final.get("history_end"), final.get("active_context")
+        _check(type(items) is list and type(boundary) is int and 0 <= boundary <= len(items)
+               and type(active) is dict and type(active.get("turn_start")) is int and 0 <= active["turn_start"] <= boundary
+               and type(final.get("context_risks")) is list and len(final["context_risks"]) == len(items))
+        # The unadmitted tail may intentionally contain unmatched tool calls.
+        # Existing runtime validators define only the inheritable prefix here.
+        from lineage_agent.agent.runtime import _input_association_error, _input_shape_error
+        _check(all(type(item) is dict for item in items[:boundary])
+               and _input_shape_error(items[:boundary]) is None and _input_association_error(items[:boundary]) is None)
+        restored = deepcopy(final)
+        restored["record_files"] = {run: deepcopy(view["record_files"][run]) for run in view["record_order"]}
+        return restored
+
+    def _validate_snapshot_lineage(self, run_id: str, view_id: str, parent_id: str | None) -> None:
+        """A recovery point may authorize only its published ancestors and Run."""
+        ancestors = self._snapshot_chain(parent_id) if parent_id is not None else []
+        allowed = {item["run_id"] for item in ancestors} | {run_id}
+        view = self._view(view_id)
+        _check(set(view["record_files"]).issubset(allowed) and set(view["fact_ends"]).issubset(allowed))
+        source_view = ancestors[-1]["view_id"] if ancestors else None
+        if source_view is not None:
+            parent = self._view(source_view)
+            _check(view["record_order"][:len(parent["record_order"])] == parent["record_order"]
+                   and all(view["record_files"].get(run) == watermark for run, watermark in parent["record_files"].items())
+                   and all(view["fact_ends"].get(run) == end for run, end in parent["fact_ends"].items())
+                   and all(view["history_scopes"].get(ref) == scope for ref, scope in parent["history_scopes"].items())
+                   and all(set(parent[field]).issubset(view[field]) for field in ("summaries", "artifacts")))
+        seen, cursor = set(), view_id
+        while cursor != source_view:
+            _check(cursor is not None and cursor not in seen)
+            seen.add(cursor)
+            cursor = self._view(cursor)["parent_id"]
+        for identity in view["summaries"]:
+            _check(self._object("summary", identity)["run_id"] in allowed)
+        for ref in view["artifacts"]:
+            origin = self._object("artifact", ref)["metadata"].get("origin", {})
+            _check(type(origin) is dict and (origin.get("run_id") is None or origin["run_id"] in allowed))
+
+    def _read_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        chain = self._snapshot_chain(snapshot_id)
+        current = chain[-1]
+        row = self._connection.execute("SELECT run_id,payload,sha256,sealed,view_id,checkpoint_id FROM runs WHERE id=?", (snapshot_id,)).fetchone()
+        _check(row is not None and row[0] == current["run_id"] and row[2] == current["run_sha256"]
+               and row[3] == 1 and row[4] == current["view_id"])
+        payload = _decoded(row[1], row[2])
+        restored = self._validate_snapshot_state(payload, row[0], row[4])
+        self._validate_snapshot_lineage(row[0], row[4], current["parent_id"])
+        return {**current, "final_state": restored, "fact_end": payload["fact_end"], "checkpoint_id": row[5]}
+
+    def read_snapshot(self, snapshot_id: str | None = None) -> dict[str, Any]:
+        with self._operation():
+            identity = snapshot_id or self._conversation()["current_snapshot_id"]
+            if identity is None:
+                raise ArchiveError("archive_no_snapshot")
+            return self._read_snapshot(identity)
+
+    def published_runs(self, snapshot_id: str) -> list[dict[str, Any]]:
+        with self._operation():
+            result = []
+            for snapshot in self._snapshot_chain(snapshot_id):
+                saved = self._read_snapshot(snapshot["snapshot_id"])
+                result.append({key: saved[key] for key in ("run_id", "checkpoint_id", "snapshot_id", "view_id", "sequence")})
+            return result
+
+    def metadata(self) -> dict[str, Any]:
+        """Cheap catalogue data: never inspect History, Artifact or State bodies."""
+        with self._operation():
+            conversation = self._conversation()
+            head = conversation["current_snapshot_id"]
+            return {**conversation, "head": self._snapshot_meta(head) if head is not None else None,
+                    "unfinished_runs": self._unfinished_runs()}
+
+    def _published_candidate(self, record_id: str, view_id: str, checkpoint_id: str,
+                             expected_snapshot_id: str | None) -> dict[str, Any] | None:
+        row = self._connection.execute("SELECT 1 FROM snapshots WHERE id=?", (record_id,)).fetchone()
+        if row is None:
+            return None
+        snapshot = self._read_snapshot(record_id)
+        _check(snapshot["view_id"] == view_id and snapshot["checkpoint_id"] == checkpoint_id
+               and snapshot["parent_id"] == expected_snapshot_id)
+        head = self._conversation()["current_snapshot_id"]
+        _check(head is not None and record_id in {item["snapshot_id"] for item in self._snapshot_chain(head)})
+        return snapshot
+
+    def publish_snapshot(self, record_id: str, view_id: str, checkpoint_id: str,
+                         expected_snapshot_id: str | None) -> dict[str, Any]:
+        """Atomically seal a final Run and publish its immutable recovery point."""
+        try:
+            with self._operation(write=True, immediate=True):
+                if existing := self._published_candidate(record_id, view_id, checkpoint_id, expected_snapshot_id):
+                    return existing
+                conversation = self._conversation()
+                _conflict(conversation["current_snapshot_id"] == expected_snapshot_id)
+                row = self._connection.execute("SELECT run_id,payload,sha256 FROM runs WHERE id=?", (record_id,)).fetchone()
+                _check(row is not None)
+                lifecycle = self._lifecycle(row[0])
+                _conflict(lifecycle is not None and lifecycle["status"] == "started"
+                          and lifecycle["source_snapshot_id"] == expected_snapshot_id)
+                payload = _decoded(row[1], row[2])
+                self._validate_snapshot_state(payload, row[0], view_id)
+                self._validate_snapshot_lineage(row[0], view_id, expected_snapshot_id)
+                sequence = self._snapshot_meta(expected_snapshot_id)["sequence"] + 1 if expected_snapshot_id else 1
+                now = _now()
+                snapshot = {"snapshot_id": record_id, "conversation_id": self.conversation_id,
+                            "run_id": row[0], "view_id": view_id, "parent_id": expected_snapshot_id,
+                            "sequence": sequence, "recovery_version": RECOVERY_VERSION,
+                            "created_at": now, "run_sha256": row[2]}
+                data, digest = _encoded(snapshot)
+                self._seal_run_rows(record_id, view_id, checkpoint_id)
+                self._connection.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?)",
+                                         (record_id, sequence, expected_snapshot_id, row[0], view_id, data, digest))
+                self._connection.execute("UPDATE conversation SET current_snapshot_id=?,updated_at=? WHERE id=1", (record_id, now))
+                self._connection.execute("UPDATE run_lifecycle SET status='published',completed_at=?,snapshot_id=? WHERE run_id=?",
+                                         (now, record_id, row[0]))
+                result = self._read_snapshot(record_id)
+            return result
+        except ArchiveError as error:
+            if error.code not in {"archive_write_error", "archive_read_error"}:
+                raise
+            # A COMMIT error does not prove rollback. Resolve the same immutable
+            # ID with a fresh connection; never retry a model or mint another ID.
+            confirmed = self.resolve_publication(record_id, view_id, checkpoint_id, expected_snapshot_id)
+            if confirmed is not None:
+                return confirmed
+            raise error
+
+    def resolve_publication(self, record_id: str, view_id: str, checkpoint_id: str,
+                            expected_snapshot_id: str | None) -> dict[str, Any] | None:
+        with self._lock:
+            try:
+                _check(self._operation_depth == 0 and not self._closed)
+                # Closing also discards any transaction whose rollback itself
+                # failed. The replacement cannot observe connection-local data.
+                self._connection.close()
+                self._connection = None
+                replacement = ArchiveStore(self.directory, create=False, read_only=self.read_only)
+                self._connection = replacement._connection
+                replacement._connection = None
+                replacement._closed = True
+                with self._operation():
+                    result = self._published_candidate(record_id, view_id, checkpoint_id, expected_snapshot_id)
+                    if result is None:
+                        _check(self._conversation()["current_snapshot_id"] == expected_snapshot_id)
+                    return result
+            except Exception:
+                if self._connection is None:
+                    self._closed = True
+                raise ArchiveError("archive_publication_unknown") from None
 
     def close(self) -> None:
         with self._lock:

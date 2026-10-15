@@ -10,7 +10,7 @@ from threading import RLock
 from typing import Any
 
 from lineage_agent.agent.record_codec import decode_record, encode_record
-from lineage_agent.storage import ensure_storage_directory, storage_identifier
+from lineage_agent.storage import ensure_storage_directory, existing_storage_directory, storage_identifier
 from lineage_agent.tools.filesystem.paths import _check_components
 
 
@@ -49,9 +49,9 @@ class RecordJournal:
     history range. Neither failures nor close remove that tail or other files.
     """
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, create: bool = True) -> None:
         try:
-            self.directory = ensure_storage_directory(directory)
+            self.directory = (ensure_storage_directory if create else existing_storage_directory)(directory)
         except Exception:
             raise JournalError("record_create_error") from None
         self._lock = RLock()

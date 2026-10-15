@@ -17,7 +17,7 @@ from lineage_agent.agent.record_codec import decode_record
 from lineage_agent.agent.record_journal import JournalError, RecordJournal
 from lineage_agent.agent.records import make_record_batch
 from lineage_agent.agent.sessions import SessionError, SessionManager
-from lineage_agent.artifacts.store import ArtifactStore
+from lineage_agent.artifacts.store import ArtifactError, ArtifactStore
 
 
 class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -48,16 +48,18 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
         path = self.root / ".lineage" / state["conversation_id"] / "history" / (state["run_id"] + ".jsonl")
         return [decode_record(line) for line in path.read_bytes().splitlines(keepends=True)]
 
-    async def test_initial_file_failure_stops_before_client_or_tool(self):
+    async def test_initial_file_failure_stops_before_model_request_or_tool(self):
+        client = LocalClient([])
         with patch.object(runtime, "RecordJournal", side_effect=JournalError("record_create_error")), \
-                patch.object(runtime, "create_client") as create:
+                patch.object(runtime, "create_client", return_value=client):
             state = await runtime.run_agent("original requirement", self.settings, tools=[TOOL], execute_tool=self.tool)
         self.assertEqual(state["error_code"], "record_create_error")
         self.assertEqual(state["input"], [{"role": "user", "content": "original requirement"}])
         self.assertEqual(state["model_calls"], 0)
         self.assertEqual(state["tool_calls"], 0)
         self.assertFalse(self.executed)
-        create.assert_not_called()
+        self.assertFalse(client.requests)
+        self.assertTrue(client.closed)
 
     async def test_model_append_failure_preserves_response_and_skips_tool_once(self):
         native = RecordJournal.append
@@ -207,6 +209,7 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_manager_close_releases_checkpoints_keeps_files_and_borrowed_store(self):
         with ArtifactStore() as borrowed:
             manager = SessionManager()
+            self.addCleanup(manager.close)
             sid = manager.create_session(self.settings, artifact_store=borrowed)
             view = manager.artifacts(sid)
             artifact = view.put("persistent borrowed artifact", tool_name="custom")
@@ -215,7 +218,8 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 turn = await manager.run_turn(sid, "original requirement")
             self.assertTrue(turn.checkpoint_complete)
             directory = self.root / ".lineage" / sid
-            files = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+            files = {path: path.read_bytes() for path in directory.rglob("*")
+                     if path.is_file() and path.name != "conversation.lock"}
             self.assertTrue(any(path.suffix == ".jsonl" for path in files))
             self.assertTrue(any(path.suffix == ".raw" for path in files))
             journal = manager._checkpointer.history_journal(sid)
@@ -230,7 +234,8 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({path: path.read_bytes() for path in files}, files)
             self.assertFalse(borrowed._closed)
             self.assertEqual(view.read(artifact["artifact_ref"], 0)["text"], "persistent borrowed artifact")
-            view.put("caller retains its handle", tool_name="custom")
+            with self.assertRaises(ArtifactError):
+                view.put("released writer must not bypass the next process lock", tool_name="custom")
 
 
 if __name__ == "__main__":
