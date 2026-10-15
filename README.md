@@ -138,9 +138,8 @@ uv run --locked lineage-agent
 | `/exit` | 退出交互模式 |
 
 输入区由 `prompt_toolkit` 管理，Enter 提交整条消息，自动折行不会插入换行。
-Windows 增强按键协议探测成功时可用 Shift+Enter 主动换行；先按 Esc 再按 Enter 始终可作为备用。
-程序会提示当前可用的按键方式，退出输入时恢复终端模式，不修改 Windows Terminal 或输入法配置。
-若协议探测超时，本次交互持续使用备用键；重新启动后可重新探测。
+主动换行时，先按 Esc，再按 Enter；两次按键之间可以停顿。
+退出输入时恢复终端模式，不修改 Windows Terminal 或输入法配置。
 多行粘贴留在编辑区等待提交，换行和缩进保留；只有完整单行输入会被识别为管理命令，
 多行中的 `/exit`、`/open` 等属于正文。Ctrl+C 取消并退出；Windows 空输入时 Ctrl+Z 后 Enter 结束输入。
 

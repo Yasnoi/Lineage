@@ -1,7 +1,7 @@
 """Exercise actual prompt buffers with controlled keys, not terminal rendering."""
 
 import asyncio
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from contextlib import redirect_stdout
 from dataclasses import replace
 from io import StringIO
@@ -18,18 +18,11 @@ from lineage_agent.entrypoints.console_input import ConsoleInput, ConsoleInputEr
 
 
 class ConsoleInputTests(unittest.IsolatedAsyncioTestCase):
-    async def edit(self, text, *, enhanced=False, protocol=False):
+    async def edit(self, text):
         with create_pipe_input() as source, redirect_stderr(StringIO()):
-            if protocol:
-                from lineage_agent.entrypoints._windows_input import WindowsKeyParser
-                source.vt100_parser = WindowsKeyParser(source._buffer.append)
-            source.prepare = AsyncMock(return_value=enhanced)
-            source.restore = Mock()
             with ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
                 source.send_text(text)
-                answer = await asyncio.wait_for(reader.read("[会话] > "), 2)
-            source.restore.assert_called_once()
-            return answer
+                return await asyncio.wait_for(reader.read("[会话] > "), 2)
 
     async def test_enter_submits_without_stripping_and_tab_inserts_indent(self):
         self.assertEqual(await self.edit("  中文 English\t尾部  \r"), "  中文 English\t尾部  ")
@@ -37,13 +30,7 @@ class ConsoleInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_escape_enter_inserts_real_newline_then_enter_submits(self):
         self.assertEqual(await self.edit("第一行\x1b\r  第二行\r"), "第一行\n  第二行")
 
-    @unittest.skipUnless(sys.platform == "win32", "Windows enhanced protocol")
-    async def test_decoded_shift_enter_keeps_newline_even_when_confirmation_times_out(self):
-        for confirmed in (True, False):
-            self.assertEqual(await self.edit("第一行\x1b[13;0;13;1;16;1_第二行\r",
-                                             enhanced=confirmed, protocol=True), "第一行\n第二行")
-
-    async def test_unenhanced_lf_remains_submission(self):
+    async def test_lf_remains_submission(self):
         self.assertEqual(await self.edit("text\n"), "text")
 
     async def test_multiline_paste_waits_for_explicit_submission(self):
@@ -108,39 +95,30 @@ class ConsoleInputTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(output.getvalue(), "[saved] > ")
             read.assert_called_once_with()
 
-    async def test_prepare_failure_restores_and_does_not_read(self):
-        with create_pipe_input() as source, redirect_stderr(StringIO()), \
-                ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
-            source.prepare = AsyncMock(side_effect=RuntimeError("negotiation failed"))
-            source.restore = Mock()
-            with self.assertRaisesRegex(RuntimeError, "negotiation failed"):
-                await reader.read("> ")
-            source.restore.assert_called_once()
-
     async def test_cancelled_prompt_restores_input_modes(self):
         with create_pipe_input() as source, redirect_stderr(StringIO()), \
                 ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
-            source.prepare = AsyncMock(return_value=True)
-            source.restore = Mock()
-            pending = asyncio.create_task(reader.read("> "))
-            await asyncio.sleep(0.02)
-            pending.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await pending
-            source.restore.assert_called_once()
+            raw_mode = source.raw_mode
+            entered = asyncio.Event()
+            exited = False
 
-    async def test_restore_failure_prevents_submission_but_preserves_primary_eof(self):
-        for payload, expected in (("finished\r", ConsoleInputError), ("\x04", EOFError)):
-            with self.subTest(expected=expected), create_pipe_input() as source, \
-                    redirect_stderr(StringIO()) as errors, \
-                    ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
-                source.prepare = AsyncMock(return_value=True)
-                source.restore = Mock(side_effect=OSError("unavailable output"))
-                source.send_text(payload)
-                with self.assertRaises(expected):
-                    await reader.read("> ")
-                if expected is EOFError:
-                    self.assertIn("终端输入清理失败", errors.getvalue())
+            @contextmanager
+            def tracked_raw_mode():
+                nonlocal exited
+                with raw_mode():
+                    entered.set()
+                    try:
+                        yield
+                    finally:
+                        exited = True
+
+            with patch.object(source, "raw_mode", tracked_raw_mode):
+                pending = asyncio.create_task(reader.read("> "))
+                await asyncio.wait_for(entered.wait(), 2)
+                pending.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+            self.assertTrue(exited)
 
     async def test_owned_handle_cleanup_preserves_interruption(self):
         with create_pipe_input() as source, redirect_stderr(StringIO()) as errors:
@@ -152,25 +130,13 @@ class ConsoleInputTests(unittest.IsolatedAsyncioTestCase):
                     raise KeyboardInterrupt
             self.assertIn("终端输入清理失败", errors.getvalue())
 
-    async def test_restore_failure_in_outer_recovery_handler_cannot_confirm_yes(self):
+    async def test_input_io_error_is_a_cli_error_not_a_submitted_buffer(self):
         with create_pipe_input() as source, redirect_stderr(StringIO()), \
                 ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
-            source.restore = Mock(side_effect=OSError("restore failed"))
-            source.send_text("yes\r")
-            try:
-                raise RuntimeError("recovery_required")
-            except RuntimeError:
-                with self.assertRaises(ConsoleInputError):
-                    await reader.confirm("confirm: ")
-
-    async def test_negotiation_io_error_is_a_cli_error_not_a_submitted_buffer(self):
-        with create_pipe_input() as source, redirect_stderr(StringIO()), \
-                ConsoleInput(input=source, output=DummyOutput(), terminal=True) as reader:
-            source.prepare = AsyncMock(side_effect=OSError("read failed"))
-            source.restore = Mock()
-            with self.assertRaises(ConsoleInputError):
+            with patch.object(reader._editor(), "prompt_async",
+                              AsyncMock(side_effect=OSError("read failed"))), \
+                    self.assertRaises(ConsoleInputError):
                 await reader.read("> ")
-            source.restore.assert_called_once()
 
     async def test_closed_reader_cannot_reopen_and_borrowed_input_is_not_closed(self):
         with create_pipe_input() as source:

@@ -41,8 +41,7 @@ class ConsoleInput:
         self._owns_input = input is None
         self._session: PromptSession[str] | None = None
         self._closed = False
-        self._enhanced = False
-        self._hint: bool | None = None
+        self._hint_shown = False
         self._eof_pending = False
 
     def __enter__(self) -> ConsoleInput:
@@ -69,6 +68,7 @@ class ConsoleInput:
         bindings = KeyBindings()
 
         @bindings.add("enter")
+        @bindings.add("c-j")
         def submit(event):
             if self._eof_pending and not event.current_buffer.text:
                 event.app.exit(exception=EOFError())
@@ -78,12 +78,6 @@ class ConsoleInput:
         @bindings.add("escape", "enter")
         def newline(event):
             event.current_buffer.insert_text("\n")
-
-        @bindings.add("c-j")
-        def line_feed(event):
-            # Decoded Shift+Enter uses the same sequence as the fallback binding;
-            # its meaning must not change if negotiation subsequently times out.
-            submit(event)
 
         @bindings.add("tab")
         def indent(event):
@@ -102,8 +96,8 @@ class ConsoleInput:
         if self._session is None:
             if self._input is None:
                 if sys.platform == "win32":
-                    from ._windows_input import EnhancedWin32Input
-                    self._input = EnhancedWin32Input(sys.stdin)
+                    from ._windows_input import WindowsInput
+                    self._input = WindowsInput(sys.stdin)
                 else:
                     self._input = create_input(stdin=sys.stdin)
             if self._output is None:
@@ -133,41 +127,14 @@ class ConsoleInput:
             return input()
 
         session = self._editor()
-        source, output = self._input, self._output
         self._eof_pending = False
-        self._enhanced = False
-        prepare = getattr(source, "prepare", None)
-        restore = getattr(source, "restore", None)
-        # The outer raw scope also covers negotiation; PromptSession's nested
-        # raw scope restores to it before we restore the original console mode.
-        with source.raw_mode():
-            primary_error = False
-            try:
-                if prepare is not None:
-                    self._enhanced = await prepare(output)
-                if self._hint is None or self._hint != self._enhanced:
-                    self._hint = self._enhanced
-                    newline = ("Shift+Enter 换行；也可先按 Esc 再按 Enter"
-                               if self._enhanced else
-                               "未启用增强按键；换行请先按 Esc 再按 Enter")
-                    print(f"输入：Enter 提交；{newline}。", file=sys.stderr)
-                return await session.prompt_async(prompt)
-            except (OSError, ValueError) as exc:
-                primary_error = True
-                raise ConsoleInputError("终端输入读取失败；本条输入未提交。") from exc
-            except BaseException:
-                primary_error = True
-                raise
-            finally:
-                try:
-                    if restore is not None:
-                        restore(output)
-                except Exception as exc:
-                    if not primary_error:
-                        raise ConsoleInputError("终端输入模式未能恢复；本条输入未提交。") from exc
-                    _report_cleanup_error()
-                finally:
-                    self._enhanced = False
+        try:
+            if not self._hint_shown:
+                print("输入：Enter 提交；先按 Esc 再按 Enter 换行。", file=sys.stderr)
+                self._hint_shown = True
+            return await session.prompt_async(prompt)
+        except (OSError, ValueError) as exc:
+            raise ConsoleInputError("终端输入读取失败；本条输入未提交。") from exc
 
     async def confirm(self, prompt: str) -> bool:
         """Recovery confirmation never accepts a multiline paste as consent."""
