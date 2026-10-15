@@ -47,6 +47,23 @@ class FilesystemExecutor:
     def read_budget(self) -> dict[str, int]:
         return self._text.read_budget
 
+    def export_read_budget(self) -> dict[str, Any]:
+        return self._text.export_read_budget()
+
+    def restore_read_budget(self, saved: dict[str, Any]) -> None:
+        self._text.restore_read_budget(saved)
+
+    def reserve_read(self, attempt_id: str) -> int:
+        return self._text.reserve_read(attempt_id)
+
+    def settle_read(self, attempt_id: str, used_bytes: int) -> None:
+        self._text.settle_read(attempt_id, used_bytes)
+
+    async def execute_reserved(self, attempt_id: str, name: str, arguments: dict[str, Any]) -> str:
+        if name != TEXT_TOOL["name"]:
+            raise ToolArgumentError()
+        return await self._text.execute_reserved(attempt_id, name, arguments)
+
     async def __call__(self, name: str, arguments: dict[str, Any]) -> str:
         if name == DIRECTORY_TOOL["name"]:
             return await self._directory(name, arguments)

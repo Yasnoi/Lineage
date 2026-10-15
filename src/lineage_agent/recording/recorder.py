@@ -13,10 +13,12 @@ LOG_FAILURE_MESSAGE = "运行日志无法完整写入，已停止后续调用。
 class RunRecorder:
     """One run's writer; callers stop execution when an operation returns False."""
 
-    def __init__(self, log_dir: Path) -> None:
-        self.run_id = str(uuid4())
+    def __init__(self, log_dir: Path, *, run_id: str | None = None) -> None:
+        self.run_id = run_id or str(uuid4())
+        self.execution_id = str(uuid4())
         self.session_id: str | None = None
-        self.path = (Path(log_dir) / f"{self.run_id}.jsonl").absolute()
+        filename = f"{self.run_id}.{self.execution_id}.jsonl" if run_id else f"{self.run_id}.jsonl"
+        self.path = (Path(log_dir) / filename).absolute()
         self.failed = False
         self.failure_stage: str | None = None
         self._event_seq = 0
@@ -66,6 +68,7 @@ class RunRecorder:
             "event_seq": self._event_seq,
             "event": event,
             "run_id": self.run_id,
+            "execution_id": self.execution_id,
         }
         if step_id is not None:
             item["step_id"] = step_id

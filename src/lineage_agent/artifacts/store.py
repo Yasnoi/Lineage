@@ -89,6 +89,20 @@ def tool_result_view(raw: str, tool_name: str) -> tuple[str, str, str | None]:
     return raw, "raw_result", None
 
 
+def decode_artifact_raw(data: bytes, metadata: dict[str, Any]) -> str:
+    """Decode exact candidate text; normal Artifact bytes stay ordinary UTF-8."""
+    if "raw_encoding" not in metadata:
+        return data.decode("utf-8")
+    if (metadata["raw_encoding"] != "record_codec_v1"
+            or metadata.get("origin", {}).get("purpose") != "execution_result"):
+        raise ValueError("unsupported candidate encoding")
+    from lineage_agent.agent.record_codec import decode_record
+    value = decode_record(data)
+    if set(value) != {"raw_result"} or type(value["raw_result"]) is not str:
+        raise ValueError("invalid encoded candidate")
+    return value["raw_result"]
+
+
 def _fits(value: dict[str, Any]) -> bool:
     result = serialize_tool_output(value)
     return tool_output_bytes(inline_tool_output(result)) <= MAX_OUTPUT_BYTES
@@ -246,7 +260,8 @@ class ArtifactStore:
                        bytes.fromhex(item["sha256"]), deepcopy(item["metadata"]))
 
     def _put(self, session_id: str, raw: str, tool_name: str,
-             origin: dict[str, str] | None = None) -> dict[str, Any]:
+             origin: dict[str, str] | None = None, *, artifact_id: str | None = None,
+             candidate: bool = False) -> dict[str, Any]:
         with self._lock:
             self._ensure_open()
             if session_id in self._write_failures or not self._writable(session_id):
@@ -254,12 +269,22 @@ class ArtifactStore:
             try:
                 if type(raw) is not str or type(tool_name) is not str or not tool_name:
                     raise ValueError
-                data = raw.encode("utf-8")
                 tool_name.encode("utf-8")
+                encoding = None
+                try:
+                    data = raw.encode("utf-8")
+                except UnicodeEncodeError:
+                    if not candidate:
+                        raise
+                    from lineage_agent.agent.record_codec import encode_record
+                    data = encode_record({"raw_result": raw})
+                    encoding = "record_codec_v1"
             except (ValueError, UnicodeError):
                 raise ArtifactError("invalid_artifact_result") from None
             content, view, reason = tool_result_view(raw, tool_name)
-            identifier = uuid4().hex
+            identifier = uuid4().hex if artifact_id is None else artifact_id
+            if type(identifier) is not str or re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
+                raise ArtifactError("invalid_artifact_result")
             ref = f"artifact://tool/{identifier}"
             metadata = {
                 "artifact_ref": ref, "tool_name": tool_name,
@@ -267,6 +292,8 @@ class ArtifactStore:
             }
             if reason is not None:
                 metadata["degradation_reason"] = reason
+            if encoding is not None:
+                metadata["raw_encoding"] = encoding
             registered_metadata = deepcopy(metadata)
             if origin:
                 registered_metadata["origin"] = deepcopy(origin)
@@ -276,6 +303,22 @@ class ArtifactStore:
             temporary_owned = False
             try:
                 _check_path(directory, directory=True)
+                digest = hashlib.sha256(data).digest()
+                archive = self._archives[session_id]
+                registration = {
+                    "artifact_ref": ref,
+                    "path": destination.relative_to(archive.directory).as_posix(),
+                    "sha256": digest.hex(), "metadata": registered_metadata,
+                }
+                # Repeating the same completed candidate commit is idempotent.
+                # An unregistered file is never imported or overwritten.
+                if candidate and destination.exists():
+                    if archive.artifact(ref) != registration:
+                        raise ValueError("candidate registration differs")
+                    _check_path(destination, directory=False)
+                    if destination.read_bytes() != data:
+                        raise ValueError("candidate body differs")
+                    return {**deepcopy(metadata), "sha256": digest.hex()}
                 # Fresh names and exclusive creation prevent replacing snapshots.
                 if destination.exists() or temporary.exists():
                     raise OSError("storage name collision")
@@ -289,15 +332,10 @@ class ArtifactStore:
                 # precheck covers ordinary collisions on other supported hosts.
                 temporary.rename(destination)
                 _check_path(destination, directory=False)
-                digest = hashlib.sha256(data).digest()
-                archive = self._archives[session_id]
-                archive.save_artifact({
-                    "artifact_ref": ref,
-                    "path": destination.relative_to(archive.directory).as_posix(),
-                    "sha256": digest.hex(), "metadata": registered_metadata,
-                })
+                archive.save_artifact(registration)
                 record = _Record(destination, digest, registered_metadata)
-                self._records[session_id][ref] = record
+                if not candidate:
+                    self._records[session_id][ref] = record
             except Exception:
                 self._write_failures.add(session_id)
                 # Never register an incomplete result, even if cleanup also fails.
@@ -307,7 +345,29 @@ class ArtifactStore:
                 except OSError:
                     pass
                 raise ArtifactError("artifact_write_error") from None
-            return deepcopy(metadata)
+            return ({**deepcopy(metadata), "sha256": digest.hex()} if candidate else deepcopy(metadata))
+
+    def _candidate(self, binding_id: str, ref: str, origin: dict[str, str],
+                   expected_sha256: str | None = None) -> tuple[_Record, str]:
+        """Trusted execution access; never adds an ordinary recall grant."""
+        self._ensure_open()
+        if type(ref) is not str or _REF.fullmatch(ref) is None:
+            raise ArtifactError("invalid_artifact_ref")
+        try:
+            archive = self._archives[binding_id]
+            registered = archive.artifact(ref)
+            record = self._record_from_archive(archive, registered)
+            if record.metadata.get("origin") != origin:
+                raise ValueError("candidate belongs to another operation")
+            if expected_sha256 is not None and registered["sha256"] != expected_sha256:
+                raise ValueError("candidate digest differs")
+            _check_path(record.path, directory=False)
+            data = record.path.read_bytes()
+            if hashlib.sha256(data).digest() != record.sha256 or len(data) != record.metadata["raw_bytes"]:
+                raise ValueError("candidate body differs")
+            return record, decode_artifact_raw(data, record.metadata)
+        except Exception:
+            raise ArtifactError("artifact_read_error") from None
 
     def _load(self, session_id: str, ref: str,
               view_id: str | None = None) -> tuple[_Record, str]:
@@ -328,7 +388,7 @@ class ArtifactStore:
             data = record.path.read_bytes()
             if hashlib.sha256(data).digest() != record.sha256:
                 raise ValueError("snapshot differs")
-            raw = data.decode("utf-8")
+            raw = decode_artifact_raw(data, record.metadata)
             content, _, _ = tool_result_view(raw, record.metadata["tool_name"])
             return record, content
         except ArtifactError:
@@ -378,46 +438,50 @@ class ArtifactStore:
                 view_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             record, content = self._load(session_id, ref, view_id)
-            if not _index(start, len(content)):
-                raise ArtifactError("invalid_artifact_range")
-            if (type(keywords) is not list or not 1 <= len(keywords) <= MAX_KEYWORDS
-                    or any(type(word) is not str or not 1 <= len(word) <= MAX_KEYWORD_CHARS
-                           for word in keywords)):
-                raise ArtifactError("invalid_artifact_keywords")
-            try:
-                for word in keywords:
-                    word.encode("utf-8")
-            except UnicodeError:
-                raise ArtifactError("invalid_artifact_keywords") from None
-            result = {**_base(record), "hits": [], "has_more": False, "next_start": None}
-            positions = [content.find(word, start) for word in keywords]
-            last_start = None
-            while any(position >= 0 for position in positions):
-                match_start = min(position for position in positions if position >= 0)
-                indices = [index for index, position in enumerate(positions) if position == match_start]
-                matches = [{"keyword_index": index, "start": match_start,
-                            "end": match_start + len(keywords[index])} for index in indices]
-                match_end = max(match["end"] for match in matches)
-                snippet_start, snippet_end = max(0, match_start - CONTEXT_CHARS), min(len(content), match_end + CONTEXT_CHARS)
-                hit = {"matches": matches, "start": snippet_start, "end": snippet_end,
-                       "text": content[snippet_start:snippet_end]}
-                # Either final state must fit: false/null can be longer than
-                # true/a small cursor. One look-ahead determines which is sent.
-                candidate = {**result, "hits": result["hits"] + [hit],
-                             "has_more": True, "next_start": match_start + 1}
-                finished = {**candidate, "has_more": False, "next_start": None}
-                if len(result["hits"]) == MAX_HITS or not (_fits(candidate) and _fits(finished)):
-                    if last_start is None:
-                        raise ArtifactError("artifact_read_error")
-                    result.update(has_more=True, next_start=last_start + 1)
-                    break
-                result["hits"].append(hit)
-                last_start = match_start
-                for index in indices:
-                    positions[index] = content.find(keywords[index], match_start + 1)
-            if not _fits(result):
-                raise ArtifactError("artifact_read_error")
-            return result
+            return self._search_content(record, content, keywords, start)
+
+    @staticmethod
+    def _search_content(record: _Record, content: str, keywords: list[str], start: int) -> dict[str, Any]:
+        if not _index(start, len(content)):
+            raise ArtifactError("invalid_artifact_range")
+        if (type(keywords) is not list or not 1 <= len(keywords) <= MAX_KEYWORDS
+                or any(type(word) is not str or not 1 <= len(word) <= MAX_KEYWORD_CHARS
+                       for word in keywords)):
+            raise ArtifactError("invalid_artifact_keywords")
+        try:
+            for word in keywords:
+                word.encode("utf-8")
+        except UnicodeError:
+            raise ArtifactError("invalid_artifact_keywords") from None
+        result = {**_base(record), "hits": [], "has_more": False, "next_start": None}
+        positions = [content.find(word, start) for word in keywords]
+        last_start = None
+        while any(position >= 0 for position in positions):
+            match_start = min(position for position in positions if position >= 0)
+            indices = [index for index, position in enumerate(positions) if position == match_start]
+            matches = [{"keyword_index": index, "start": match_start,
+                        "end": match_start + len(keywords[index])} for index in indices]
+            match_end = max(match["end"] for match in matches)
+            snippet_start, snippet_end = max(0, match_start - CONTEXT_CHARS), min(len(content), match_end + CONTEXT_CHARS)
+            hit = {"matches": matches, "start": snippet_start, "end": snippet_end,
+                   "text": content[snippet_start:snippet_end]}
+            # Either final state must fit: false/null can be longer than
+            # true/a small cursor. One look-ahead determines which is sent.
+            candidate = {**result, "hits": result["hits"] + [hit],
+                         "has_more": True, "next_start": match_start + 1}
+            finished = {**candidate, "has_more": False, "next_start": None}
+            if len(result["hits"]) == MAX_HITS or not (_fits(candidate) and _fits(finished)):
+                if last_start is None:
+                    raise ArtifactError("artifact_read_error")
+                result.update(has_more=True, next_start=last_start + 1)
+                break
+            result["hits"].append(hit)
+            last_start = match_start
+            for index in indices:
+                positions[index] = content.find(keywords[index], match_start + 1)
+        if not _fits(result):
+            raise ArtifactError("artifact_read_error")
+        return result
 
     def close(self) -> None:
         with self._lock:
@@ -484,6 +548,56 @@ class SessionArtifacts:
 
     def put(self, raw_result: str, *, tool_name: str) -> dict[str, Any]:
         return self._store._put(self._binding_id, raw_result, tool_name, self._origin)
+
+    def _candidate_origin(self, operation_id: str, attempt_id: str) -> dict[str, str]:
+        if (self._origin is None or not self._origin.get("run_id")
+                or type(operation_id) is not str or not operation_id
+                or type(attempt_id) is not str or not attempt_id):
+            raise ArtifactError("invalid_artifact_result")
+        return {**self._origin, "operation_id": operation_id, "attempt_id": attempt_id,
+                "purpose": "execution_result"}
+
+    def put_candidate(self, raw_result: str, *, tool_name: str, artifact_id: str,
+                      operation_id: str, attempt_id: str) -> dict[str, Any]:
+        """Persist an exact result without granting ordinary business access."""
+        return self._store._put(self._binding_id, raw_result, tool_name,
+            self._candidate_origin(operation_id, attempt_id), artifact_id=artifact_id, candidate=True)
+
+    def read_candidate_raw(self, artifact_ref: str, *, operation_id: str, attempt_id: str,
+                           sha256: str | None = None) -> str:
+        with self._store._lock:
+            _, raw = self._store._candidate(self._binding_id, artifact_ref,
+                self._candidate_origin(operation_id, attempt_id), sha256)
+            return raw
+
+    def candidate_metadata(self, artifact_ref: str, *, operation_id: str, attempt_id: str,
+                           sha256: str | None = None) -> dict[str, Any]:
+        with self._store._lock:
+            record, _ = self._store._candidate(self._binding_id, artifact_ref,
+                self._candidate_origin(operation_id, attempt_id), sha256)
+            return {**deepcopy(record.metadata), "sha256": record.sha256.hex()}
+
+    def search_candidate(self, artifact_ref: str, keywords: list[str], *,
+                         operation_id: str, attempt_id: str, sha256: str | None = None) -> dict[str, Any]:
+        """Private preview material, with the same bounded search as recall."""
+        with self._store._lock:
+            record, raw = self._store._candidate(self._binding_id, artifact_ref,
+                self._candidate_origin(operation_id, attempt_id), sha256)
+            content, _, _ = tool_result_view(raw, record.metadata["tool_name"])
+            return self._store._search_content(record, content, keywords, 0)
+
+    def promote_candidate(self, artifact_ref: str, *, operation_id: str, attempt_id: str,
+                          sha256: str | None = None) -> dict[str, Any]:
+        """Explicitly include one validated candidate in future prepared views."""
+        with self._store._lock:
+            self._store._ensure_open()
+            if not self._store._writable(self._binding_id):
+                raise ArtifactError("artifact_write_error")
+            self.check_persistence()
+            record, _ = self._store._candidate(self._binding_id, artifact_ref,
+                self._candidate_origin(operation_id, attempt_id), sha256)
+            self._store._records[self._binding_id][artifact_ref] = record
+            return {**deepcopy(record.metadata), "sha256": record.sha256.hex()}
 
     def read(self, artifact_ref: str, start: int, end: int | None = None, *,
              view_id: str | None = None) -> dict[str, Any]:

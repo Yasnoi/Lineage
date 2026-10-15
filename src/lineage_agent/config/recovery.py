@@ -15,7 +15,7 @@ from lineage_agent.tools.filesystem.directory import (
 from lineage_agent.tools.filesystem.executor import FilesystemExecutor, create_filesystem_executor
 from lineage_agent.tools.filesystem.paths import bind_project_root
 from lineage_agent.tools.filesystem.text import TEXT_TOOL, TextExecutor, create_text_executor
-from lineage_agent.tools.types import ToolExecutor
+from lineage_agent.tools.types import BUILTIN_RECOVERY_POLICIES, ToolExecutor, ToolRecoveryBinding
 
 
 _SETTINGS = (
@@ -81,12 +81,33 @@ def _tool_definitions(tools) -> list[ToolDefinition]:
     return deepcopy(tools)
 
 
+def _recovery_description(binding: ToolRecoveryBinding | None, definitions: list) -> dict | None:
+    if binding is None:
+        return None
+    _require(type(binding) is ToolRecoveryBinding, "工具恢复声明必须由应用显式提供。")
+    try:
+        description = binding.describe()
+    except (TypeError, ValueError):
+        raise ConfigurationError("工具恢复声明无效。") from None
+    _require(set(description["tools"]) == {tool["name"] for tool in definitions},
+             "工具恢复声明必须精确覆盖应用提供的工具。")
+    return description
+
+
+def _builtin_recovery(provider: str, definitions: list) -> dict:
+    return ToolRecoveryBinding(provider, 1,
+        {tool["name"]: BUILTIN_RECOVERY_POLICIES[tool["name"]] for tool in definitions},
+        stateless=provider not in {"builtin.text", "builtin.filesystem"}).describe()
+
+
 def describe_tools(tools: list[ToolDefinition] | None,
-                   execute_tool: ToolExecutor | None) -> dict[str, Any]:
+                   execute_tool: ToolExecutor | None, *,
+                   recovery_binding: ToolRecoveryBinding | None = None) -> dict[str, Any]:
     """Describe actual known factories; tool names never identify an executor."""
     definitions = _tool_definitions(tools if tools is not None else [])
     if not definitions:
-        return {"version": 1, "provider": "none", "options": {}, "tools": []}
+        _require(recovery_binding is None)
+        return {"version": 2, "provider": "none", "options": {}, "tools": [], "recovery": None}
     _require(callable(execute_tool), "提供工具定义时必须同时提供工具执行器。")
     descriptor = None
     if type(execute_tool) in (DirectoryExecutor, TextExecutor, FilesystemExecutor):
@@ -100,19 +121,24 @@ def describe_tools(tools: list[ToolDefinition] | None,
                 descriptor = None
     if descriptor is None:
         descriptor = {"version": 1, "provider": "external", "options": {}}
-    return {**deepcopy(descriptor), "tools": definitions}
+        recovery = _recovery_description(recovery_binding, definitions)
+    else:
+        _require(recovery_binding is None, "内置工具使用应用内置的恢复声明，不接受替换。")
+        recovery = _builtin_recovery(descriptor["provider"], definitions)
+    return {**deepcopy(descriptor), "version": 2, "tools": definitions, "recovery": recovery}
 
 
 def restore_tools(saved: dict, *, current_project_root: Path | None,
                   tools: list[ToolDefinition] | None = None,
-                  execute_tool: ToolExecutor | None = None) -> dict[str, Any]:
+                  execute_tool: ToolExecutor | None = None,
+                  recovery_binding: ToolRecoveryBinding | None = None) -> dict[str, Any]:
     """Recreate known bindings under current directory authority.
 
     An external binding is an application's explicit compatibility declaration;
     this function cannot sandbox arbitrary application-supplied Python code.
     """
-    _require(type(saved) is dict and set(saved) == {"version", "provider", "options", "tools"}
-             and type(saved.get("version")) is int and saved["version"] == 1)
+    _require(type(saved) is dict and set(saved) == {"version", "provider", "options", "tools", "recovery"}
+             and type(saved.get("version")) is int and saved["version"] == 2)
     provider, options = saved["provider"], saved["options"]
     _require(type(provider) is str and provider in _OPTIONS and type(options) is dict
              and set(options) == _OPTIONS[provider])
@@ -122,16 +148,19 @@ def restore_tools(saved: dict, *, current_project_root: Path | None,
                  "此会话需要应用显式提供兼容的自定义工具定义和执行器。")
         _require(_tool_definitions(tools) == definitions,
                  "重新绑定的自定义工具定义与保存定义不一致。")
+        _require(_recovery_description(recovery_binding, definitions) == saved["recovery"],
+                 "重新绑定的工具恢复声明与保存声明不一致。")
         return {"tools": definitions, "execute_tool": execute_tool}
-    _require(tools is None and execute_tool is None,
+    _require(tools is None and execute_tool is None and recovery_binding is None,
              "内置工具按保存描述重建，不接受替换执行器。")
     if provider == "none":
-        _require(not definitions)
+        _require(not definitions and saved["recovery"] is None)
         return {"tools": [], "execute_tool": None}
     _require(bool(definitions) and all(tool == _BUILTINS.get(tool["name"]) for tool in definitions))
     allowed = ({"list_directory"} if provider == "builtin.directory" else
                {"read_text_file"} if provider == "builtin.text" else set(_BUILTINS))
     _require(all(tool["name"] in allowed for tool in definitions))
+    _require(saved["recovery"] == _builtin_recovery(provider, definitions))
     _require(current_project_root is not None,
              "此会话包含项目文件工具；当前 PROJECT_ROOT 未授予目录访问权限。")
     _require(type(options["root"]) is str and Path(options["root"]).is_absolute())

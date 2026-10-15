@@ -236,8 +236,9 @@ class ContextRecords:
                 "source_indices": list(indices),
                 "scope": scope,
                 "summary_id": str(uuid4()),
-                "source_files": [{**bounds, "path": str(self.saver.history_journal(self.session_id).path(bounds["run_id"]))}
-                                 for bounds in scope["ranges"]],
+                "source_files": [entry for bounds in scope["ranges"]
+                                 for entry in self.saver.history_journal(self.session_id).source_files(
+                                     bounds["run_id"], scope["record_files"][bounds["run_id"]], bounds["start"], bounds["end"])],
                 "covered_groups": list(dict.fromkeys(by_ref[ref]["group_id"] for ref in by_ref
                                                      if ref in covered and by_ref[ref].get("group_id") is not None)),
                 "source_bytes": json_bytes([by_ref[ref]["item"] for ref in visible
@@ -254,6 +255,7 @@ class ContextRecords:
                            if span["run_id"] == state["run_id"] and span["lane"] == "R")
         return {
             "snapshot": {"run_id": state["run_id"], "source_checkpoint_id": checkpoint_id,
+                         "source_execution_id": (state.get("execution") or {}).get("point_id"),
                          "resource_view_id": view_id,
                          "record_revision": state["record_revision"], "active_version_id": active["version_id"],
                          "record_files": deepcopy(state["record_files"]),

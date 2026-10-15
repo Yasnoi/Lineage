@@ -13,6 +13,62 @@ _SOURCE = re.compile(r"history://record/([A-Za-z0-9_-]{1,128})/(0|[1-9][0-9]*)\Z
 
 
 def validate_snapshot_state(state: dict, archive: ArchiveStore, view_id: str) -> None:
+    _validate_state(state, archive, view_id, terminal=True)
+
+
+def validate_execution_state(state: dict, archive: ArchiveStore, view_id: str) -> None:
+    _validate_state(state, archive, view_id, terminal=False)
+    execution = state.get("execution")
+    if (type(execution) is not dict or not execution.get("point_id")
+            or execution.get("phase") not in {"run_ready", "model", "request_ready", "response_saved",
+                "tools_prepare", "tool_plan_ready", "tool_result_saved", "group_ready", "prepare_compaction",
+                "summarize_history", "summarize_current", "validate_candidate", "activate_context", "finalizing"}):
+        raise ArchiveError("archive_integrity_error")
+    try:
+        point = archive.execution(execution["point_id"])
+        if (point["run_id"] != state["run_id"] or point["phase"] != execution["phase"]
+                or encode_record(point["state"]) != encode_record(state)):
+            raise ValueError("execution state mismatch")
+        phase = execution["phase"]
+        if phase in {"request_ready", "response_saved"}:
+            operation = archive.operation(execution["operation_id"])
+            kind, payload = operation["kind"], operation["payload"]
+            if (operation["run_id"] != state["run_id"] or kind not in {"model", "summary"}
+                    or payload["return_node"] != execution["return_node"]
+                    or payload["return_node"] not in ({"model"} if kind == "model" else
+                                                      {"summarize_history", "summarize_current"})):
+                raise ValueError("request relationship mismatch")
+            if kind == "model" and payload["request"]["input"] != state["input"]:
+                raise ValueError("request context mismatch")
+            if phase == "response_saved" and sum(a.get("result") is not None for a in
+                    archive.attempts(operation["operation_id"])) != 1:
+                raise ValueError("missing saved response")
+        if phase in {"tool_plan_ready", "tool_result_saved", "group_ready"}:
+            operation = archive.operation(execution["operation_id"])
+            plan = operation["payload"]
+            index = execution["tool_index"]
+            if (operation["run_id"] != state["run_id"] or operation["kind"] != "tool_plan"
+                    or plan["calls"] != state["result"]["tool_calls"]
+                    or len(plan["operation_ids"]) != len(plan["calls"])
+                    or type(index) is not int or not 0 <= index <= len(plan["calls"])):
+                raise ValueError("tool plan mismatch")
+            for position, (identity, call) in enumerate(zip(plan["operation_ids"], plan["calls"], strict=True)):
+                child = archive.operation(identity)
+                if (child["run_id"] != state["run_id"] or child["kind"] != "tool"
+                        or child["payload"] != {"call": call, "index": position,
+                            "plan_id": operation["operation_id"], "view_id": plan["view_id"]}):
+                    raise ValueError("tool relationship mismatch")
+                if position < index and archive.operation_result(identity) is None:
+                    raise ValueError("missing processed result")
+            if phase != "group_ready" and index >= len(plan["calls"]):
+                raise ValueError("invalid next tool")
+    except ArchiveError:
+        raise
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise ArchiveError("archive_integrity_error") from None
+
+
+def _validate_state(state: dict, archive: ArchiveStore, view_id: str, *, terminal: bool) -> None:
     """Verify stored relationships without regenerating input, summaries or usage."""
     from lineage_agent.agent.runtime import _input_association_error, _input_shape_error
 
@@ -40,7 +96,8 @@ def validate_snapshot_state(state: dict, archive: ArchiveStore, view_id: str) ->
         require(type(active["item_refs"]) is list and len(active["item_refs"]) == len(items))
         require(type(active["turns"]) is list and type(active["groups"]) is list)
         require(type(active["summary_spans"]) is list)
-        require(state["stop_reason"] in ("completed", "error", "max_model_calls", "context_budget_exceeded"))
+        require(state["stop_reason"] in ("completed", "error", "max_model_calls", "context_budget_exceeded")
+                or not terminal and state["stop_reason"] is None)
         for name in ("model_calls", "summary_calls", "tool_requests", "tool_calls", "record_revision",
                      "record_admitted_through"):
             require(type(state[name]) is int and state[name] >= 0)

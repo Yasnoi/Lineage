@@ -101,7 +101,7 @@ def _compose(state: AgentState, compaction: dict, documents: dict, checkpoint_id
 
 def build_compaction_nodes(*, settings, records: ContextRecords | None, call_summary,
                            prepare_model_request, recorder, tracer, finish, accumulate_usage,
-                           validate_input) -> dict[str, Callable]:
+                           validate_input, execution=None) -> dict[str, Callable]:
     def emit(event, step_id, **details):
         return recorder is None or recorder.emit(event, step_id=step_id, node="summary", **details)
 
@@ -223,10 +223,11 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             return stop(state, compaction, "context_measurement_error", failed=True)
 
     async def summarize_lane(state, lane):
+        replaying = execution is not None and state.get("execution", {}).get("phase") == "response_saved"
         compaction = deepcopy(state["compaction"])
         selected = compaction["lanes"][lane]
         step_id = recorder.next_step() if recorder else None
-        compaction["step_id"] = step_id
+        compaction["step_id"] = state["execution"]["operation_id"] if replaying else step_id
         if not await unchanged(state, compaction):
             return await source_changed(state, compaction)
         next_status = "history_ready" if lane == "H" else "current_ready"
@@ -234,7 +235,17 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             compaction["status"] = next_status
             return finish(state, {"compaction": compaction}, "summarize_" + lane, step_id)
         try:
-            if compaction["attempt_no"] == 2:
+            if replaying:
+                operation = execution.request(state)
+                request = deepcopy(operation["payload"]["request"])
+                metadata = deepcopy(operation["payload"]["metadata"])
+                if (operation["kind"] != "summary" or metadata["lane"] != lane
+                        or metadata["lanes"][lane]["summary_id"] != selected["summary_id"]
+                        or metadata["snapshot"] != compaction["snapshot"]
+                        or metadata["attempt_no"] != compaction["attempt_no"]
+                        or metadata["request_no"] != compaction["request_no"]):
+                    raise CheckpointError("archive_integrity_error")
+            elif compaction["attempt_no"] == 2:
                 candidate = selected["candidate_input"]
                 material = {
                     "input": [
@@ -253,22 +264,28 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
                 }
             else:
                 material = await records.material(compaction, lane, state)
-            try:
-                rendered = serialize_conversation(material["input"], item_details=material["item_details"])
-            except (TypeError, ValueError, KeyError):
-                return stop(state, compaction, "unsupported_protocol_boundary")
-            request = prepare_summary_request(settings, rendered, lane=lane, attempt_no=compaction["attempt_no"])
+            if not replaying:
+                try:
+                    rendered = serialize_conversation(material["input"], item_details=material["item_details"])
+                except (TypeError, ValueError, KeyError):
+                    return stop(state, compaction, "unsupported_protocol_boundary")
+                request = prepare_summary_request(settings, rendered, lane=lane, attempt_no=compaction["attempt_no"])
             if validate_input(request["input"]) is not None:
                 return stop(state, compaction, "unsupported_protocol_boundary")
             # Only text is sent. Original opaque reserves still belong to the
             # retained business view, never to this rendered summary request.
             risks = [None] * len(request["input"])
             budget = check_context_budget(request, risks, summary_budget_settings(settings, lane), step_id=step_id)
-            selected["summary_request_sha256"] = sha256(json.dumps(
+            request_hash = sha256(json.dumps(
                 request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
             ).encode("utf-8")).hexdigest()
+            if replaying and selected.get("summary_request_sha256") != request_hash:
+                raise CheckpointError("archive_integrity_error")
+            selected["summary_request_sha256"] = request_hash
             selected["attempt_no"] = compaction["attempt_no"]
             selected["request_no"] = compaction["request_no"]
+            if replaying:
+                budget["step_id"] = state["execution"]["operation_id"]
             selected["summary_budget"] = budget
             compaction["summary_budget"] = budget
             emit("context_budget.checked", step_id, purpose="summary", lane=lane,
@@ -279,8 +296,18 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
             raise
         except Exception:
             return stop(state, compaction, "context_measurement_error", failed=True)
-        count = state["summary_calls"] + 1
-        if not emit("summary.started", step_id, lane=lane, summary_call=count, summary_id=selected["summary_id"],
+        if not replaying:
+            metadata = {**compaction, "lane": lane, "source_bytes": json_bytes(request["input"]),
+                "summary_input_metadata": {"format": INPUT_FORMAT, "context_risks": risks,
+                    "source_spans": deepcopy(rendered.source_spans),
+                    **{key: deepcopy(material[key]) for key in ("derived_spans", "item_refs", "item_details")}}}
+        if execution is not None and not replaying:
+            return finish(state, {"compaction": compaction, "execution": execution.prepare_request(
+                state, request, kind="summary", return_node="summarize_history" if lane == "H" else "summarize_current",
+                metadata=metadata)}, "request_ready", step_id)
+        attempt_count = execution.attempt_count(state) if replaying else 1
+        count = state["summary_calls"] + attempt_count
+        if not replaying and not emit("summary.started", step_id, lane=lane, summary_call=count, summary_id=selected["summary_id"],
                     request_no=compaction["request_no"], attempt_no=compaction["attempt_no"]):
             return stop(state, compaction, "logging_error", failed=True)
         compaction.update(summary_call=count, summary_lane=lane, summary_id=selected["summary_id"])
@@ -288,14 +315,9 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         budget["request_sent"] = True
         failure = None
         try:
-            result = await call_summary(request, {**compaction, "lane": lane,
-                "source_bytes": json_bytes(request["input"]),
-                # This provenance is application metadata, never SDK request input.
-                "summary_input_metadata": {
-                    "format": INPUT_FORMAT, "context_risks": risks,
-                    "source_spans": deepcopy(rendered.source_spans),
-                    **{key: deepcopy(material[key]) for key in ("derived_spans", "item_refs", "item_details")},
-                }})
+            result = execution.model_result(state) if replaying else await call_summary(request, metadata)
+        except CheckpointError:
+            raise
         except ModelError as exc:
             result, failure = exc.result, "summary_model_error"
         except Exception:
@@ -304,6 +326,11 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         update = {"summary_calls": count, "summary_result": result,
                   "summary_usage_totals": accumulate_usage(state["summary_usage_totals"], usage),
                   "usage_totals": accumulate_usage(state["usage_totals"], usage)}
+        for _ in range(attempt_count - 1):
+            update["summary_usage_totals"] = accumulate_usage(update["summary_usage_totals"], None)
+            update["usage_totals"] = accumulate_usage(update["usage_totals"], None)
+        if execution is not None:
+            update["attempt_counts"] = execution.counts()
         if failure:
             emit("summary.failed", step_id, lane=lane, summary_call=count, error_code=failure)
             return stop(state, compaction, failure, failed=True, update=update)
@@ -361,11 +388,18 @@ def build_compaction_nodes(*, settings, records: ContextRecords | None, call_sum
         for lane, selected in compaction["lanes"].items():
             if selected["status"] != "empty":
                 await records.store.scope(selected["scope"]["history_ref"], view_id=view_id)
-                body = await records.summary({
+                reference = {
                     "summary_id": selected["summary_id"], "lane": lane,
                     "history_ref": selected["scope"]["history_ref"], "ranges": selected["scope"]["ranges"],
                     "checkpoint_id": checkpoint_id,
-                }, view_id=view_id)
+                }
+                if execution is not None:
+                    candidate = records.saver.archive(records.session_id)._object("summary", selected["summary_id"])
+                    if any(candidate.get(key) != reference[key] for key in ("lane", "history_ref", "ranges")):
+                        raise CheckpointError("archive_integrity_error")
+                    body = candidate["body"]
+                else:
+                    body = await records.summary(reference, view_id=view_id)
                 if body != selected["body"]:
                     raise CheckpointError("checkpoint_read_error")
                 for bounds in selected["scope"]["ranges"]:

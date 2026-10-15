@@ -13,6 +13,8 @@ def state():
     digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
     return {
         "run_id": current, "conversation_id": conversation, "log_path": "generated.log",
+        "execution": {"point_id": str(uuid4()), "parent_id": str(uuid4()), "phase": "finalizing"},
+        "log_segments": [{"execution_id": str(uuid4()), "path": current + ".jsonl", "complete": True}],
         "input": [{"role": "user", "content": "Exact original 17; do not write files"}],
         "result": {"text": "exact answer"}, "tool_outcomes": {"succeeded": 1},
         "active_context": {
@@ -27,7 +29,9 @@ def state():
             previous: {"format_version": 1, "record_count": 5, "byte_end": 500,
                        "prefix_sha256": digest(previous + "/file")},
             current: {"format_version": 1, "record_count": 3, "byte_end": 300,
-                      "prefix_sha256": digest(current + "/file")},
+                      "prefix_sha256": digest(current + "/file"), "segments": [
+                          {"path": "history/" + current + ".jsonl", "start_sequence": 0,
+                           "record_count": 3, "byte_end": 300, "prefix_sha256": digest(current + "/file")}]},
         },
         "record_metrics": {"count": 3, "file_bytes": 300, "logical_bytes": 500,
                            "checkpoint_serialized_bytes": 987},
@@ -53,6 +57,9 @@ class TraceEquivalenceTests(unittest.TestCase):
             lambda value: value["record_files"][value["run_id"]].update(record_count=4),
             lambda value: value["record_files"][value["run_id"]].update(byte_end=301),
             lambda value: value["record_metrics"].update(file_bytes=301),
+            lambda value: value["execution"].update(phase="request_ready"),
+            lambda value: value["log_segments"][0].update(complete=False),
+            lambda value: value["record_files"][value["run_id"]]["segments"][0].update(byte_end=301),
         ]
         for mutate in mutations:
             changed = deepcopy(first)

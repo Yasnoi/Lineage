@@ -218,7 +218,10 @@ def assert_batch_returned(state, client, requests, outcomes, attempts):
     created = [event for event in events if event["event"] == "tool.result_created"]
     assert [event["call_id"] for event in created] == ids
     assert [event["request_index"] for event in created] == list(range(1, len(ids) + 1))
-    assert len({event["step_id"] for event in created}) == 1
+    # Each durable tool boundary gets its own step; a batch is still executed
+    # serially and becomes model input only after every result is available.
+    assert len({event["step_id"] for event in created}) == len(ids)
+    previous_result_seq = 0
     for request, outcome, result, event in zip(requests, outcomes, results, created):
         envelope = json.loads(result["output"])
         assert event["outcome"] == outcome and event["ok"] is envelope["ok"]
@@ -227,7 +230,11 @@ def assert_batch_returned(state, client, requests, outcomes, attempts):
             if item["event"] == f"tool.{outcome}" and item.get("call_id") == request["call_id"]
         ]
         assert len(recorded) == 1
+        call_events = [item for item in events if item.get("call_id") == request["call_id"]]
+        assert all(item["step_id"] == event["step_id"] for item in call_events)
+        assert min(item["event_seq"] for item in call_events) > previous_result_seq
         assert recorded[0]["event_seq"] < event["event_seq"]
+        previous_result_seq = event["event_seq"]
         if outcome == "succeeded":
             assert set(envelope) == {"ok", "observation"} and envelope["ok"] is True
         else:
@@ -259,7 +266,7 @@ class FaultyFile:
     def observe(self, operation, persistence):
         safe_fields = (
             "run_id", "event", "event_seq", "step_id", "node", "call_id",
-            "tool_name", "request_index", "stage", "error_code",
+            "tool_name", "request_index", "stage", "error_code", "model_call", "operation_id",
         )
         self.observations.append({
             "source": "fault_injection", "operation": operation, "persistence": persistence,

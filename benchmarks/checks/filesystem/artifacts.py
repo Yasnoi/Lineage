@@ -420,7 +420,19 @@ async def check_integration():
             assert json.loads(inline_raw(json.loads(item["output"])))["artifact_ref"] == ref
         assert json.loads(inline_raw(json.loads(outputs(second.state)[-1]["output"])))["content"] == "ordinary text"
         assert outputs(first.state) == [item for item in next_client.requests[0]["input"] if item.get("type") == "function_call_output"]
-        assert len(list(store._directory.glob("*.raw"))) == 1, "recall recursively archived new artifacts"
+        archive = manager._checkpointer.archive(sid)
+        attempts = [attempt for run in (first.state["run_id"], second.state["run_id"])
+                    for operation in archive.operations(run) for attempt in archive.attempts(operation["operation_id"])
+                    if "artifact" in (attempt.get("result") or {})]
+        candidate_refs = {attempt["result"]["artifact"]["artifact_ref"] for attempt in attempts}
+        assert len(candidate_refs) == 5, "each successful operation must retain one exact raw result"
+        assert len(list(store._directory.glob("*.raw"))) == 1 + len(candidate_refs)
+        assert view.registered_refs() == [ref], "inline/native recall granted recursive business artifacts"
+        assert archive.view(second.state["resource_view_id"])["artifacts"] == [ref]
+        for attempt in attempts:
+            candidate = archive.artifact(attempt["result"]["artifact"]["artifact_ref"])
+            assert candidate["metadata"]["origin"]["attempt_id"] == attempt["attempt_id"]
+            assert candidate["metadata"]["origin"]["purpose"] == "execution_result"
         outsider = manager.create_session(SETTINGS, artifact_store=store)
         attempts = [artifact_call("foreign", "artifact_read", ref, start=0, end=None),
                     artifact_call("invalid", "artifact_read", ref, start=-1, end=None),

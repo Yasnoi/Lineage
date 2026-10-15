@@ -23,8 +23,12 @@ class ConversationProcessTests(unittest.TestCase):
         return [sys.executable, "-m", "benchmarks.checks.support.recovery_worker", mode, str(self.root)]
 
     def worker(self, mode, payload=None):
+        # These scenarios execute multiple complete tool/Compact rounds and
+        # repeatedly verify archived bodies, not just an idle session import.
+        # Keep a finite ceiling while allowing full-suite/contract contention.
+        timeout = 240 if mode in {"create", "reopen"} else 90
         result = subprocess.run(self.command(mode), input=json.dumps(payload or {}) + "\n",
-                                capture_output=True, text=True, encoding="utf-8", env=self.environment, timeout=90)
+                                capture_output=True, text=True, encoding="utf-8", env=self.environment, timeout=timeout)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 1, result.stdout)

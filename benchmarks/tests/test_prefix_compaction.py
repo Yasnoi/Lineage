@@ -100,6 +100,9 @@ class PrefixCompactionTests(unittest.IsolatedAsyncioTestCase):
                 bindings.append(binding)
             return await original_send(client, request, **kwargs)
         async def audit_material(records, compaction, lane, state):
+            # A saved response is processed against its fixed request metadata;
+            # it must not rebuild source material a second time.
+            self.assertNotEqual(state.get("execution", {}).get("phase"), "response_saved")
             material = await original_material(records, compaction, lane, state)
             self.assertNotIn("allowed_source_ids", material)
             self.assertEqual(len(material["input"]), len(material["item_refs"]))

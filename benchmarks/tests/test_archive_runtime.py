@@ -156,7 +156,7 @@ class ArchiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(turn.checkpoint_error, "artifact_write_error")
                 self.assertEqual(turn.state["model_calls"], 1)
                 self.assertEqual(turn.state["tool_calls"], 1)
-                self.assertEqual(turn.state["tool_outcomes"], {"succeeded": 1, "failed": 0, "rejected": 0, "skipped": 1})
+                self.assertEqual(turn.state["tool_outcomes"], {"succeeded": 1, "failed": 0, "rejected": 0, "skipped": 0})
                 self.assertEqual(saver.confirmed_view(sid), captured[-1])
                 self.assertEqual(saver.archive(sid).view(captured[-1])["artifacts"], [stable["artifact_ref"]])
                 self.assertEqual(manager.artifacts(sid).read(stable["artifact_ref"], 0)["text"], "previous durable result")
@@ -167,7 +167,7 @@ class ArchiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await manager.run_turn(sid, "blocked")
 
     async def test_archive_failure_boundaries_preserve_facts_and_old_access(self):
-        for failure in ("append_event", "prepare_view", "confirm_view", "publish_snapshot"):
+        for failure in ("append_event", "prepare_view", "confirm_execution", "publish_snapshot"):
             with self.subTest(failure=failure), SessionManager() as manager:
                 sid = manager.create_session(self.settings)
                 original = getattr(ArchiveStore, failure)
@@ -179,8 +179,9 @@ class ArchiveRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         should_fail = args[1] == "model_result"
                     elif failure == "prepare_view":
                         should_fail = any(w["record_count"] > 1 for w in kwargs["record_files"].values())
-                    elif failure == "confirm_view":
-                        should_fail = any(store.view(args[0], confirmed=False)["fact_ends"].values())
+                    elif failure == "confirm_execution":
+                        point = store.execution(args[0], confirmed=False)
+                        should_fail = point["state"].get("result") is not None
                     else:
                         should_fail = True
                     if should_fail:

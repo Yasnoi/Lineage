@@ -318,6 +318,11 @@ class RecordStore:
                 raise ValueError("scope registration mismatch")
             if metadata["history_ref"] != history_ref:
                 raise ValueError("scope mismatch")
+            current_files = self.archive.view(head)["record_files"]
+            for run_id, watermark in metadata["record_files"].items():
+                if run_id not in current_files:
+                    raise ValueError("scope source outside current view")
+                self.journal.verify_prefix(run_id, watermark, current_files[run_id])
             source_index = self._file_index(metadata["record_files"])
             seen = set()
             for interval in metadata["ranges"]:

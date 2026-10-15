@@ -1,6 +1,7 @@
 """Read complete, bounded UTF-8 files inside a bound project."""
 
 import codecs
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,8 @@ class TextExecutor:
         self._max_bytes = max_bytes
         self._max_total_bytes = max_total_bytes
         self._used_bytes = 0
+        self._reservations: dict[str, int] = {}
+        self._settled: dict[str, int] = {}
 
     def bind_run(self) -> "TextExecutor":
         return TextExecutor(self._root, self._max_bytes, self._max_total_bytes)
@@ -66,13 +69,79 @@ class TextExecutor:
 
     @property
     def read_budget(self) -> dict[str, int]:
-        return {
+        reserved = sum(self._reservations.values())
+        result = {
             "limit_bytes": self._max_total_bytes,
             "used_bytes": self._used_bytes,
-            "remaining_bytes": self._max_total_bytes - self._used_bytes,
+            "remaining_bytes": self._max_total_bytes - self._used_bytes - reserved,
         }
+        if reserved:
+            result["reserved_bytes"] = reserved
+        return result
+
+    def export_read_budget(self) -> dict[str, Any]:
+        """Export exact attempt reservations; the caller makes this durable."""
+        return {"version": 1, "max_bytes": self._max_bytes,
+                "limit_bytes": self._max_total_bytes, "used_bytes": self._used_bytes,
+                "reservations": self._reservations.copy(), "settled": self._settled.copy()}
+
+    def restore_read_budget(self, saved: dict[str, Any]) -> None:
+        """Restore only validated state under the original immutable limits."""
+        try:
+            if (type(saved) is not dict or set(saved) != {
+                    "version", "max_bytes", "limit_bytes", "used_bytes", "reservations", "settled"}
+                    or type(saved["version"]) is not int or saved["version"] != 1
+                    or type(saved["max_bytes"]) is not int or saved["max_bytes"] != self._max_bytes
+                    or type(saved["limit_bytes"]) is not int or saved["limit_bytes"] != self._max_total_bytes
+                    or type(saved["used_bytes"]) is not int or saved["used_bytes"] < 0):
+                raise ValueError
+            for field in ("reservations", "settled"):
+                if (type(saved[field]) is not dict or any(
+                        type(key) is not str or not key or type(value) is not int
+                        or not 0 <= value <= self._max_bytes for key, value in saved[field].items())):
+                    raise ValueError
+            if (set(saved["reservations"]) & set(saved["settled"])
+                    or saved["used_bytes"] + sum(saved["reservations"].values()) > self._max_total_bytes
+                    or sum(saved["settled"].values()) > saved["used_bytes"]):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ConfigurationError("保存的文件读取额度不兼容或不完整。") from None
+        self._used_bytes = saved["used_bytes"]
+        self._reservations = deepcopy(saved["reservations"])
+        self._settled = deepcopy(saved["settled"])
+
+    def reserve_read(self, attempt_id: str) -> int:
+        """Reserve once before dispatch; unknown attempts retain this allowance."""
+        if type(attempt_id) is not str or not attempt_id or attempt_id in self._settled:
+            raise ConfigurationError("文件读取尝试身份无效或已经完成。")
+        if attempt_id not in self._reservations:
+            self._reservations[attempt_id] = min(self._max_bytes, self.read_budget["remaining_bytes"])
+        return self._reservations[attempt_id]
+
+    def settle_read(self, attempt_id: str, used_bytes: int) -> None:
+        """Settle a trusted outcome once; failures settle zero, unknowns do not."""
+        if type(attempt_id) is not str or not attempt_id or type(used_bytes) is not int or used_bytes < 0:
+            raise ConfigurationError("文件读取结算必须是已知的非负字节数。")
+        if attempt_id in self._settled:
+            if self._settled[attempt_id] != used_bytes:
+                raise ConfigurationError("同一文件读取尝试的结算不一致。")
+            return
+        reserved = self._reservations.get(attempt_id)
+        if reserved is None or used_bytes > reserved:
+            raise ConfigurationError("文件读取结算超出已登记预留。")
+        self._used_bytes += used_bytes
+        self._settled[attempt_id] = used_bytes
+        del self._reservations[attempt_id]
+
+    async def execute_reserved(self, attempt_id: str, name: str, arguments: dict[str, Any]) -> str:
+        if type(attempt_id) is not str or attempt_id not in self._reservations or attempt_id in self._settled:
+            raise ConfigurationError("文件读取尚未登记尝试或已完成。")
+        return await self._execute(name, arguments, remaining=self._reservations[attempt_id], debit=False)
 
     async def __call__(self, name: str, arguments: dict[str, Any]) -> str:
+        return await self._execute(name, arguments, remaining=self.read_budget["remaining_bytes"], debit=True)
+
+    async def _execute(self, name: str, arguments: dict[str, Any], *, remaining: int, debit: bool) -> str:
         if (
             name != TEXT_TOOL["name"]
             or not isinstance(arguments, dict)
@@ -81,7 +150,6 @@ class TextExecutor:
         ):
             raise ToolArgumentError(reason_code="invalid_text_argument_shape")
 
-        remaining = self._max_total_bytes - self._used_bytes
         limit = min(self._max_bytes, remaining)
 
         def check_size(size: int) -> None:
@@ -133,5 +201,6 @@ class TextExecutor:
             "bytes_read": len(data), "complete": True,
         }, ensure_ascii=False, allow_nan=False)
         # No await between reading, serializing and debiting this run's budget.
-        self._used_bytes += len(data)
+        if debit:
+            self._used_bytes += len(data)
         return result

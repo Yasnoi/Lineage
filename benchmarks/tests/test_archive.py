@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from lineage_agent.archive import ArchiveError, ArchiveStore
+from lineage_agent.archive import ArchiveError, ArchiveStore, FORMAT_VERSION
 from lineage_agent.agent.record_journal import RecordJournal
 from lineage_agent.agent.records import make_record_batch
 from lineage_agent.storage import conversation_paths
@@ -350,7 +350,7 @@ class ArchiveTests(unittest.TestCase):
             ArchiveStore(self.paths.directory, create=False)
         self.assertEqual(caught.exception.code, "archive_version_error")
         with closing(sqlite3.connect(self.paths.database)) as connection, connection:
-            connection.execute("PRAGMA user_version=2")
+            connection.execute(f"PRAGMA user_version={FORMAT_VERSION}")
         other = conversation_paths(Path(self.temporary.name), "other")
         other.database.write_bytes(self.paths.database.read_bytes())
         with self.assertRaises(ArchiveError):

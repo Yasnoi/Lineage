@@ -48,7 +48,7 @@ _STAGES = {
     "model_request", "response_validation", "name_validation", "argument_parsing",
     "executor_configuration", "execution", "argument_validation", "result_generation",
 }
-_OUTCOMES = {"succeeded", "rejected", "failed", "skipped"}
+_OUTCOMES = {"succeeded", "rejected", "failed", "skipped", "unknown"}
 _BENCHMARK_FIELDS = {"benchmark_batch_id", "sample_run_id", "case_id", "turn"}
 _IDENTITY_FIELDS = {
     "step_id", "model_call", "call_id", "request_index", "summary_id", "summary_call",
@@ -221,8 +221,9 @@ def _create_client(settings: _TraceSettings) -> Client:
 class RunTrace:
     """One run's explicit spans and its best-effort upload worker."""
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, *, trace_id: str | None = None) -> None:
         self.run_id = run_id
+        self.trace_id = trace_id or run_id
         self._session_id: str | None = None
         self.enabled = False
         self._warned: set[str] = set()
@@ -267,7 +268,7 @@ class RunTrace:
         else:
             state = "incomplete"
         return {
-            "agent_run_id": self.run_id, "trace_id": self.run_id if self.enabled else None,
+            "agent_run_id": self.run_id, "trace_id": self.trace_id if self.enabled else None,
             "binding": deepcopy(self._binding), "session_id": self._session_id,
             "enabled": self.enabled, "closed": self._closed,
             "shutdown_confirmed": self._closed and stopped, "upload_state": state,
@@ -285,7 +286,7 @@ class RunTrace:
                 self._span_statuses[span_id].update(changes)
 
     def _bind_request(self, request_id: str, purpose: str) -> dict[str, Any]:
-        identity = {"agent_run_id": self.run_id, "trace_id": self.run_id if self.enabled else None,
+        identity = {"agent_run_id": self.run_id, "trace_id": self.trace_id if self.enabled else None,
                     "request_id": request_id, "purpose": purpose, **deepcopy(self._binding)}
         if self._session_id is not None:
             identity["session_id"] = self._session_id
@@ -306,6 +307,7 @@ class RunTrace:
         allowed = _BENCHMARK_FIELDS | _IDENTITY_FIELDS | {
             "run_id", "session_id", "purpose", "request_id", "outcome", "reason_code",
             "skip_reason", "error_code", "stage", "checkpoint_id", "checkpoint_error", "checkpoint_saved",
+            "reused_result", "executor_entered",
         }
         return {key: self._sanitizer.text(value) if isinstance(value, str) else value
                 for key, value in metadata.items() if key in allowed
@@ -323,6 +325,7 @@ class RunTrace:
 
     def _start(self, config: _TraceSettings, settings: ModelSettings) -> None:
         UUID(self.run_id)
+        UUID(self.trace_id)
         self._settings = config
         model_key = os.environ.get("API_KEY", "")
         self._sanitizer = TraceSanitizer(
@@ -330,7 +333,7 @@ class RunTrace:
                      os.environ.get("LANGSMITH_API_KEY", "")],
             project_root=settings.project_root,
         )
-        self._root = self._new_span("Lineage Agent", "chain", {}, {}, run_id=self.run_id)
+        self._root = self._new_span("Lineage Agent", "chain", {}, {}, run_id=self.trace_id)
         self.enabled = True
         self._worker = threading.Thread(
             target=self._upload, name="lineage-langsmith-upload", daemon=True,
@@ -342,7 +345,7 @@ class RunTrace:
         span_id = run_id or str(uuid4())
         order = now.strftime("%Y%m%dT%H%M%S%fZ") + span_id
         payload = {
-            "id": span_id, "trace_id": self.run_id,
+            "id": span_id, "trace_id": self.trace_id,
             "name": name, "run_type": run_type, "inputs": inputs,
             "start_time": now.isoformat(),
             "project_name": self._settings.project,
@@ -351,12 +354,12 @@ class RunTrace:
         if self._session_id is not None:
             payload["extra"]["metadata"]["session_id"] = self._session_id
         if self._root is not None:
-            payload["parent_run_id"] = self.run_id
+            payload["parent_run_id"] = self.trace_id
             order = self._root.payload["dotted_order"] + "." + order
         payload["dotted_order"] = order
         with self._status_lock:
             self._span_statuses[span_id] = {
-                "span_id": span_id, "trace_id": self.run_id,
+                "span_id": span_id, "trace_id": self.trace_id,
                 "parent_run_id": payload.get("parent_run_id"), "run_type": run_type,
                 "metadata": self._identity_metadata(payload["extra"]["metadata"]), "usage": {},
                 **{key: False for key in ("queued", "attempted", "submitted", "failed", "dropped")},
@@ -370,7 +373,7 @@ class RunTrace:
             return
         self._session_id = self._sanitizer.text(session_id)
         self._root.payload["extra"]["metadata"]["session_id"] = self._session_id
-        self._span_status(self.run_id, metadata=self._identity_metadata(self._root.payload["extra"]["metadata"]))
+        self._span_status(self.trace_id, metadata=self._identity_metadata(self._root.payload["extra"]["metadata"]))
 
     @_safe
     def finish_checkpoint(self, checkpoint_id: str | None, checkpoint_error=None) -> None:
@@ -600,12 +603,14 @@ class RunTrace:
         self._submit(token)
 
     @_safe
-    def tool_start(self, call, *, step_id, request_index) -> _Span | None:
+    def tool_start(self, call, *, step_id, request_index, reused_result=False) -> _Span | None:
         if not self.enabled or self._closed or self._finished:
             return None
         name = call.get("name")
         metadata = {"step_id": step_id, "model_call": self._model_call,
                     "request_index": request_index}
+        if reused_result:
+            metadata.update(reused_result=True, executor_entered=False)
         if isinstance(call.get("call_id"), str):
             metadata["call_id"] = self._sanitizer.text(call["call_id"])
         if isinstance(name, str):
@@ -636,7 +641,12 @@ class RunTrace:
                 else safe_tool_argument_reason(reason_code)
             )
             metadata.update(reason_code=code, reason_message=message)
-        if outcome != "succeeded":
+        if outcome == "unknown":
+            # The local wait was interrupted; the external outcome is not a
+            # known tool failure and must remain distinguishable in diagnostics.
+            metadata["error_code"] = "tool_interrupted"
+            token.payload["error"] = "tool_interrupted"
+        elif outcome != "succeeded":
             raw_error = output.get("error", {}) if isinstance(output, dict) else {}
             code = raw_error.get("code") if isinstance(raw_error, dict) else None
             code = code if code in _TOOL_ERRORS else "execution_error"
@@ -725,9 +735,9 @@ class RunTrace:
                     self._final_status = self._status_snapshot()
 
 
-def start_trace(run_id: str, settings: ModelSettings) -> RunTrace:
+def start_trace(run_id: str, settings: ModelSettings, *, trace_id: str | None = None) -> RunTrace:
     """Read only this application's dotenv variables; no credential fallback."""
-    trace = RunTrace(run_id)
+    trace = RunTrace(run_id, trace_id=trace_id)
     try:
         observer = _scope.get()
         if observer is not None:

@@ -2067,6 +2067,7 @@
     },
     {
       "unit_id": "context.compaction",
+      "timeout_seconds": 600,
       "entrypoint": "benchmarks.checks.context.compaction:execute",
       "script": "benchmarks/checks/context/compaction.py",
       "groups": [

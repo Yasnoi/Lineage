@@ -12,7 +12,7 @@ from benchmarks.checks.recording.projection import check_capacity_and_rounds, ch
 from benchmarks.checks.recording.usage import main as check_usage_coverage
 from benchmarks.checks.support.events import group_id, check_group, evidence, observe_harness, observe_state
 from benchmarks.checks.support.projection import directory_pair, readable, text_item
-from benchmarks.checks.support.runtime import LocalClient, call, message, recording_failure, response
+from benchmarks.checks.support.runtime import LocalClient, call, message, read_events, recording_failure, response
 from benchmarks.checks.support.tracing import (
     CHECK_DIR,
     MODEL_SECRET,
@@ -71,7 +71,9 @@ async def check_disabled_and_equivalence(root):
     assert [tools[key]["extra"]["metadata"]["request_index"] for key in tools] == [1, 2, 3, 4, 5]
     for span in tools.values():
         metadata = span["extra"]["metadata"]
-        assert metadata["run_id"] == state["run_id"] and metadata["step_id"] == "step-0002"
+        assert metadata["run_id"] == state["run_id"]
+        matching = [event for event in read_events(state) if event.get("call_id") == metadata["call_id"]]
+        assert matching and all(event["step_id"] == metadata["step_id"] for event in matching)
     llms = [span for span in spans if span["run_type"] == "llm"]
     assert len(llms) == 2
     assert all(span["outputs"]["usage_metadata"]["input_tokens"] == 10 for span in llms)
@@ -179,6 +181,7 @@ async def check_cancellation_and_queue_overflow():
             evidence(CHECK_DIR / f"{span['id']}.jsonl", kind="interrupted_agent_log", run_id=span["id"])
     tool = next(span for span in transport.sent if span["run_type"] == "tool")
     assert tool["error"] == "tool_interrupted" and client.closed
+    assert tool["extra"]["metadata"]["outcome"] == "unknown"
 
     entered, release = threading.Event(), threading.Event()
 

@@ -1,7 +1,9 @@
 """Run-bound diagnostics and fail-closed writes for native in-memory checkpoints."""
 
 from copy import deepcopy
+from hashlib import sha256
 from typing import Any
+from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -72,7 +74,7 @@ class SessionCheckpointer(InMemorySaver):
         self._archives[thread_id] = archive
 
     async def restore_state(self, thread_id: str, state: dict, *,
-                            archive: ArchiveStore, artifacts) -> str:
+                            archive: ArchiveStore, artifacts, execution: bool = False) -> str:
         """Import a validated snapshot into a fresh, idle in-memory graph.
 
         Only public graph state-update/read APIs build and inspect the native
@@ -81,7 +83,7 @@ class SessionCheckpointer(InMemorySaver):
         """
         from langgraph.graph import END, START, StateGraph
         from langgraph.types import Overwrite
-        from lineage_agent.agent.recovery import validate_snapshot_state
+        from lineage_agent.agent.recovery import validate_snapshot_state, validate_execution_state
         from lineage_agent.agent.record_codec import encode_record
         from lineage_agent.agent.record_journal import RecordJournal
         from lineage_agent.agent.state import AgentState
@@ -94,7 +96,7 @@ class SessionCheckpointer(InMemorySaver):
         try:
             frozen = deepcopy(state)
             view_id = frozen["resource_view_id"]
-            validate_snapshot_state(frozen, archive, view_id)
+            (validate_execution_state if execution else validate_snapshot_state)(frozen, archive, view_id)
             journal = RecordJournal(archive.directory / "history", create=False)
             self.bind_archive(thread_id, archive)
             self.bind_history(thread_id, journal)
@@ -201,7 +203,18 @@ class SessionCheckpointer(InMemorySaver):
                     "previous": [ref["summary_id"] for ref in prior],
                     "source_refs": [] if candidate is not None else deepcopy(selected.get("source_refs", [])),
                 })
-                summaries.add(selected["summary_id"])
+                # Recovery candidates are readable only through their exact
+                # operation/source binding until the whole H/R pair is adopted.
+                if not state.get("execution") or compaction.get("status") in {"pending_save", "confirmed", "used"}:
+                    summaries.add(selected["summary_id"])
+            # Adopting a later compression pass also authorizes its immutable
+            # source summaries; until this point all candidates remain private.
+            pending = list(summaries)
+            while pending:
+                for identity in archive._object("summary", pending.pop()).get("previous", []):
+                    if identity not in summaries:
+                        summaries.add(identity)
+                        pending.append(identity)
             artifacts = set(parent.get("artifacts", []))
             binding = self._artifact_bindings.get(thread_id)
             if binding is not None:
@@ -218,30 +231,92 @@ class SessionCheckpointer(InMemorySaver):
         except ArchiveError as exc:
             raise self._failed(thread_id, exc.code, "archive_prepare") from None
 
+    def prepare_execution(self, thread_id: str, state: dict, phase: str) -> dict:
+        """Stage an exact business transition before the graph saves its update."""
+        self._healthy(thread_id)
+        try:
+            archive = self.archive(thread_id)
+            parent_id = archive.run_status(state["run_id"])["current_execution_id"]
+            execution = deepcopy(state.get("execution") or {})
+            execution.update(phase=phase, point_id=str(uuid4()), parent_id=parent_id)
+            frozen = deepcopy({**state, "execution": execution})
+            archive.prepare_execution(state["run_id"], frozen, state["resource_view_id"], phase,
+                                      parent_id, point_id=execution["point_id"])
+            return execution
+        except ArchiveError as exc:
+            raise self._failed(thread_id, exc.code, "execution_prepare") from None
+
     def archive_facts(self, thread_id: str, state: dict, update: dict, node: str) -> None:
         """Record actual results once, before any later History/checkpoint failure."""
         archive = self.archive(thread_id)
         run_id = state["run_id"]
         try:
+            progress = state.get("execution") or {}
+            operation_id = progress.get("operation_id")
+            response_fact = None
+            response_changed = (update.get("model_calls", 0) > state.get("model_calls", 0)
+                                or update.get("summary_calls", 0) > state.get("summary_calls", 0))
+            if operation_id and response_changed:
+                from lineage_agent.models.responses import ModelError, parse_response
+                operation = archive.operation(operation_id)
+                completed = [attempt for attempt in archive.attempts(operation_id)
+                             if attempt["result"] is not None]
+                if completed:
+                    if len(completed) != 1 or operation["kind"] not in {"model", "summary"}:
+                        raise ArchiveError("archive_integrity_error")
+                    attempt = completed[0]
+                    saved = attempt["result"]
+                    error_code = saved.get("error_code")
+                    result = deepcopy(saved.get("model_result"))
+                    if "raw_response" in saved:
+                        try:
+                            result = parse_response(saved["raw_response"])
+                        except ModelError as error:
+                            result, error_code = error.result, error.code
+                    response_fact = {"result": result, "error_code": error_code,
+                                     "operation_id": operation_id, "attempt_id": attempt["attempt_id"]}
             if update.get("model_calls", 0) > state.get("model_calls", 0):
                 count = update["model_calls"]
-                archive.append_event(run_id, "model_result", {
-                    "model_call": count, "result": deepcopy(update.get("result")),
-                    "checkpoint_id": None, "error_code": update.get("error_code"),
-                }, key=f"model:{count}")
+                # Local logging/routing can fail after the response was saved.
+                # Such failures must not change the immutable response receipt.
+                # An unknown request that exhausted the quota has no response.
+                if not operation_id or response_fact is not None:
+                    archive.append_event(run_id, "model_result", {
+                        "model_call": count, "result": deepcopy(update.get("result")),
+                        "checkpoint_id": None, "error_code": update.get("error_code"),
+                        **(response_fact or {}),
+                    }, key=f"model:{count}")
             if update.get("summary_calls", 0) > state.get("summary_calls", 0):
                 count = update["summary_calls"]
-                archive.append_event(run_id, "summary_result", {
-                    "summary_call": count, "result": deepcopy(update.get("summary_result")),
-                    "compaction": deepcopy(update.get("compaction", state.get("compaction"))),
-                    "checkpoint_id": None,
-                }, key=f"summary:{count}")
+                if not operation_id or response_fact is not None:
+                    provenance = deepcopy(update.get("compaction", state.get("compaction")))
+                    if response_fact is not None:
+                        # Request provenance is fixed before dispatch. Adoption,
+                        # validation and logging failures have separate events.
+                        provenance = deepcopy(operation["payload"]["metadata"])
+                        lane = provenance["lane"]
+                        selected = provenance["lanes"][lane]
+                        provenance.update(summary_call=count, summary_lane=lane,
+                                          summary_id=selected["summary_id"], provenance_phase="request_fixed")
+                        selected.update(summary_call=count, model_called=True)
+                    archive.append_event(run_id, "summary_result", {
+                        "summary_call": count, "result": deepcopy(update.get("summary_result")),
+                        "compaction": provenance, "checkpoint_id": None,
+                        **(response_fact or {}),
+                    }, key=f"summary:{count}")
             before = len(state.get("execution_facts", []))
             facts = update.get("execution_facts", [])[before:]
             if facts:
-                archive.append_event(run_id, "execution_facts", {"facts": deepcopy(facts)})
+                archive.append_event(run_id, "execution_facts", {"facts": deepcopy(facts)},
+                                     key="facts:" + operation_id if operation_id else None)
             if "compaction" in update and update["compaction"] != state.get("compaction"):
-                archive.append_event(run_id, "compaction", {"node": node, "compaction": deepcopy(update["compaction"])})
+                event = {"node": node, "compaction": deepcopy(update["compaction"])}
+                key = None
+                if progress.get("point_id"):
+                    from lineage_agent.agent.record_codec import encode_record
+                    event["source_execution_id"] = progress["point_id"]
+                    key = "compaction:" + sha256(encode_record(event)).hexdigest()
+                archive.append_event(run_id, "compaction", event, key=key)
         except ArchiveError as exc:
             raise self._failed(thread_id, exc.code, "archive_facts") from None
 
@@ -389,7 +464,21 @@ class SessionCheckpointer(InMemorySaver):
             saved_config = self.put(config, checkpoint, metadata, new_versions)
             checkpoint_id = saved_config["configurable"]["checkpoint_id"]
             if view_id and restoring is None:
-                self.archive(thread_id).confirm_view(view_id, checkpoint_id)
+                progress = checkpoint["channel_values"].get("execution") or {}
+                if progress.get("point_id"):
+                    point = self.archive(thread_id).execution(progress["point_id"], confirmed=False)
+                    from lineage_agent.agent.record_codec import encode_record
+                    if encode_record({k: checkpoint["channel_values"].get(k) for k in point["state"]}) != encode_record(point["state"]):
+                        raise CheckpointError("archive_integrity_error")
+                    if point["confirmed"]:
+                        if self.archive(thread_id).run_status(point["run_id"])["current_execution_id"] != point["point_id"]:
+                            raise CheckpointError("archive_execution_conflict")
+                        self.archive(thread_id).confirm_view(view_id, checkpoint_id)
+                    else:
+                        self.archive(thread_id).confirm_execution(progress["point_id"], checkpoint_id,
+                                                                 progress.get("parent_id"))
+                else:
+                    self.archive(thread_id).confirm_view(view_id, checkpoint_id)
         except Exception as exc:
             code = getattr(exc, "code", "checkpoint_write_error")
             raise self._failed(thread_id, code, "checkpoint_write") from None
@@ -425,6 +514,7 @@ class SessionCheckpointer(InMemorySaver):
             if run_id not in files or files[run_id]["record_count"] < watermark["record_count"]:
                 raise CheckpointError("record_integrity_error")
             journal.verify(run_id, watermark)
+            journal.verify_prefix(run_id, watermark, files[run_id])
         for ref, scope in previous.get("history_scopes", {}).items():
             if values.get("history_scopes", {}).get(ref) != scope:
                 raise CheckpointError("record_integrity_error")

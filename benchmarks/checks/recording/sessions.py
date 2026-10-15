@@ -41,8 +41,12 @@ async def main():
             failed, saved = failed_states[1], saved_states[1]
             # Business completion remains public, but ownership changes only
             # after the final save is confirmed. Compare every other State field.
-            assert {key: value for key, value in failed.items() if key != "active_context"} == {
-                key: value for key, value in saved.items() if key != "active_context"}
+            assert {key: value for key, value in failed.items() if key not in {"active_context", "execution"}} == {
+                key: value for key, value in saved.items() if key not in {"active_context", "execution"}}
+            assert "final_record_id" not in failed["execution"]
+            assert saved["execution"]["final_record_id"] == "<execution-final_record_id>"
+            assert failed["execution"] == {key: value for key, value in saved["execution"].items()
+                                           if key != "final_record_id"}
             current, historical = failed["active_context"], saved["active_context"]
             transitioned = {"current_run_id", "turn_start", "initial_input_count", "groups", "turns"}
             assert {key: value for key, value in current.items() if key not in transitioned} == {
@@ -95,25 +99,27 @@ async def check_skipped_after_save_failure(root):
     assert client.closed and len(client.requests) == 1 and not calls
     assert not turn.checkpoint_complete and turn.checkpoint_error == "checkpoint_write_error"
     assert state["model_calls"] == 1 and state["tool_requests"] == 1 and state["tool_calls"] == 0
-    assert state["tool_outcomes"] == {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 1}
+    assert state["tool_outcomes"] == {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 0}
     assert state["usage_totals"]["total_tokens"] == 12
     spans = transport.sent
-    tool = next(span for span in spans if span["run_type"] == "tool")
-    metadata = tool["extra"]["metadata"]
-    assert metadata["call_id"] == "not-executed" and metadata["session_id"] == session_id
-    assert metadata["outcome"] == "skipped" and metadata["skip_reason"] == "checkpoint_error"
+    assert not any(span["run_type"] == "tool" for span in spans)
+    archive = manager._checkpointer.archive(session_id)
+    point = archive.read_execution(state["run_id"])
+    assert point["phase"] == "response_saved"
+    attempts = archive.attempts(point["state"]["execution"]["operation_id"])
+    assert len(attempts) == 1 and attempts[0]["result"]["raw_response"]["output"][0]["call_id"] == "not-executed"
+    assert not any(operation["kind"] == "tool" for operation in archive.operations(state["run_id"]))
     trace_root = next(span for span in spans if span["run_type"] == "chain")
     assert trace_root["extra"]["metadata"]["outcome"] == "failed"
     assert trace_root["error"] == "checkpoint_write_error"
     events = [json.loads(line) for line in Path(state["log_path"]).read_text(encoding="utf-8").splitlines()]
-    skipped = next(event for event in events if event["event"] == "tool.skipped")
-    assert skipped["call_id"] == "not-executed" and skipped["reason"] == "checkpoint_error"
+    assert not any(event["event"] in {"tool.started", "tool.skipped"} for event in events)
     assert not any(event["event"] == "tool.result_created" for event in events)
     assert "PRIVATE_AFTER_MODEL_SAVE_FAULT" not in json.dumps([events, spans])
     print(
-        f"PASS actual session checkpoint failure skips tool session_id={session_id} run_id={state['run_id']} "
+        f"PASS session checkpoint failure retains pending tool session_id={session_id} run_id={state['run_id']} "
         f"checkpoint_id={turn.checkpoint_id} last_confirmed={manager._checkpointer.last_confirmed(session_id)} "
-        f"step_id={metadata['step_id']} call_id=not-executed log={state['log_path']}"
+        f"execution_point={point['point_id']} call_id=not-executed log={state['log_path']}"
     )
 
 def execute():

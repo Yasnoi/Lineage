@@ -72,12 +72,19 @@ async def turn(manager, sid, client):
 
 async def check_pipeline():
     raw = '首"\\\r\n' * 6000 + "MIDDLE_MATERIAL" + "尾😀" * 6000
-    executed, published = [], []
-    original_put = SessionArtifacts.put
+    executed, published, candidates = [], [], []
+    original_put = SessionArtifacts.put_candidate
+    original_promote = SessionArtifacts.promote_candidate
 
     def save(view, value, **kwargs):
         descriptor = original_put(view, value, **kwargs)
         assert raw_path(view._store, descriptor).read_bytes() == value.encode("utf-8")
+        candidates.append((view, descriptor))
+        return descriptor
+
+    def promote(view, ref, **kwargs):
+        descriptor = original_promote(view, ref, **kwargs)
+        assert descriptor["tool_name"] == "lookup_sample", "native recall was promoted recursively"
         published.append((view, descriptor, view._store._directory))
         return descriptor
 
@@ -106,7 +113,10 @@ async def check_pipeline():
                 tool_call("recall", "artifact_read", artifact_ref=ref, start=raw.index("MIDDLE_MATERIAL"), end=None),
                 tool_call("search", "artifact_search", artifact_ref=ref, keywords=["MIDDLE_MATERIAL"], start=0),
             )
-        assert number == 3 and len(published) == 3, "recall must not create another snapshot"
+        assert number == 3 and len(published) == 3, "recall must not publish another business artifact"
+        assert len(candidates) == 5, "each actual successful operation needs its exact saved raw result"
+        assert set(candidates[-1][0].registered_refs()) == {saved["artifact_ref"] for _, saved, _ in published}
+        assert all(saved["artifact_ref"] not in candidates[-1][0].registered_refs() for _, saved in candidates[-2:])
         recalled, searched = [json.loads(observation(item)["raw_result"]) for item in items[-2:]]
         assert recalled["text"].startswith("MIDDLE_MATERIAL") and recalled["next_start"] > recalled["start"]
         assert searched["hits"][0]["matches"][0]["start"] == raw.index("MIDDLE_MATERIAL")
@@ -114,7 +124,8 @@ async def check_pipeline():
         assert all(observation(item)["mode"] == "inline" for item in items[-2:])
         return response(message())
 
-    with fixture(), patch.object(SessionArtifacts, "put", save):
+    with fixture(), patch.object(SessionArtifacts, "put_candidate", save), \
+            patch.object(SessionArtifacts, "promote_candidate", promote):
         client = GuidedClient(guide)
         state = await run(client, tools=[TOOL], execute_tool=executor)
         assert state["stop_reason"] == "completed" and len(executed) == 3
@@ -176,22 +187,20 @@ async def check_failures():
         for failure in (ArtifactError("artifact_write_error"), OSError(PRIVATE)):
             client = LocalClient([response(tool_call("save_fail", "lookup_sample", key="large"),
                                            tool_call("still_run", "lookup_sample", key="small")), response(message())])
-            with capture() as (transport, stderr), patch.object(SessionArtifacts, "put", side_effect=failure) as save:
+            with capture() as (transport, stderr), patch.object(SessionArtifacts, "put_candidate", side_effect=failure) as save:
                 state = await run(client, tools=[TOOL], execute_tool=executor)
-            actual = [item for item in client.requests[1]["input"] if item.get("type") == "function_call_output"]
-            failed = observation(actual[0])
-            assert failed["status"] == "unavailable" and failed["stage"] == "save"
-            assert "artifact_ref" not in failed and PRIVATE not in json.dumps(actual)
-            assert observation(actual[1])["raw_result"] == "small"
-            assert save.call_count == 1 and state["tool_outcomes"]["succeeded"] == 2
-            assert state["stop_reason"] == "completed"
+            assert len(client.requests) == 1 and not outputs(state)
+            assert save.call_count == 1 and state["tool_calls"] == 1
+            assert state["tool_outcomes"] == {"succeeded": 1, "failed": 0, "rejected": 0, "skipped": 0}
+            assert state["stop_reason"] == "error" and state["error_code"] == "artifact_write_error"
+            assert PRIVATE not in json.dumps(state)
             events = [json.loads(line) for line in Path(state["log_path"]).read_text(encoding="utf-8").splitlines()]
-            recorded = next(event for event in events if event["event"] == "tool.succeeded" and event["call_id"] == "save_fail")
-            assert recorded["observation_status"] == "unavailable" and recorded["observation_stage"] == "save"
+            assert any(event["event"] == "run.checkpoint_failed" for event in events)
+            saved_fact = next(event for event in events if event["event"] == "tool.succeeded")
+            assert saved_fact["observation_status"] == "unavailable" and saved_fact["observation_stage"] == "save"
+            assert not any(event["event"] == "tool.result_created" for event in events)
             spans = [span for span in transport.sent if span["run_type"] == "tool"]
-            assert len(spans) == 2
-            assert spans[0]["extra"]["metadata"]["outcome"] == "succeeded"
-            assert spans[0]["outputs"]["observation"]["status"] == "unavailable"
+            assert len(spans) == 1, "saving failure dispatched another tool"
             assert PRIVATE not in json.dumps(transport.sent) and PRIVATE not in stderr.getvalue()
 
         async def unencodable_executor(name, arguments):
@@ -213,7 +222,7 @@ async def check_failures():
             sid = manager.create_session(SETTINGS, tools=[TEXT_TOOL], execute_tool=text_executor)
             request = tool_call("preview_fail", "read_text_file", path="a.txt", observation={"intent": None, "keywords": ["ERROR"]})
             client = LocalClient([response(request), response(message())])
-            with patch.object(SessionArtifacts, "search", side_effect=OSError(PRIVATE)) as search:
+            with patch.object(SessionArtifacts, "search_candidate", side_effect=OSError(PRIVATE)) as search:
                 state = await turn(manager, sid, client)
             failed = observation(outputs(state)[0])
             assert failed["status"] == "unavailable" and failed["stage"] == "preview"

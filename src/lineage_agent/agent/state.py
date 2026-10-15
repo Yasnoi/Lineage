@@ -129,3 +129,6 @@ class AgentState(TypedDict):
     error: str | None
     error_code: str | None
     cleanup_error: dict[str, str | None] | None
+    execution: NotRequired[dict[str, Any]]
+    attempt_counts: NotRequired[dict[str, Any]]
+    log_segments: NotRequired[list[dict[str, Any]]]

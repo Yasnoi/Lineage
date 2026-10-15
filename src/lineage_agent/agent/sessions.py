@@ -24,7 +24,7 @@ from lineage_agent.config.recovery import (
 )
 from lineage_agent.models.types import ModelInput, ToolDefinition
 from lineage_agent.observations.hints import enhance_tools
-from lineage_agent.tools.types import ToolExecutor
+from lineage_agent.tools.types import ToolExecutor, ToolRecoveryBinding
 from lineage_agent.tools.history import HISTORY_TOOL_NAMES
 from lineage_agent.storage import StorageError, conversation_paths, ConversationLease
 
@@ -39,7 +39,7 @@ _SESSION_ERRORS = {
     "session_already_open": "该会话已在此管理器打开；请切换，或先关闭后显式重新打开。",
     "conversation_busy": "另一个会话实例正持有此对话的写入保护。",
     "conversation_not_found": "指定对话不存在或无法安全定位。",
-    "no_snapshot": "此对话尚无已发布恢复点，不能恢复为空白会话。",
+    "no_snapshot": "此对话尚无已发布轮末快照，不能打开为空白会话；可另行检查未完成 Run 的执行恢复点。",
     "recovery_required": "存在未封存轮次；须明确选择从最后已发布快照开始新轮次。",
     "recovery_changed": "恢复点或未封存轮次已变化，请重新检查后选择。",
     "archive_version_error": "保存格式不受支持，本版本不迁移旧对话。",
@@ -47,6 +47,13 @@ _SESSION_ERRORS = {
     "archive_read_error": "会话归档无法读取。",
     "archive_write_error": "会话登记未能保存。",
     "archive_publication_unknown": "快照发布结果无法确认，当前实例已阻断。",
+    "archive_publication_conflict": "恢复位置已经变化，请重新检查后作出选择。",
+    "no_execution_point": "此轮次没有已确认执行恢复点，不能恢复为空白任务。",
+    "unknown_run": "此对话没有登记该轮次。",
+    "run_completed": "此轮次已经封存，不能从旧执行点再次运行。",
+    "run_abandoned": "此轮次已选择回退保留，不能再恢复执行。",
+    "pending_run": "此会话已打开未完成轮次；请显式恢复，不能直接创建新轮次。",
+    "resume_choice_used": "此恢复选择已经使用；请检查当前执行位置，不能重复派发。",
 }
 
 
@@ -86,6 +93,52 @@ class SessionOpened:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class RunRecoveryChoice:
+    run_id: str
+    snapshot_id: str | None
+    execution_point_id: str
+    revision: int
+    choice_id: str
+
+
+@dataclass(frozen=True)
+class RunInspection:
+    conversation_id: str
+    run_id: str
+    status: str
+    phase: str | None
+    choice: RunRecoveryChoice | None
+    reusable_operations: tuple[str, ...] = ()
+    uncertain_attempts: tuple[str, ...] = ()
+    quota: dict = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunOpened:
+    session_id: str
+    run_id: str
+    execution_point_id: str
+    settings: ModelSettings
+    choice: RunRecoveryChoice
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunResumed:
+    session_id: str
+    run_id: str
+    status: Literal["completed", "paused", "blocked"]
+    turn: SessionTurn | None = None
+    reason: str | None = None
+    execution_point_id: str | None = None
+    phase: str | None = None
+    quota: dict = field(default_factory=dict)
+    uncertain_attempts: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
 @dataclass
 class _Session:
     settings: ModelSettings
@@ -98,6 +151,10 @@ class _Session:
     records: dict[str, str] = field(default_factory=dict)
     snapshot_id: str | None = None
     lease: ConversationLease | None = None
+    recovery_binding: ToolRecoveryBinding | None = None
+    pending_run: str | None = None
+    recovery_choice: RunRecoveryChoice | None = None
+    execution_state: dict | None = None
 
 
 class SessionManager:
@@ -117,6 +174,7 @@ class SessionManager:
         self._closed = False
         self._owned_store: ArtifactStore | None = None
         self.cleanup_error: str | None = None
+        self._resume_results: dict[tuple[str, str], tuple[RunRecoveryChoice, RunResumed]] = {}
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -166,6 +224,7 @@ class SessionManager:
 
     def _release_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id)
+        self._resume_results = {key: value for key, value in self._resume_results.items() if key[0] != session_id}
         try:
             if session.artifacts is not None:
                 session.artifacts.release()
@@ -214,6 +273,7 @@ class SessionManager:
         tools: list[ToolDefinition] | None = None,
         execute_tool: ToolExecutor | None = None,
         artifact_store: ArtifactStore | None = None,
+        recovery_binding: ToolRecoveryBinding | None = None,
     ) -> str:
         """Freeze the available capabilities; each request binds fresh budgets."""
         with self._lifecycle_lock:
@@ -225,7 +285,7 @@ class SessionManager:
             # Reject incompatible reserved schemas before allocating storage.
             enhance_tools(available_tools)
             configuration = {"settings": serialize_settings(settings),
-                             "binding": describe_tools(available_tools, execute_tool)}
+                             "binding": describe_tools(available_tools, execute_tool, recovery_binding=recovery_binding)}
             session_id = str(uuid4())
             if artifact_store is None:
                 if self._owned_store is None:
@@ -246,7 +306,7 @@ class SessionManager:
             available_tools = validate_tools([*available_tools, *ARTIFACT_TOOLS], execute_tool)
             self._sessions[session_id] = _Session(
                 deepcopy(settings), available_tools, execute_tool,
-                artifacts=artifacts, lease=lease,
+                artifacts=artifacts, lease=lease, recovery_binding=recovery_binding,
             )
             return session_id
 
@@ -275,6 +335,8 @@ class SessionManager:
                 with ArchiveStore(paths.directory, create=False, read_only=True) as archive:
                     metadata = archive.metadata()
                     item.update(metadata)
+                    item["execution_run_ids"] = [run["run_id"] for run in item["unfinished_runs"]
+                                                 if run.get("current_execution_id")]
                     item["status"] = ("no_snapshot" if not item["current_snapshot_id"] else
                                       "recovery_required" if item["unfinished_runs"] else "ready")
             except (ArchiveError, StorageError) as error:
@@ -289,6 +351,7 @@ class SessionManager:
         tools: list[ToolDefinition] | None = None, execute_tool: ToolExecutor | None = None,
         artifact_store: ArtifactStore | None = None, recovery: RecoveryChoice | None = None,
         current_limits: dict | None = None,
+        recovery_binding: ToolRecoveryBinding | None = None,
     ) -> SessionOpened:
         """Validate and import the current published snapshot without executing a Run."""
         with self._lifecycle_lock:
@@ -333,7 +396,7 @@ class SessionManager:
             if configuration["binding"]["tools"] != metadata["tools"]:
                 raise ArchiveError("archive_integrity_error")
             dependencies = restore_tools(configuration["binding"], current_project_root=current_project_root,
-                                         tools=tools, execute_tool=execute_tool)
+                                         tools=tools, execute_tool=execute_tool, recovery_binding=recovery_binding)
             available_tools = validate_tools(dependencies["tools"], dependencies["execute_tool"])
             reserved = {tool["name"] for tool in ARTIFACT_TOOLS} | HISTORY_TOOL_NAMES
             if any(tool["name"] in reserved for tool in available_tools):
@@ -353,7 +416,7 @@ class SessionManager:
             session = _Session(settings, [*available_tools, *deepcopy(ARTIFACT_TOOLS)], executor,
                                artifacts=artifacts, last_checkpoint_id=checkpoint_id,
                                records={item["run_id"]: item["checkpoint_id"] for item in trusted_runs},
-                               snapshot_id=snapshot_id, lease=lease)
+                               snapshot_id=snapshot_id, lease=lease, recovery_binding=recovery_binding)
             with self._lifecycle_lock:
                 self._ensure_open()
                 self._sessions[conversation_id] = session
@@ -376,6 +439,273 @@ class SessionManager:
             finally:
                 with self._lifecycle_lock:
                     self._active_operations -= 1
+
+    @staticmethod
+    def _run_inspection(archive: ArchiveStore, run_id: str) -> RunInspection:
+        from lineage_agent.agent.recovery import validate_execution_state
+        lifecycle = archive.run_status(run_id)
+        if lifecycle is None:
+            raise SessionError("unknown_run")
+        status = lifecycle["status"]
+        if status != "started":
+            return RunInspection(archive.conversation_id, run_id,
+                                 "completed" if status == "published" else "abandoned", None, None)
+        try:
+            point = archive.read_execution(run_id)
+        except ArchiveError as error:
+            if error.code != "archive_no_execution":
+                raise
+            point = None
+        if point is None:
+            return RunInspection(archive.conversation_id, run_id, "unrecoverable", None, None,
+                                 warnings=("此轮次没有已确认执行恢复点。",))
+        validate_execution_state(point["state"], archive, point["view_id"])
+        reusable, uncertain, warnings = [], [], []
+        binding = archive.conversation()["configuration"]["binding"]
+        policies = (binding.get("recovery") or {}).get("tools", {})
+        native = {"artifact_read", "artifact_search", "history_read", "history_search"}
+        paused = False
+        for operation in archive.operations(run_id):
+            identity = operation["operation_id"]
+            attempts = archive.attempts(identity)
+            pending = [item["attempt_id"] for item in attempts if item["result"] is None]
+            uncertain.extend(pending)
+            if any(item["result"] is not None for item in attempts) or archive.operation_result(identity) is not None:
+                reusable.append(identity)
+                continue
+            if len(attempts) >= 2:
+                paused = True
+                warnings.append(f"操作 {identity} 已达到恢复尝试上限。")
+            if operation["kind"] == "tool":
+                payload = operation["payload"]
+                name = (payload.get("call") or payload).get("name")
+                if name not in native and policies.get(name) != "safe_repeat":
+                    paused = True
+                    warnings.append(f"操作 {identity} 缺少可安全重复执行的工具恢复声明。")
+        if binding["provider"] == "external" and not (binding.get("recovery") or {}).get("stateless", True):
+            paused = True
+            warnings.append("自定义执行器存在未支持恢复的内部状态，不能自动继续。")
+        settings = archive.conversation()["configuration"]["settings"]
+        quota = SessionManager._run_quota(archive, run_id, settings["max_model_calls"])
+        if uncertain:
+            warnings.append("存在已登记但结果未知的尝试；保留原额度占用，无法确认实际外部消耗。")
+        choice = RunRecoveryChoice(run_id, lifecycle["source_snapshot_id"], point["point_id"],
+                                   point["revision"], str(uuid4()))
+        return RunInspection(archive.conversation_id, run_id, "paused" if paused else "ready", point["phase"],
+                             choice, tuple(reusable), tuple(uncertain), quota, tuple(warnings))
+
+    @staticmethod
+    def _run_quota(archive, run_id, limit):
+        from lineage_agent.agent.execution import archived_usage
+        budget = archive.budget_projection(run_id)
+        return {**budget, "model_call_limit": limit,
+                "remaining_model_calls": max(0, limit - budget["charged"].get("model_calls", 0)),
+                "usage_totals": archived_usage(archive, run_id),
+                "summary_usage_totals": archived_usage(archive, run_id, summary=True)}
+
+    @staticmethod
+    def _resume_diagnostics(archive, run_id, limit, *, completed=False):
+        """Diagnostic reads cannot replace an already known execution outcome."""
+        values = {"phase": "sealed" if completed else None, "execution_point_id": None,
+                  "quota": {}, "uncertain_attempts": ()}
+        warnings = []
+        try:
+            if completed:
+                lifecycle = archive.run_status(run_id)
+                values["execution_point_id"] = lifecycle["current_execution_id"]
+            else:
+                point = archive.read_execution(run_id)
+                values.update(phase=point["phase"], execution_point_id=point["point_id"])
+        except Exception:
+            warnings.append("最新可信执行位置的诊断读取失败；未改变原执行结果。")
+        try:
+            quota = SessionManager._run_quota(archive, run_id, limit)
+            values.update(quota=quota, uncertain_attempts=tuple(quota["unknown_attempt_ids"]))
+            if values["uncertain_attempts"]:
+                warnings.append("仍有结果未知的历史尝试；保留额度占用，实际外部消耗未能确认。")
+        except Exception:
+            warnings.append("归档额度和消耗无法完整读取；未用零值代替未知信息。")
+        values["warnings"] = tuple(warnings)
+        return values
+
+    def inspect_run(self, conversation_id: str, run_id: str, *, application_root: Path) -> RunInspection:
+        """Inspect one exact registered Run without opening clients or executing nodes."""
+        with self._lifecycle_lock:
+            self._ensure_open()
+            if conversation_id in self._sessions:
+                raise SessionError("session_already_open")
+            self._active_operations += 1
+        lease = None
+        try:
+            paths = conversation_paths(application_root, conversation_id, create=False)
+            lease = ConversationLease.acquire(paths.directory, create=False)
+            with ArchiveStore(paths.directory, create=False, read_only=True) as archive:
+                return self._run_inspection(archive, run_id)
+        except StorageError as error:
+            raise SessionError("conversation_busy" if error.code == "conversation_busy" else "conversation_not_found") from None
+        except (ArchiveError, CheckpointError) as error:
+            raise SessionError(error.code if error.code in _SESSION_ERRORS else "archive_integrity_error") from None
+        except SessionError:
+            raise
+        except Exception:
+            raise SessionError("archive_integrity_error") from None
+        finally:
+            try:
+                if lease is not None:
+                    lease.close()
+            finally:
+                with self._lifecycle_lock:
+                    self._active_operations -= 1
+
+    async def open_run(
+        self, conversation_id: str, run_id: str, *, choice: RunRecoveryChoice, application_root: Path,
+        current_project_root: Path | None = None, log_dir: Path | None = None,
+        tools: list[ToolDefinition] | None = None, execute_tool: ToolExecutor | None = None,
+        artifact_store: ArtifactStore | None = None, current_limits: dict | None = None,
+        recovery_binding: ToolRecoveryBinding | None = None,
+    ) -> RunOpened:
+        """Rebuild an idle same-Run session; explicit resume_run starts execution."""
+        with self._lifecycle_lock:
+            self._ensure_open()
+            if conversation_id in self._sessions:
+                raise SessionError("session_already_open")
+            self._active_operations += 1
+        lease = archive = artifacts = None
+        bootstrapped = registered = False
+        try:
+            paths = conversation_paths(application_root, conversation_id, create=False)
+            lease = ConversationLease.acquire(paths.directory, create=False)
+            archive = ArchiveStore(paths.directory, create=False)
+            inspection = self._run_inspection(archive, run_id)
+            if inspection.choice is None:
+                code = {"completed": "run_completed", "abandoned": "run_abandoned"}.get(inspection.status, "no_execution_point")
+                raise SessionError(code)
+            expected = inspection.choice
+            if (type(choice) is not RunRecoveryChoice or choice.run_id != run_id
+                    or (choice.snapshot_id, choice.execution_point_id, choice.revision)
+                    != (expected.snapshot_id, expected.execution_point_id, expected.revision)):
+                raise SessionError("recovery_changed")
+            if archive.resume_choice(choice.choice_id) is not None:
+                raise SessionError("resume_choice_used")
+            point = archive.read_execution(run_id)
+            metadata = archive.conversation()
+            configuration = metadata["configuration"]
+            settings = restore_settings(configuration["settings"], application_root=application_root, log_dir=log_dir)
+            if configuration["binding"]["tools"] != metadata["tools"]:
+                raise ArchiveError("archive_integrity_error")
+            dependencies = restore_tools(configuration["binding"], current_project_root=current_project_root,
+                                         tools=tools, execute_tool=execute_tool, recovery_binding=recovery_binding)
+            available = validate_tools(dependencies["tools"], dependencies["execute_tool"])
+            if any(tool["name"] in {tool["name"] for tool in ARTIFACT_TOOLS} | HISTORY_TOOL_NAMES for tool in available):
+                raise ArchiveError("archive_integrity_error")
+            enhance_tools(available)
+            warnings = inspection.warnings + tuple(configuration_warnings(settings, configuration["binding"], current_limits=current_limits))
+            if artifact_store is None:
+                if self._owned_store is None:
+                    self._owned_store = ArtifactStore()
+                artifact_store = self._owned_store
+            artifacts = artifact_store.restore_session(conversation_id, archive=archive, view_id=point["view_id"], lease=lease)
+            checkpoint_id = await self._checkpointer.restore_state(conversation_id, point["state"], archive=archive,
+                                                                  artifacts=artifacts, execution=True)
+            bootstrapped = True
+            trusted_runs = archive.published_runs(choice.snapshot_id) if choice.snapshot_id else []
+            executor = ArtifactExecutor(artifacts, dependencies["execute_tool"])
+            session = _Session(settings, [*available, *deepcopy(ARTIFACT_TOOLS)], executor,
+                artifacts=artifacts, last_checkpoint_id=checkpoint_id,
+                records={item["run_id"]: item["checkpoint_id"] for item in trusted_runs},
+                snapshot_id=choice.snapshot_id, lease=lease, recovery_binding=recovery_binding,
+                pending_run=run_id, recovery_choice=choice, execution_state=deepcopy(point["state"]))
+            with self._lifecycle_lock:
+                self._ensure_open()
+                self._sessions[conversation_id] = session
+                registered = True
+            return RunOpened(conversation_id, run_id, point["point_id"], deepcopy(settings), choice, warnings)
+        except StorageError as error:
+            raise SessionError("conversation_busy" if error.code == "conversation_busy" else "conversation_not_found") from None
+        except (ArchiveError, CheckpointError) as error:
+            raise SessionError(error.code if error.code in _SESSION_ERRORS else "archive_integrity_error") from None
+        except (SessionError, ConfigurationError):
+            raise
+        except Exception:
+            raise SessionError("archive_integrity_error") from None
+        finally:
+            try:
+                if not registered:
+                    self._discard_failed_open(conversation_id, artifacts, archive, lease, bootstrapped=bootstrapped)
+            finally:
+                with self._lifecycle_lock:
+                    self._active_operations -= 1
+
+    async def resume_run(self, session_id: str, *, choice: RunRecoveryChoice) -> RunResumed:
+        from lineage_agent.agent.runtime import _resume_agent
+        from lineage_agent.agent.execution import ExecutionPaused
+        if type(choice) is not RunRecoveryChoice:
+            raise SessionError("recovery_changed")
+        key = (session_id, choice.choice_id)
+        with self._lifecycle_lock:
+            self._ensure_open()
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise SessionError("unknown_session")
+            if key in self._resume_results:
+                consumed, result = self._resume_results[key]
+                if choice != consumed:
+                    raise SessionError("recovery_changed")
+                return deepcopy(result)
+            if not session.lock.acquire(blocking=False):
+                raise SessionError("session_busy")
+            self._active_operations += 1
+        try:
+            if session.blocked:
+                raise SessionError("session_blocked")
+            if session.pending_run != choice.run_id or session.recovery_choice != choice:
+                raise SessionError("recovery_changed")
+            archive = self._checkpointer.archive(session_id)
+            if archive.resume_choice(choice.choice_id) is not None:
+                raise SessionError("resume_choice_used")
+            archive.accept_resume(choice.run_id, choice.execution_point_id, choice.revision, choice_id=choice.choice_id)
+            publication = {}
+            try:
+                state, checkpoint_id, error = await _resume_agent(
+                    deepcopy(session.execution_state), session.settings, tools=session.tools,
+                    execute_tool=session.execute_tool, session_id=session_id, checkpointer=self._checkpointer,
+                    checkpoint_id=session.last_checkpoint_id, artifacts=session.artifacts,
+                    source_snapshot_id=session.snapshot_id, publication=publication,
+                    **({"recovery_binding": session.recovery_binding} if session.recovery_binding is not None else {}))
+            except ExecutionPaused as pause:
+                session.blocked = True
+                result = RunResumed(session_id, choice.run_id, "paused", reason=pause.code,
+                    **self._resume_diagnostics(archive, choice.run_id, session.settings.max_model_calls))
+            except BaseException:
+                session.blocked = True
+                if publication.get("snapshot_status") == "published":
+                    session.snapshot_id = publication["snapshot_id"]
+                    session.last_checkpoint_id = publication["checkpoint_id"]
+                    session.records[choice.run_id] = publication["checkpoint_id"]
+                    session.pending_run = None
+                raise
+            else:
+                complete = checkpoint_id is not None and error is None and publication.get("snapshot_status") == "published"
+                session.blocked = not complete
+                if complete:
+                    session.last_checkpoint_id = checkpoint_id
+                    session.snapshot_id = publication["snapshot_id"]
+                    session.records[choice.run_id] = checkpoint_id
+                    session.pending_run = None
+                    session.execution_state = session.recovery_choice = None
+                turn = SessionTurn(session_id, deepcopy(state), checkpoint_id, complete, error,
+                                   publication.get("snapshot_id"), publication.get("snapshot_status", "not_published"))
+                result = RunResumed(session_id, choice.run_id, "completed" if complete else "blocked", turn, error,
+                    **self._resume_diagnostics(archive, choice.run_id, session.settings.max_model_calls, completed=complete))
+            self._resume_results[key] = (deepcopy(choice), deepcopy(result))
+            return result
+        except ArchiveError as error:
+            session.blocked = True
+            raise SessionError(error.code if error.code in _SESSION_ERRORS else "archive_integrity_error") from None
+        finally:
+            with self._lifecycle_lock:
+                session.lock.release()
+                self._active_operations -= 1
 
     def artifacts(self, session_id: str) -> SessionArtifacts:
         """Expose trusted storage access for this manager's enabled session."""
@@ -400,6 +730,8 @@ class SessionManager:
         try:
             if session.blocked:
                 raise SessionError("session_blocked")
+            if session.pending_run is not None:
+                raise SessionError("pending_run")
             # Bad caller input has not touched the history and need not block it.
             new_input = normalize_input(input)
             publication = {}
@@ -411,6 +743,7 @@ class SessionManager:
                     checkpoint_id=session.last_checkpoint_id,
                     artifacts=session.artifacts,
                     source_snapshot_id=session.snapshot_id, publication=publication,
+                    **({"recovery_binding": session.recovery_binding} if session.recovery_binding is not None else {}),
                 )
             except PreExecutionConfigurationError:
                 # This signal is produced only before entering the client or

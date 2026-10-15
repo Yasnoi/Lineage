@@ -1,6 +1,8 @@
 """Call an OpenAI-compatible Responses endpoint without graph dependencies."""
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +15,18 @@ from lineage_agent.models.types import ModelInput, ModelResult, TokenUsage, Tool
 
 if TYPE_CHECKING:
     from lineage_agent.recording.tracing import RunTrace
+
+_response_sink = ContextVar("lineage_response_sink", default=None)
+
+
+@contextmanager
+def capture_complete_response(sink):
+    """Persist the exact complete SDK response before application parsing."""
+    token = _response_sink.set(sink)
+    try:
+        yield
+    finally:
+        _response_sink.reset(token)
 
 
 MODEL_ERRORS = {
@@ -139,7 +153,11 @@ async def _request_response(
     """Make one non-streaming request and preserve its full response body."""
     try:
         response = await client.responses.create(**request)
-        return parse_response(response)
+        raw = (deepcopy(response) if isinstance(response, dict) else
+               response.model_dump(mode="json", by_alias=True, exclude_unset=True))
+        if sink := _response_sink.get():
+            sink(raw)
+        return parse_response(raw)
     except APITimeoutError as exc:
         raise ModelError(code="model_timeout") from exc
     except APIConnectionError as exc:

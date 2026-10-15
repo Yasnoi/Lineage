@@ -217,10 +217,14 @@ async def check_checkpoint_write_failures():
         assert len(outputs(result.state)) == tool_calls
         skipped = [event for event in read_events(result.state) if event["event"] == "tool.skipped"]
         if scenario in {"model_checkpoint", "model_pending"}:
-            assert result.state["tool_requests"] == result.state["tool_outcomes"]["skipped"] == 1
-            assert len(skipped) == 1 and skipped[0]["reason"] == "checkpoint_error"
-            assert skipped[0]["step_id"] == "step-0001" and skipped[0]["call_id"] == "before_fault"
-            assert skipped[0]["request_index"] == 1 and skipped[0]["node"] == "model"
+            assert result.state["tool_requests"] == 1 and result.state["tool_outcomes"]["skipped"] == 0
+            assert not skipped, "pending recoverable tools are not terminal skipped results"
+            archive = manager._checkpointer.archive(sid)
+            point = archive.read_execution(result.state["run_id"])
+            assert point["phase"] == "response_saved"
+            attempts = archive.attempts(point["state"]["execution"]["operation_id"])
+            assert len(attempts) == 1 and attempts[0]["result"]["raw_response"]["output"][0]["call_id"] == "before_fault"
+            assert not any(operation["kind"] == "tool" for operation in archive.operations(result.state["run_id"]))
             assert not outputs(result.state)
         else:
             assert result.state["tool_outcomes"]["skipped"] == 0 and not skipped
@@ -236,7 +240,7 @@ async def check_checkpoint_and_skipped_log_failure():
     client = LocalClient([response(call("skip_when_checkpoint_failed")), response(message("must not run"))])
     predicate = lambda cp, meta, *_: meta["source"] == "loop" and cp["channel_values"].get("model_calls") == 1
     with checkpoint_fault(manager, "put", predicate) as checkpoint_observations:
-        with recording_failure("tool.skipped") as log_observations:
+        with recording_failure("run.checkpoint_failed") as log_observations:
             with patch.object(runtime, "create_client", return_value=client):
                 result = await manager.run_turn(sid, "checkpoint failure and log failure")
                 observe_turn(result)
@@ -247,13 +251,17 @@ async def check_checkpoint_and_skipped_log_failure():
     assert result.state["stop_reason"] == "error" and result.state["error_code"] == "logging_error"
     assert result.state["log_complete"] is False
     assert result.state["tool_calls"] == 0 and result.state["tool_requests"] == 1
-    assert result.state["tool_outcomes"] == {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 1}
+    assert result.state["tool_outcomes"] == {"succeeded": 0, "rejected": 0, "failed": 0, "skipped": 0}
     assert result.state["usage_totals"]["total_tokens"] == 12 and not outputs(result.state)
     attempted = log_observations[0]
-    assert attempted["event"] == "tool.skipped" and attempted["step_id"] == "step-0001"
-    assert attempted["call_id"] == "skip_when_checkpoint_failed"
+    assert attempted["event"] == "run.checkpoint_failed" and attempted["error_code"] == "checkpoint_write_error"
     assert attempted["persistence"] == "not_written"
     assert not any(event["event"] == "tool.skipped" for event in read_events(result.state))
+    archive = manager._checkpointer.archive(sid)
+    point = archive.read_execution(result.state["run_id"])
+    assert point["phase"] == "response_saved"
+    attempts = archive.attempts(point["state"]["execution"]["operation_id"])
+    assert len(attempts) == 1 and attempts[0]["result"]["raw_response"]["output"][0]["call_id"] == "skip_when_checkpoint_failed"
     await rejected(manager, sid, "must not execute", "session_blocked")
 
 async def check_checkpoint_read_failure():

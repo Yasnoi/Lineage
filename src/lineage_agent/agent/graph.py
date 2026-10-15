@@ -68,6 +68,7 @@ def build_graph(
     observation_manager: "ObservationManager | None",
     observation_hint_tools: frozenset[str] = frozenset(),
     native_recall_tools: frozenset[str] = frozenset(),
+    execution=None,
 ) -> CompiledStateGraph:
     """Keep protocol parsing in models and execute each tool batch serially."""
     if type(max_model_calls) is not int or max_model_calls <= 0:
@@ -82,7 +83,9 @@ def build_graph(
         if new_model or node == "tools":
             active = deepcopy(state["active_context"])
             model_call = update.get("model_calls", state["model_calls"])
-            group_id = f"{state['run_id']}:{model_call}"
+            group_id = (state.get("execution", {}).get("operation_id") if execution else None) or f"{state['run_id']}:{model_call}"
+            if node == "tools" and active["groups"]:
+                group_id = active["groups"][-1]["group_id"]
             batch = make_record_batch(state["run_id"], state["record_sequence"], appended,
                                       group_id=group_id, kind="model" if new_model else "tool",
                                       call_facts=update.get("new_call_facts", []))
@@ -131,6 +134,24 @@ def build_graph(
         if context_records is not None:
             prospective = {**state, **update}
             update["resource_view_id"] = context_records.saver.prepare_state(context_records.session_id, prospective)
+            if execution is not None:
+                if "execution" not in update:
+                    phase = ("finalizing" if prospective.get("stop_reason") else
+                             "prepare_compaction" if node == "model" and (prospective.get("compaction") or {}).get("status") == "preparing" else
+                             "tools_prepare" if node == "model" else
+                             "model" if node in {"tools", "activate_context"} else
+                             "summarize_history" if node == "prepare_compaction" else
+                             "summarize_current" if node == "summarize_H" else
+                             "validate_candidate" if node == "summarize_R" else
+                             "prepare_compaction" if node == "validate_candidate" and (prospective.get("compaction") or {}).get("status") == "retry_pending" else
+                             "activate_context")
+                    update["execution"] = {"phase": phase}
+                prospective = {**state, **update}
+                values = update.get("input", [])
+                prospective["input"] = values.value if isinstance(values, Overwrite) else state["input"] + values
+                update["execution"] = context_records.saver.prepare_execution(
+                    context_records.session_id, prospective, update["execution"]["phase"])
+                observe()
         return update
 
     def emit(event: str, step_id: str | None, node: str, **details: Any) -> bool:
@@ -139,6 +160,7 @@ def build_graph(
         )
 
     async def model_node(state: AgentState) -> dict[str, Any]:
+        replaying = execution is not None and state.get("execution", {}).get("phase") == "response_saved"
         step_id = recorder.next_step() if recorder is not None else None
         if tracer is not None:
             tracer.bind_active_context(state["active_context"])
@@ -163,7 +185,7 @@ def build_graph(
                         version_id=state["active_context"]["version_id"], checkpoint_id=checkpoint_id):
                 return finish(state, {"compaction": compaction, "stop_reason": "error",
                                      "error_code": "logging_error", "error": LOG_FAILURE_MESSAGE}, "model", step_id)
-        if state["model_calls"] >= max_model_calls:
+        if state["model_calls"] >= max_model_calls and not replaying:
             return finish(state, {"stop_reason": "max_model_calls", "error": None, "error_code": None}, "model", step_id)
         remaining = max_model_calls - state["model_calls"]
         budget_error = None
@@ -172,7 +194,10 @@ def build_graph(
             nonlocal budget_error
             budget_error = "read_budget_unavailable"
 
-        budget = read_budget_snapshot(execute_tool, on_unavailable=budget_unavailable)
+        # Durable preparation/replay does not execute the request. Observe the
+        # executor only at dispatch so tracing and JSONL share that observation.
+        budget = (read_budget_snapshot(execute_tool, on_unavailable=budget_unavailable)
+                  if execution is None else None)
         allowances = {
             "remaining_model_calls": remaining, "final_answer_call": remaining == 1,
             "read_budget": budget, "read_budget_error": budget_error,
@@ -183,21 +208,28 @@ def build_graph(
             "instructions": FINAL_ANSWER_INSTRUCTIONS if remaining == 1 else None,
             "tool_choice": "none" if remaining == 1 else None,
         }
-        try:
-            request = prepare_model_request(state["input"], **request_options)
-            context_budget = check_context_budget(
-                request, state["context_risks"], settings, step_id=step_id,
-            )
-        except Exception:
-            context_budget = budget_measurement_error(settings, step_id=step_id)
+        if replaying:
+            # This exact request already passed admission before dispatch. Its
+            # saved response must not trigger another mutable budget decision.
+            request = execution.request(state)["payload"]["request"]
+            context_budget = deepcopy(state["context_budget"])
+        else:
+            try:
+                request = prepare_model_request(state["input"], **request_options)
+                context_budget = check_context_budget(
+                    request, state["context_risks"], settings, step_id=step_id,
+                )
+            except Exception:
+                context_budget = budget_measurement_error(settings, step_id=step_id)
         if tracer is not None:
-            tracer.observe_read_budget("model", budget_error)
+            if execution is None:
+                tracer.observe_read_budget("model", budget_error)
             tracer.observe_context_budget(context_budget)
         candidate_result_ids = [
             item["call_id"] for item in state["input"]
             if item.get("type") == "function_call_output"
         ]
-        checked = emit(
+        checked = replaying or emit(
             "context_budget.checked", step_id, "model",
             **{key: value for key, value in context_budget.items() if key != "step_id"},
             model_call_candidate=state["model_calls"] + 1,
@@ -234,7 +266,10 @@ def build_graph(
                     "无法完成请求预算计量，本次模型请求未发送。"
                 ),
             }, "model", step_id)
-        if not emit(
+        if execution is not None and not replaying:
+            return finish(state, {"context_budget": context_budget, "compaction": compaction,
+                "execution": execution.prepare_request(state, request)}, "request_ready", step_id)
+        if not replaying and not emit(
             "model.started", step_id, "model",
             model_call=state["model_calls"] + 1,
             active_version_id=state["active_context"]["version_id"],
@@ -254,9 +289,12 @@ def build_graph(
             compaction["status"] = "used"
         if tracer is not None:
             tracer.observe_context_budget(context_budget)
-            tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
+            if not replaying:
+                tracer.set_model_step(step_id, state["model_calls"] + 1, **allowances)
         try:
-            result = await call_model(request)
+            result = execution.model_result(state) if replaying else await call_model(request)
+        except CheckpointError:
+            raise
         except ModelError as exc:
             result = exc.result
             failure = (exc.code, exc.stage)
@@ -265,7 +303,8 @@ def build_graph(
             result = None
             failure = ("model_error", "model_request")
 
-        model_calls = state["model_calls"] + 1
+        attempt_count = execution.attempt_count(state) if replaying else 1
+        model_calls = state["model_calls"] + attempt_count
         output_items = result["output_items"] if result is not None else []
         raw_items = result["raw_response"].get("output", []) if result is not None else []
         requests = [
@@ -294,9 +333,14 @@ def build_graph(
             "error": None,
             "error_code": None,
         }
+        for _ in range(attempt_count - 1):
+            update["usage_totals"] = _accumulate_usage(update["usage_totals"], None)
+        if execution is not None:
+            update["attempt_counts"] = execution.counts()
         if result is not None:
             emit(
                 "model.returned", step_id, "model", model_call=model_calls,
+                **({"operation_id": state["execution"]["operation_id"]} if execution is not None else {}),
                 text_summary=summarize_value(result["text"]),
                 output_item_count=len(output_items), tool_request_count=len(requests),
                 tool_requests=[
@@ -331,7 +375,8 @@ def build_graph(
 
         if failure is not None:
             code, explanation, stage = safe_model_error(failure[0])
-            emit("model.failed", step_id, "model", error_code=code, stage=stage)
+            emit("model.failed", step_id, "model", error_code=code, stage=stage, model_call=model_calls,
+                 **({"operation_id": state["execution"]["operation_id"]} if execution is not None else {}))
             update.update(
                 stop_reason="error",
                 error=explanation, error_code=code,
@@ -392,7 +437,7 @@ def build_graph(
         assert result is not None
         interrupted = None
         try:
-            batch = await execute_calls(
+            batch = execution.tool_batch(state, recorder=recorder, tracer=tracer, step_id=step_id) if execution is not None else await execute_calls(
                 result["tool_calls"], available_tools, execute_tool,
                 recorder=recorder, step_id=step_id, tracer=tracer,
                 observation_manager=observation_manager,
@@ -439,7 +484,9 @@ def build_graph(
             return END
         if (state["compaction"] or {}).get("status") == "preparing":
             return "prepare_compaction"
-        return "tools"
+        if execution is not None and state.get("execution", {}).get("phase") == "request_ready":
+            return "send_request"
+        return "tools_prepare" if execution is not None else "tools"
 
     def after_tools(state: AgentState) -> str:
         return END if state["stop_reason"] is not None else "model"
@@ -452,17 +499,159 @@ def build_graph(
         prepare_model_request=prepare_model_request, recorder=recorder, tracer=tracer,
         finish=finish, accumulate_usage=_accumulate_usage,
         validate_input=validate_input or (lambda items: None),
+        execution=execution,
     )
     for name, node in nodes.items():
         builder.add_node(name, node)
-    builder.add_edge(START, "model")
+    async def send_request(state):
+        step_id = recorder.next_step() if recorder is not None else None
+
+        def before_send(operation):
+            kind = operation["kind"]
+            counts = execution.counts()
+            if kind == "summary":
+                metadata = operation["payload"]["metadata"]
+                lane = metadata["lane"]
+                selected = metadata["lanes"][lane]
+                logged = emit("summary.started", step_id, "summarize_" + lane,
+                    lane=lane, summary_call=counts["summary"] + 1,
+                    summary_id=selected["summary_id"], request_no=metadata["request_no"],
+                    attempt_no=metadata["attempt_no"], operation_id=operation["operation_id"])
+            else:
+                budget_error = None
+
+                def unavailable():
+                    nonlocal budget_error
+                    budget_error = "read_budget_unavailable"
+
+                budget = read_budget_snapshot(execute_tool, on_unavailable=unavailable)
+                remaining = max_model_calls - counts["model"]
+                request = operation["payload"]["request"]
+                allowances = {"remaining_model_calls": remaining,
+                              "final_answer_call": (request.get("tool_choice") == "none"
+                                                    and request.get("instructions") == FINAL_ANSWER_INSTRUCTIONS),
+                              "read_budget": budget, "read_budget_error": budget_error}
+                logged = emit("model.started", step_id, "model",
+                    model_call=counts["model"] + 1,
+                    budget_step_id=(state.get("context_budget") or {}).get("step_id"),
+                    active_version_id=state["active_context"]["version_id"], **allowances,
+                    input_item_count=len(request["input"]),
+                    input_tool_result_call_ids=[item["call_id"] for item in request["input"]
+                        if item.get("type") == "function_call_output"],
+                    operation_id=operation["operation_id"])
+                if logged and tracer is not None:
+                    tracer.bind_active_context(state["active_context"])
+                    tracer.observe_read_budget("model", budget_error)
+                    context_budget = deepcopy(state["context_budget"])
+                    if context_budget is not None:
+                        context_budget["request_sent"] = True
+                        tracer.observe_context_budget(context_budget)
+                    tracer.set_model_step(step_id, counts["model"] + 1, **allowances)
+            if not logged:
+                return {"stop_reason": "error", "error_code": "logging_error", "error": LOG_FAILURE_MESSAGE,
+                        "execution": {"phase": "finalizing"}}
+            return None
+
+        async def traced_summary(request, metadata):
+            # The persisted operation uses stable diagnostics; this span belongs
+            # to this process's actual send and must use its local logging step.
+            lane = metadata["lane"]
+            return await call_summary(request, {**metadata, "step_id": step_id,
+                "summary_call": execution.counts()["summary"], "summary_lane": lane,
+                "summary_id": metadata["lanes"][lane]["summary_id"]})
+
+        try:
+            update = await execution.send_request(state, call_model, traced_summary, before_send=before_send)
+        except Exception as exc:
+            if hasattr(exc, "code"):
+                raise CheckpointError(exc.code) from None
+            raise
+        return finish(state, update, "send_request", step_id)
+
+    async def tools_prepare(state):
+        return finish(state, {"execution": execution.plan_tools(state)}, "tools_prepare", None)
+
+    async def tool_step(state):
+        step_id = recorder.next_step() if recorder else None
+        if tracer is not None:
+            tracer.bind_active_context(state["active_context"])
+            # Rebuilding this association does not create a model request span.
+            tracer.set_model_step(step_id, state["model_calls"])
+        try:
+            update = await execution.tool_step(state, available_tools=available_tools, recorder=recorder,
+                step_id=step_id, tracer=tracer,
+                observation_manager=observation_manager, observation_hint_tools=observation_hint_tools,
+                native_recall_tools=native_recall_tools)
+        except Exception as exc:
+            if fact := getattr(exc, "execution_fact", None):
+                observed = deepcopy(state)
+                attempted = 1
+                try:
+                    progress = state["execution"]
+                    plan = execution.archive.operation(progress["operation_id"])["payload"]
+                    prior = [execution.archive.operation_result(identity)
+                             for identity in plan["operation_ids"][:progress["tool_index"]]]
+                    attempted = len(execution.archive.attempts(plan["operation_ids"][progress["tool_index"]]))
+                    for processed in prior:
+                        if processed is not None:
+                            observed["tool_calls"] += processed["tool_calls"]
+                            observed["execution_facts"].extend(deepcopy(processed["call_facts"]))
+                            for outcome, count in processed["tool_outcomes"].items():
+                                observed["tool_outcomes"][outcome] += count
+                except Exception:
+                    # An unavailable archive cannot replace the primary save
+                    # error; the observer still retains this witnessed outcome.
+                    pass
+                observed["tool_calls"] += attempted
+                observed["tool_outcomes"][fact["outcome"]] += 1
+                observed["execution_facts"].append(fact)
+                if observe_state is not None:
+                    observe_state(observed, "tool_step", None)
+                try:
+                    execution.archive.append_event(state["run_id"], "execution_facts", {"facts": [fact]},
+                                                   key="observed:" + exc.attempt_id)
+                except Exception:
+                    pass  # Preserve the primary persistence failure and in-memory fact.
+            if getattr(exc, "code", "").startswith(("archive_", "artifact_", "record_", "checkpoint_")):
+                raise CheckpointError(exc.code) from None
+            raise
+        return finish(state, update, "tool_step", None)
+
+    def dispatch(state):
+        phase = state.get("execution", {}).get("phase", "model")
+        if state.get("stop_reason") or phase == "finalizing":
+            return END
+        if phase == "request_ready":
+            return "send_request"
+        if phase == "response_saved":
+            return state["execution"].get("return_node", "model")
+        if phase in {"tool_plan_ready", "tool_result_saved"}:
+            return "tool_step"
+        if phase == "group_ready":
+            return "tools"
+        return "model" if phase == "run_ready" else phase
+
+    if execution is not None:
+        builder.add_node("send_request", send_request)
+        builder.add_node("tools_prepare", tools_prepare)
+        builder.add_node("tool_step", tool_step)
+        builder.add_node("entry_dispatch", lambda state: {})
+        builder.add_node("restore_idle", lambda state: {})
+        builder.add_edge("restore_idle", END)
+        builder.add_edge(START, "entry_dispatch")
+        builder.add_conditional_edges("entry_dispatch", dispatch)
+        for name in ("send_request", "tools_prepare", "tool_step"):
+            builder.add_conditional_edges(name, dispatch)
+    else:
+        builder.add_edge(START, "model")
     builder.add_conditional_edges("model", after_model)
     builder.add_conditional_edges("tools", after_tools)
     for source, target in (("prepare_compaction", "summarize_history"),
                            ("summarize_history", "summarize_current"),
                            ("summarize_current", "validate_candidate"),
                            ("activate_context", "model")):
-        builder.add_conditional_edges(source, lambda state, target=target: END if state["stop_reason"] else target)
+        builder.add_conditional_edges(source, lambda state, target=target: END if state["stop_reason"] else
+            "send_request" if execution is not None and state.get("execution", {}).get("phase") == "request_ready" else target)
     builder.add_conditional_edges("validate_candidate", lambda state: END if state["stop_reason"] else
                                   "prepare_compaction" if state["compaction"]["status"] == "retry_pending" else "activate_context")
     return builder.compile(checkpointer=checkpointer)

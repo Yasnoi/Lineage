@@ -319,7 +319,10 @@ async def check_every_call_and_usage():
     assert len(client.requests) == len(checked) == 3
     assert state["usage_totals"] == {"input_tokens": 40, "output_tokens": 5, "total_tokens": 35, "missing_usage_calls": 2}
     assert [request["input"][-1].get("call_id") for request in client.requests[1:]] == ["one", "two"]
-    assert [item["diagnostic"]["step_id"] for item in checked] == ["step-0001", "step-0003", "step-0005"]
+    steps = [item["diagnostic"]["step_id"] for item in checked]
+    assert len(set(steps)) == 3
+    assert [event["budget_step_id"] for event in read_events(state)
+            if event["event"] == "model.started"] == steps
 
 async def check_measurement_failure():
     invalid = [float("nan"), float("inf"), object()]
@@ -428,7 +431,7 @@ async def check_budget_recording_failures():
     class FailSecondBudget(FaultyFile):
         def write(self, value):
             event = json.loads(value)
-            if event["event"] == "context_budget.checked" and event.get("step_id") == "step-0003":
+            if event["event"] == "context_budget.checked" and event.get("model_call_candidate") == 2:
                 self.event_name = "context_budget.checked"
             return super().write(value)
     def open_file(recorder):

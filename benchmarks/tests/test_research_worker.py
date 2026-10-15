@@ -476,13 +476,24 @@ class ResearchWorkerTests(unittest.TestCase):
         if current_profile:
             self.assertEqual(pressure["max_padding_bytes"], 32768)
             self.assertFalse(pressure["capped"])
+        args = list(coverage_spy.call_args.args)
+        original_record = deepcopy(args[-1])
+        for field, value in (("text", "foreign"), ("output_items", []),
+                             ("raw_response", {"status": "completed", "output": []})):
+            with self.subTest(corrupted_response=field):
+                args[-1] = deepcopy(original_record)
+                args[-1]["summary_results"][0]["result"][field] = value
+                coverage = original_coverage(*args)
+                self.assertEqual(next(item for item in coverage if item["name"] == "summary_saved_and_activated")["status"], "gap")
+        args[-1] = deepcopy(original_record)
+        args[-1]["summary_results"][0]["operation_id"] = "foreign"
+        coverage = original_coverage(*args)
+        self.assertEqual(next(item for item in coverage if item["name"] == "summary_saved_and_activated")["status"], "gap")
         if second_pass:
             self.assertEqual(len(summaries[1]["input"]), 1)
             self.assertIn("<candidate_summary lane=\"H\">\n" + "x" * 20000 + "\n</candidate_summary>",
                           summaries[1]["input"][0]["content"])
             self.assertNotIn("signature fact", json.dumps(summaries[1]["input"]))
-            args = list(coverage_spy.call_args.args)
-            original_record = deepcopy(args[-1])
             for field, value in (("summary_request_sha256", "foreign"), ("candidate_input", {"summary_id": "wrong", "checkpoint_id": "wrong"}), ("body", "foreign")):
                 with self.subTest(corrupted_binding=field):
                     args[-1] = deepcopy(original_record)

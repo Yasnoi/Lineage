@@ -34,9 +34,11 @@ _ERRORS = {
     "archive_publication_conflict": "对话恢复点或未完成轮次已经变化，本次操作未发布。",
     "archive_no_snapshot": "该会话尚无已发布的恢复点。",
     "archive_unregistered": "该归档尚未登记为可恢复会话。",
+    "archive_no_execution": "该轮次尚无已确认的执行恢复点。",
+    "archive_attempt_limit": "该操作的执行尝试额度已耗尽，不能再次派发。",
 }
-FORMAT_VERSION = 2
-RECOVERY_VERSION = 1
+FORMAT_VERSION = 3
+RECOVERY_VERSION = 2
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SCOPE = re.compile(r"history://scope/[0-9a-f-]{36}\Z")
 _SOURCE = re.compile(r"history://record/([A-Za-z0-9_-]{1,128})/(0|[1-9][0-9]*)\Z")
@@ -64,8 +66,22 @@ CREATE TABLE snapshots (id TEXT PRIMARY KEY REFERENCES runs(id), sequence INTEGE
 CREATE TABLE run_lifecycle (run_id TEXT PRIMARY KEY, source_snapshot_id TEXT REFERENCES snapshots(id),
                             status TEXT NOT NULL CHECK(status IN ('started','published','abandoned','rejected')),
                             started_at TEXT NOT NULL, completed_at TEXT, snapshot_id TEXT REFERENCES snapshots(id),
-                            choice_id TEXT);
+                            choice_id TEXT, current_execution_id TEXT,
+                            revision INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE recovery_choices (id TEXT PRIMARY KEY, payload BLOB NOT NULL, sha256 TEXT NOT NULL);
+CREATE TABLE execution_points (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES run_lifecycle(run_id),
+                              sequence INTEGER NOT NULL, parent_id TEXT REFERENCES execution_points(id),
+                              view_id TEXT NOT NULL REFERENCES views(id), payload BLOB NOT NULL, sha256 TEXT NOT NULL,
+                              confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0,1)), checkpoint_id TEXT);
+CREATE UNIQUE INDEX confirmed_execution_sequence ON execution_points(run_id,sequence) WHERE confirmed=1;
+CREATE TABLE operations (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES run_lifecycle(run_id),
+                         sequence INTEGER NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, sha256 TEXT NOT NULL,
+                         UNIQUE(run_id,sequence));
+CREATE TABLE attempts (id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES operations(id),
+                       sequence INTEGER NOT NULL, payload BLOB NOT NULL, sha256 TEXT NOT NULL,
+                       result BLOB, result_sha256 TEXT, UNIQUE(operation_id,sequence));
+CREATE TABLE operation_results (operation_id TEXT NOT NULL REFERENCES operations(id), slot TEXT NOT NULL,
+                               payload BLOB NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(operation_id,slot));
 """
 
 
@@ -115,7 +131,10 @@ def _covers(ranges: list[dict[str, Any]], interval: dict[str, Any]) -> bool:
     return False
 
 
-class ArchiveStore:
+from lineage_agent.archive.execution import ExecutionArchiveMixin
+
+
+class ArchiveStore(ExecutionArchiveMixin):
     """Trusted conversation-directory binding; no directory discovery or import."""
 
     def __init__(self, directory: Path, *, create: bool = True, read_only: bool = False) -> None:
@@ -123,7 +142,11 @@ class ArchiveStore:
         self._closed = False
         self._operation_depth = 0
         self._validated_files: set[tuple[str, bytes]] = set()
+        self._validated_file_data: dict[tuple[str, bytes], bytes] = {}
         self._validated_artifacts: set[bytes] = set()
+        self._validated_views: dict[tuple[str, bool], dict] = {}
+        self._validated_scopes: set[bytes] = set()
+        self._validated_summaries: set[bytes] = set()
         self._connection: sqlite3.Connection | None = None
         self.read_only = read_only
         try:
@@ -181,7 +204,11 @@ class ArchiveStore:
             outermost = self._operation_depth == 0
             if outermost:
                 self._validated_files.clear()
+                self._validated_file_data.clear()
                 self._validated_artifacts.clear()
+                self._validated_views.clear()
+                self._validated_scopes.clear()
+                self._validated_summaries.clear()
             self._operation_depth += 1
             try:
                 if self._closed or self._connection is None:
@@ -213,7 +240,11 @@ class ArchiveStore:
                     # Deduplicate only within this operation. A later read must
                     # re-open the body even if all registration metadata agrees.
                     self._validated_files.clear()
+                    self._validated_file_data.clear()
                     self._validated_artifacts.clear()
+                    self._validated_views.clear()
+                    self._validated_scopes.clear()
+                    self._validated_summaries.clear()
 
     def _commit(self) -> None:
         """One commit boundary, also usable for failure-injection tests."""
@@ -251,24 +282,57 @@ class ArchiveStore:
         _check(type(files) is dict)
         if not files:
             return
+        pending = []
+        for run_id, watermark in files.items():
+            storage_identifier(run_id)
+            if paths is not None:
+                _check(paths.get(run_id) == f"history/{run_id}.jsonl")
+            identity = (run_id, encode_record(watermark))
+            if identity not in self._validated_files:
+                pending.append((run_id, watermark, identity))
+        if not pending:
+            return
         _check(stat.S_ISDIR(_check_components(self.directory / "history").st_mode))
         journal = RecordJournal(self.directory / "history", create=False)
         try:
-            for run_id, watermark in files.items():
-                storage_identifier(run_id)
-                expected = f"history/{run_id}.jsonl"
-                if paths is not None:
-                    _check(paths.get(run_id) == expected)
-                identity = (run_id, encode_record(watermark))
-                if identity in self._validated_files:
-                    continue
-                self._path(expected)
-                journal.verify(run_id, watermark)
+            for run_id, watermark, identity in pending:
+                for path in journal.paths(run_id, watermark):
+                    self._path(path.relative_to(self.directory).as_posix())
+                data, _ = journal._index(run_id, watermark)
                 self._validated_files.add(identity)
+                self._validated_file_data[identity] = data
         finally:
             journal.close()
 
+    def _file_extension(self, run_id: str, previous: dict, current: dict) -> None:
+        """Compare two freshly verified registrations without rereading bodies.
+
+        Identical segment paths mean their verified byte prefixes are the same
+        physical prefix. All preceding segments remain frozen; only the last
+        old segment may grow. Validation is deduplicated solely in this call.
+        """
+        self._files({run_id: previous})
+        self._files({run_id: current})
+
+        def segments(watermark):
+            return watermark.get("segments", [{"path": f"history/{run_id}.jsonl", "start_sequence": 0,
+                **{key: watermark[key] for key in ("record_count", "byte_end", "prefix_sha256")}}])
+
+        before, after = segments(previous), segments(current)
+        _check(len(before) <= len(after) and previous["record_count"] <= current["record_count"]
+               and previous["byte_end"] <= current["byte_end"])
+        _check(self._validated_file_data[run_id, encode_record(current)].startswith(
+            self._validated_file_data[run_id, encode_record(previous)]))
+        for index, old in enumerate(before):
+            new = after[index]
+            _check(old["path"] == new["path"] and old["start_sequence"] == new["start_sequence"]
+                   and old["record_count"] <= new["record_count"] and old["byte_end"] <= new["byte_end"]
+                   and (index == len(before) - 1 or old == new))
+
     def _scope(self, record: dict[str, Any]) -> None:
+        identity = encode_record(record)
+        if identity in self._validated_scopes:
+            return
         _check(type(record) is dict and type(record.get("history_ref")) is str
                and _SCOPE.fullmatch(record["history_ref"]) is not None)
         files, ranges = record.get("record_files"), record.get("ranges")
@@ -281,8 +345,12 @@ class ArchiveStore:
             _check(type(start) is int and type(end) is int and 0 <= start < end <= files[run_id]["record_count"])
             _check(all(end <= before or start >= after for before, after in intervals.get(run_id, [])))
             intervals.setdefault(run_id, []).append((start, end))
+        self._validated_scopes.add(identity)
 
     def _summary(self, record: dict[str, Any]) -> None:
+        identity = encode_record(record)
+        if identity in self._validated_summaries:
+            return
         _check(type(record) is dict and type(record.get("summary_id")) is str and bool(record["summary_id"])
                and record.get("lane") in ("H", "R") and type(record.get("body")) is str and bool(record["body"].strip()))
         storage_identifier(record["summary_id"])
@@ -316,6 +384,7 @@ class ArchiveStore:
             _check(match is not None)
             _check(any(bounds["run_id"] == match[1] and bounds["start"] <= int(match[2]) < bounds["end"]
                        for bounds in scope["ranges"]))
+        self._validated_summaries.add(encode_record(record))
 
     def _artifact(self, record: dict[str, Any]) -> None:
         identity = encode_record(record)
@@ -332,8 +401,8 @@ class ArchiveStore:
                and metadata["raw_bytes"] == len(data) and type(metadata.get("tool_name")) is str
                and bool(metadata["tool_name"]))
         # Import only while validating: ArtifactStore itself consumes ArchiveStore.
-        from lineage_agent.artifacts.store import tool_result_view
-        text, kind, reason = tool_result_view(data.decode("utf-8"), metadata["tool_name"])
+        from lineage_agent.artifacts.store import decode_artifact_raw, tool_result_view
+        text, kind, reason = tool_result_view(decode_artifact_raw(data, metadata), metadata["tool_name"])
         _check(metadata.get("total_chars") == len(text) and metadata.get("view_kind") == kind
                and metadata.get("degradation_reason") == reason)
         self._validated_artifacts.add(identity)
@@ -365,6 +434,9 @@ class ArchiveStore:
             return self._view(identity, confirmed)
 
     def _verify_view(self, identity: str, confirmed: bool) -> dict[str, Any]:
+        cache_key = (identity, confirmed)
+        if cache_key in self._validated_views:
+            return self._validated_views[cache_key]
         view = self._view(identity, confirmed)
         order = view.get("record_order")
         _check(type(order) is list and all(type(run_id) is str for run_id in order)
@@ -376,8 +448,8 @@ class ArchiveStore:
             _check(scope == recorded)
             self._scope(scope)
             for run, watermark in scope["record_files"].items():
-                _check(run in view["record_files"] and watermark["record_count"] <= view["record_files"][run]["record_count"]
-                       and watermark["byte_end"] <= view["record_files"][run]["byte_end"])
+                _check(run in view["record_files"])
+                self._file_extension(run, watermark, view["record_files"][run])
         for field in ("summaries", "artifacts"):
             _check(type(view[field]) is list and len(view[field]) == len(set(view[field])))
         for identity in view["summaries"]:
@@ -394,6 +466,7 @@ class ArchiveStore:
             _check(type(end) is int and end >= 0)
             events = self._events(run_id, end)
             _check(len(events) == end)
+        self._validated_views[cache_key] = view
         return view
 
     def verify_view(self, identity: str, confirmed: bool = True) -> None:
@@ -414,8 +487,8 @@ class ArchiveStore:
                 parent = self._verify_view(parent_id, True)
                 _check(value["record_order"][:len(parent["record_order"])] == parent["record_order"])
                 for run, watermark in parent["record_files"].items():
-                    _check(run in record_files and watermark["record_count"] <= record_files[run]["record_count"]
-                           and watermark["byte_end"] <= record_files[run]["byte_end"])
+                    _check(run in record_files)
+                    self._file_extension(run, watermark, record_files[run])
                 _check(all(history_scopes.get(ref) == scope for ref, scope in parent["history_scopes"].items()))
                 for field in ("summaries", "artifacts"):
                     _check(set(parent[field]).issubset(value[field]))
@@ -427,15 +500,19 @@ class ArchiveStore:
 
     def confirm_view(self, identity: str, checkpoint_id: str) -> None:
         with self._operation(write=True):
-            _check(type(checkpoint_id) is str and bool(checkpoint_id))
-            view = self._verify_view(identity, False)
-            row = self._connection.execute("SELECT view_id FROM checkpoints WHERE id=?", (checkpoint_id,)).fetchone()
-            _check(row is None or row[0] == identity)
-            self._connection.execute("UPDATE views SET confirmed=1 WHERE id=?", (identity,))
-            self._connection.execute("INSERT OR IGNORE INTO checkpoints VALUES (?,?)", (checkpoint_id, identity))
-            for run_id, end in view["fact_ends"].items():
-                self._connection.execute("UPDATE events SET checkpoint_id=? WHERE run_id=? AND sequence<=? AND checkpoint_id IS NULL",
-                                         (checkpoint_id, run_id, end))
+            self._confirm_view_rows(identity, checkpoint_id)
+
+    def _confirm_view_rows(self, identity: str, checkpoint_id: str) -> None:
+        """Confirm within the caller's transaction, including execution commits."""
+        _check(type(checkpoint_id) is str and bool(checkpoint_id))
+        view = self._verify_view(identity, False)
+        row = self._connection.execute("SELECT view_id FROM checkpoints WHERE id=?", (checkpoint_id,)).fetchone()
+        _check(row is None or row[0] == identity)
+        self._connection.execute("UPDATE views SET confirmed=1 WHERE id=?", (identity,))
+        self._connection.execute("INSERT OR IGNORE INTO checkpoints VALUES (?,?)", (checkpoint_id, identity))
+        for run_id, end in view["fact_ends"].items():
+            self._connection.execute("UPDATE events SET checkpoint_id=? WHERE run_id=? AND sequence<=? AND checkpoint_id IS NULL",
+                                     (checkpoint_id, run_id, end))
 
     def view_for_checkpoint(self, checkpoint_id: str) -> str:
         with self._operation():
@@ -515,14 +592,28 @@ class ArchiveStore:
         with self._operation():
             return len(self._events(run_id, None))
 
-    def stage_run(self, run_id: str, payload: dict) -> str:
-        with self._operation(write=True):
+    def stage_run(self, run_id: str, payload: dict, *, record_id: str | None = None) -> str:
+        identity = record_id or str(uuid4())
+
+        def existing():
+            row = self._connection.execute("SELECT run_id,payload,sha256 FROM runs WHERE id=?", (identity,)).fetchone()
+            if row is not None:
+                _decoded(row[1], row[2])
+                _check(row == (run_id, *_encoded(payload)))
+                return identity
+            return None
+
+        def write():
             storage_identifier(run_id)
             _check("run_id" not in payload or payload["run_id"] == run_id)
-            identity = str(uuid4())
+            storage_identifier(identity)
             data, digest = _encoded(payload)
+            if saved := existing():
+                return saved
             self._connection.execute("INSERT INTO runs(id,run_id,payload,sha256) VALUES (?,?,?,?)", (identity, run_id, data, digest))
             return identity
+
+        return self._execution_transaction(write, existing)
 
     def seal_run(self, record_id: str, view_id: str, checkpoint_id: str) -> None:
         with self._operation(write=True):
@@ -559,6 +650,25 @@ class ArchiveStore:
             if "resource_view_id" in final:
                 _check(final["resource_view_id"] == row[2])
             return {**payload, "view_id": row[2], "checkpoint_id": row[3]}
+
+    def staged_run(self, record_id: str) -> dict[str, Any]:
+        """Read one explicitly selected final candidate, without treating it as sealed."""
+        with self._operation():
+            row = self._connection.execute(
+                "SELECT run_id,payload,sha256,sealed,view_id,checkpoint_id FROM runs WHERE id=?", (record_id,)).fetchone()
+            _check(row is not None)
+            payload = _decoded(row[1], row[2])
+            _check("run_id" not in payload or payload["run_id"] == row[0])
+            final = payload.get("final_state")
+            _check(type(final) is dict and final.get("run_id", row[0]) == row[0])
+            if view_id := final.get("resource_view_id"):
+                view = self._verify_view(view_id, False)
+                _check(final.get("record_files", {}) == view["record_files"]
+                       and final.get("history_scopes", {}) == view["history_scopes"])
+                if row[3]:
+                    _check(row[4] == view_id)
+            return {"record_id": record_id, "run_id": row[0], "payload": payload,
+                    "sealed": bool(row[3]), "view_id": row[4], "checkpoint_id": row[5]}
 
     def register_conversation(self, configuration: dict, tools: list[dict]) -> dict[str, Any]:
         """Register the caller's allowlisted, non-secret runtime descriptor once."""
@@ -601,11 +711,11 @@ class ArchiveStore:
             return self._conversation()
 
     def _lifecycle(self, run_id: str) -> dict[str, Any] | None:
-        row = self._connection.execute("SELECT run_id,source_snapshot_id,status,started_at,completed_at,snapshot_id,choice_id "
+        row = self._connection.execute("SELECT run_id,source_snapshot_id,status,started_at,completed_at,snapshot_id,choice_id,current_execution_id,revision "
                                        "FROM run_lifecycle WHERE run_id=?", (run_id,)).fetchone()
         if row is None:
             return None
-        return dict(zip(("run_id", "source_snapshot_id", "status", "started_at", "completed_at", "snapshot_id", "choice_id"), row))
+        return dict(zip(("run_id", "source_snapshot_id", "status", "started_at", "completed_at", "snapshot_id", "choice_id", "current_execution_id", "revision"), row))
 
     def _unfinished_runs(self) -> list[dict[str, Any]]:
         rows = self._connection.execute("SELECT run_id FROM run_lifecycle WHERE status='started' ORDER BY started_at,run_id").fetchall()
@@ -643,7 +753,8 @@ class ArchiveStore:
             _conflict(run["status"] == "started")
             _check(not self._events(run_id, None))
             _check(self._connection.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone() is None)
-            self._connection.execute("UPDATE run_lifecycle SET status='rejected',completed_at=? WHERE run_id=?", (_now(), run_id))
+            _check(self._connection.execute("SELECT 1 FROM operations WHERE run_id=?", (run_id,)).fetchone() is None)
+            self._connection.execute("UPDATE run_lifecycle SET status='rejected',completed_at=?,revision=revision+1 WHERE run_id=?", (_now(), run_id))
 
     def accept_recovery(self, snapshot_id: str, unfinished_run_ids: list[str]) -> str:
         """Record an explicit choice of the exact current snapshot and pending set."""
@@ -661,7 +772,7 @@ class ArchiveStore:
             data, digest = _encoded({"choice_id": identity, "snapshot_id": snapshot_id,
                                      "unfinished_run_ids": sorted(unfinished_run_ids), "created_at": now})
             self._connection.execute("INSERT INTO recovery_choices VALUES (?,?,?)", (identity, data, digest))
-            self._connection.executemany("UPDATE run_lifecycle SET status='abandoned',completed_at=?,choice_id=? WHERE run_id=?",
+            self._connection.executemany("UPDATE run_lifecycle SET status='abandoned',completed_at=?,choice_id=?,revision=revision+1 WHERE run_id=?",
                                          [(now, identity, run) for run in unfinished_run_ids])
             return identity
 
@@ -771,12 +882,23 @@ class ArchiveStore:
             return result
 
     def metadata(self) -> dict[str, Any]:
-        """Cheap catalogue data: never inspect History, Artifact or State bodies."""
+        """Catalogue data only: never reconstruct or authorize body resources."""
         with self._operation():
             conversation = self._conversation()
             head = conversation["current_snapshot_id"]
+            unfinished = self._unfinished_runs()
+            for run in unfinished:
+                point = self._connection.execute(
+                    "SELECT payload,sha256 FROM execution_points WHERE id=? AND run_id=? AND confirmed=1",
+                    (run["current_execution_id"], run["run_id"]),
+                ).fetchone() if run["current_execution_id"] else None
+                _check(run["current_execution_id"] is None or point is not None)
+                value = _decoded(*point) if point is not None else None
+                _check(value is None or value.get("point_id") == run["current_execution_id"]
+                       and value.get("run_id") == run["run_id"] and type(value.get("phase")) is str)
+                run["execution_phase"] = value["phase"] if value is not None else None
             return {**conversation, "head": self._snapshot_meta(head) if head is not None else None,
-                    "unfinished_runs": self._unfinished_runs()}
+                    "unfinished_runs": unfinished}
 
     def _published_candidate(self, record_id: str, view_id: str, checkpoint_id: str,
                              expected_snapshot_id: str | None) -> dict[str, Any] | None:
@@ -818,7 +940,7 @@ class ArchiveStore:
                 self._connection.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?)",
                                          (record_id, sequence, expected_snapshot_id, row[0], view_id, data, digest))
                 self._connection.execute("UPDATE conversation SET current_snapshot_id=?,updated_at=? WHERE id=1", (record_id, now))
-                self._connection.execute("UPDATE run_lifecycle SET status='published',completed_at=?,snapshot_id=? WHERE run_id=?",
+                self._connection.execute("UPDATE run_lifecycle SET status='published',completed_at=?,snapshot_id=?,revision=revision+1 WHERE run_id=?",
                                          (now, record_id, row[0]))
                 result = self._read_snapshot(record_id)
             return result

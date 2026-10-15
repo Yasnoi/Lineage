@@ -61,7 +61,7 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.requests)
         self.assertTrue(client.closed)
 
-    async def test_model_append_failure_preserves_response_and_skips_tool_once(self):
+    async def test_model_append_failure_preserves_response_and_leaves_tool_pending(self):
         native = RecordJournal.append
         def fail(journal, run_id, batch):
             if any(record["kind"] == "model" for record in batch):
@@ -72,7 +72,9 @@ class RecordRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["error_code"], "record_write_error")
         self.assertEqual(state["model_calls"], 1)
         self.assertEqual(len(client.requests), 1)
-        self.assertEqual(state["tool_outcomes"]["skipped"], 1)
+        # Saving failed before adoption. Explicit same-Run recovery may still
+        # execute this call, so it is not a terminal skipped outcome.
+        self.assertEqual(state["tool_outcomes"]["skipped"], 0)
         self.assertEqual(state["result"]["tool_calls"][0]["call_id"], "paid-call")
         self.assertTrue(any(item.get("call_id") == "paid-call" for item in state["input"]))
         self.assertFalse(self.executed)

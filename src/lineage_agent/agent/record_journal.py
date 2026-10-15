@@ -8,6 +8,7 @@ import re
 import stat
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from lineage_agent.agent.record_codec import decode_record, encode_record
 from lineage_agent.storage import ensure_storage_directory, existing_storage_directory, storage_identifier
@@ -57,6 +58,7 @@ class RecordJournal:
         self._lock = RLock()
         self._closed = False
         self._written: dict[str, dict[str, Any]] = {}
+        self._targets: dict[str, str] = {}
         self._failed_runs: set[str] = set()
         self._indices: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
 
@@ -66,22 +68,74 @@ class RecordJournal:
         except Exception:
             raise JournalError("record_integrity_error") from None
 
+    def _segments(self, run_id: str, watermark: dict[str, Any]) -> list[dict[str, Any]]:
+        """Validate registered paths, never infer readable segments from disk."""
+        self.path(run_id)
+        fields = {"format_version", "record_count", "byte_end", "prefix_sha256"}
+        if (type(watermark) is not dict or set(watermark) not in (fields, fields | {"segments"})
+                or type(watermark["format_version"]) is not int or watermark["format_version"] != 1):
+            raise JournalError("record_integrity_error")
+
+        def valid_counts(value):
+            return (all(type(value.get(key)) is int and value[key] >= 0 for key in ("record_count", "byte_end"))
+                    and type(value.get("prefix_sha256")) is str
+                    and re.fullmatch(r"[0-9a-f]{64}", value["prefix_sha256"]) is not None)
+
+        if not valid_counts(watermark):
+            raise JournalError("record_integrity_error")
+        segments = watermark.get("segments", [{"path": f"history/{run_id}.jsonl", "start_sequence": 0,
+            **{key: watermark[key] for key in ("record_count", "byte_end", "prefix_sha256")}}])
+        if type(segments) is not list or not segments:
+            raise JournalError("record_integrity_error")
+        count, size, paths = 0, 0, set()
+        for index, segment in enumerate(segments):
+            if (type(segment) is not dict or set(segment) != {"path", "start_sequence", "record_count", "byte_end", "prefix_sha256"}
+                    or not valid_counts(segment) or type(segment["start_sequence"]) is not int
+                    or segment["start_sequence"] != count or type(segment["path"]) is not str
+                    or re.fullmatch(r"history/" + re.escape(run_id) + r"(?:\.[0-9a-f]{32})?\.jsonl", segment["path"]) is None
+                    or segment["path"] in paths
+                    or (index == 0 and segment["path"] != f"history/{run_id}.jsonl")):
+                raise JournalError("record_integrity_error")
+            paths.add(segment["path"])
+            count += segment["record_count"]
+            size += segment["byte_end"]
+        if count != watermark["record_count"] or size != watermark["byte_end"]:
+            raise JournalError("record_integrity_error")
+        return deepcopy(segments)
+
+    def paths(self, run_id: str, watermark: dict[str, Any]) -> list[Path]:
+        """Return only paths explicitly registered by the supplied watermark."""
+        return [self.directory / segment["path"].removeprefix("history/")
+                for segment in self._segments(run_id, watermark)]
+
+    def source_files(self, run_id: str, watermark: dict[str, Any], start: int, end: int) -> list[dict[str, Any]]:
+        """Describe a global record range using its explicitly registered files."""
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= watermark["record_count"]:
+            raise JournalError("record_integrity_error")
+        self.verify(run_id, watermark)
+        return [{"run_id": run_id, "start": max(start, segment["start_sequence"]),
+                 "end": min(end, segment["start_sequence"] + segment["record_count"]),
+                 "path": str(self.directory / segment["path"].removeprefix("history/"))}
+                for segment in self._segments(run_id, watermark)
+                if start < segment["start_sequence"] + segment["record_count"] and end > segment["start_sequence"]]
+
     def _prefix(self, run_id: str, watermark: dict[str, Any]) -> bytes:
         try:
             if self._closed:
                 raise OSError("closed journal")
-            if (type(watermark) is not dict or set(watermark) != {"format_version", "record_count", "byte_end", "prefix_sha256"}
-                    or type(watermark["format_version"]) is not int or watermark["format_version"] != 1
-                    or type(watermark["record_count"]) is not int or watermark["record_count"] < 0
-                    or type(watermark["byte_end"]) is not int or watermark["byte_end"] < 0
-                    or type(watermark["prefix_sha256"]) is not str
-                    or re.fullmatch(r"[0-9a-f]{64}", watermark["prefix_sha256"]) is None):
-                raise JournalError("record_integrity_error")
-            path = self.path(run_id)
-            if not stat.S_ISREG(_check_components(path).st_mode):
-                raise JournalError("record_integrity_error")
-            with path.open("rb") as handle:
-                data = handle.read(watermark["byte_end"])
+            segments = self._segments(run_id, watermark)
+            parts = []
+            for segment, path in zip(segments, self.paths(run_id, watermark), strict=True):
+                if not stat.S_ISREG(_check_components(path).st_mode):
+                    raise JournalError("record_integrity_error")
+                with path.open("rb") as handle:
+                    part = handle.read(segment["byte_end"])
+                lines = part.splitlines(keepends=True)
+                if (len(part) != segment["byte_end"] or hashlib.sha256(part).hexdigest() != segment["prefix_sha256"]
+                        or len(lines) != segment["record_count"] or any(not line.endswith(b"\n") for line in lines)):
+                    raise JournalError("record_integrity_error")
+                parts.append(part)
+            data = b"".join(parts)
             if len(data) != watermark["byte_end"] or hashlib.sha256(data).hexdigest() != watermark["prefix_sha256"]:
                 raise JournalError("record_integrity_error")
             return data
@@ -89,6 +143,31 @@ class RecordJournal:
             raise
         except Exception:
             raise JournalError("record_read_error") from None
+
+    def verify_prefix(self, run_id: str, previous: dict[str, Any], current: dict[str, Any]) -> None:
+        """Require an unchanged logical/file prefix, including every frozen segment."""
+        with self._lock:
+            old_data, _ = self._index(run_id, previous)
+            new_data, _ = self._index(run_id, current)
+            old_segments, new_segments = self._segments(run_id, previous), self._segments(run_id, current)
+            if (len(old_segments) > len(new_segments) or previous["record_count"] > current["record_count"]
+                    or not new_data.startswith(old_data)):
+                raise JournalError("record_integrity_error")
+            for index, old in enumerate(old_segments):
+                new = new_segments[index]
+                if (old["path"] != new["path"] or old["start_sequence"] != new["start_sequence"]
+                        or old["record_count"] > new["record_count"] or old["byte_end"] > new["byte_end"]
+                        or (index < len(old_segments) - 1 and old != new)):
+                    raise JournalError("record_integrity_error")
+
+    def resume(self, run_id: str, trusted_watermark: dict[str, Any]) -> None:
+        """Authorize a fresh writer segment; old physical tails remain untouched."""
+        with self._lock:
+            if self._closed or run_id in self._failed_runs or run_id in self._written:
+                raise JournalError("record_write_error")
+            self.verify(run_id, trusted_watermark)
+            self._written[run_id] = deepcopy(trusted_watermark)
+            self._targets[run_id] = f"history/{run_id}.{uuid4().hex}.jsonl"
 
     def _index(self, run_id: str, watermark: dict[str, Any]) -> tuple[bytes, list[dict[str, Any]]]:
         data = self._prefix(run_id, watermark)
@@ -133,7 +212,7 @@ class RecordJournal:
         with self._lock:
             if self._closed or run_id in self._failed_runs:
                 raise JournalError("record_write_error")
-            path = self.path(run_id)
+            first_path = self.path(run_id)
             try:
                 if type(raw_batch) is not list:
                     raise ValueError("invalid batch")
@@ -155,14 +234,20 @@ class RecordJournal:
                 if run_id in self._written:
                     watermark = self._written[run_id]
                     prefix, old_receipts = self._index(run_id, watermark)
-                    if path.stat().st_size != watermark["byte_end"]:
+                    segments = self._segments(run_id, watermark)
+                    target = self._targets.get(run_id, segments[-1]["path"])
+                    path = self.directory / target.removeprefix("history/")
+                    continuing = target == segments[-1]["path"]
+                    if continuing and path.stat().st_size != segments[-1]["byte_end"]:
                         raise JournalError("record_integrity_error")
                 else:
-                    if path.exists():
+                    if first_path.exists():
                         # No reopen/resume protocol: only checkpoints may admit
                         # old records for reading, never authorize new writes.
                         raise JournalError("record_integrity_error")
                     watermark, prefix, old_receipts = _empty(), b"", []
+                    segments = []
+                    target, path, continuing = f"history/{run_id}.jsonl", first_path, False
                 count = len(old_receipts)
                 new_data, returned, offset = [], [], len(prefix)
                 for record, line in zip(raw_batch, encoded, strict=True):
@@ -183,17 +268,28 @@ class RecordJournal:
                 data = b"".join(new_data)
                 if data or run_id not in self._written:
                     _check_components(self.directory)
-                    mode = "ab" if run_id in self._written else "xb"
+                    mode = "ab" if continuing else "xb"
                     with path.open(mode) as handle:
                         if handle.write(data) != len(data):
                             raise OSError("short journal write")
                         handle.flush()
                         os.fsync(handle.fileno())
+                    if continuing:
+                        segment = segments[-1]
+                        start = len(prefix) - segment["byte_end"]
+                        segment_data = prefix[start:] + data
+                        segment.update(record_count=segment["record_count"] + len(new_data),
+                                       byte_end=len(segment_data), prefix_sha256=hashlib.sha256(segment_data).hexdigest())
+                    else:
+                        segments.append({"path": target, "start_sequence": count, "record_count": len(new_data),
+                                         "byte_end": len(data), "prefix_sha256": hashlib.sha256(data).hexdigest()})
                 complete = prefix + data
                 next_watermark = {"format_version": 1, "record_count": count + len(new_data), "byte_end": len(complete),
-                                  "prefix_sha256": hashlib.sha256(complete).hexdigest()}
+                                  "prefix_sha256": hashlib.sha256(complete).hexdigest(), "segments": segments}
                 self.verify(run_id, next_watermark, returned)
                 self._written[run_id] = next_watermark
+                if data or continuing:
+                    self._targets[run_id] = target
                 return returned, deepcopy(next_watermark)
             except JournalError:
                 self._failed_runs.add(run_id)
@@ -221,4 +317,5 @@ class RecordJournal:
             self._closed = True
             self._indices.clear()
             self._written.clear()
+            self._targets.clear()
             self._failed_runs.clear()

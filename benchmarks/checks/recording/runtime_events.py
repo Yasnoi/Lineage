@@ -349,7 +349,10 @@ async def check_failure_event_recording_failures():
         attempted, events = assert_failed_event(state, client, observations, event_name, stage=stage)
         assert attempted["call_id"] == first["call_id"] and attempted["request_index"] == 1
         assert attempted["tool_name"] == first["name"] and attempted["error_code"] == code
-        assert attempted["step_id"] == "step-0002" and attempted["node"] == "tools"
+        assert attempted["node"] == "tools" and attempted["step_id"].startswith("step-")
+        assert attempted["step_id"] not in {event["step_id"] for event in events if event["event"] == "model.started"}
+        assert all(event["step_id"] == attempted["step_id"] for event in events
+                   if event["event"] == "tool.started" and event["call_id"] == first["call_id"])
         assert not any(event["event"] == "tool.result_created" for event in events)
         assert not any(event["event"] == "tool.succeeded" for event in events)
         assert [event["call_id"] for event in events if event["event"] == "tool.started"] == (
@@ -397,7 +400,10 @@ async def check_failure_event_recording_failures():
             state, client, observations, "model.failed",
             stage="model_request" if last_usage is None else "response_validation",
         )
-        assert attempted["step_id"] == "step-0003" and attempted["node"] == "model"
+        assert attempted["node"] == "model"
+        sent = [event for event in events if event["event"] == "model.started"][-1]
+        assert attempted["model_call"] == sent["model_call"] == 2
+        assert attempted["operation_id"] == sent["operation_id"]
         assert "call_id" not in attempted and "tool_name" not in attempted
         assert [event["call_id"] for event in events if event["event"] == "tool.result_created"] == [request["call_id"]]
 

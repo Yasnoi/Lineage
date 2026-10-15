@@ -2,9 +2,10 @@
 
 from copy import deepcopy
 from typing import Any
-from uuid import uuid4
+from uuid import uuid4, uuid5, NAMESPACE_URL
 import json
 import logging
+import sys
 
 from langsmith import tracing_context
 from langgraph.types import Overwrite
@@ -16,6 +17,7 @@ from lineage_agent.agent.record_journal import JournalError, RecordJournal
 from lineage_agent.agent.record_codec import encode_record
 from lineage_agent.agent.graph import build_graph
 from lineage_agent.agent.state import AgentState
+from lineage_agent.agent.execution import DurableExecution, ExecutionPaused
 from lineage_agent.archive import ArchiveError, ArchiveStore
 from lineage_agent.artifacts.store import ArtifactStore, SessionArtifacts
 from lineage_agent.artifacts.tools import ARTIFACT_TOOLS, ArtifactExecutor
@@ -205,10 +207,61 @@ async def run_agent(
     *,
     tools: list[ToolDefinition] | None = None,
     execute_tool: ToolExecutor | None = None,
+    recovery_binding=None,
 ) -> AgentState:
     """Handle one independent request; release execution state and retain its files."""
-    state, _, _ = await _run_agent(input, settings, tools=tools, execute_tool=execute_tool)
+    state, _, _ = await _run_agent(input, settings, tools=tools, execute_tool=execute_tool, recovery_binding=recovery_binding)
     return state
+
+
+async def _resume_agent(state: AgentState, settings: ModelSettings, **kwargs):
+    saver, scope = kwargs["checkpointer"], kwargs["session_id"]
+    archive = saver.archive(scope)
+    final_operation_id = str(uuid5(NAMESPACE_URL, state["run_id"] + ":finalization"))
+    candidate = next((op for op in archive.operations(state["run_id"])
+                      if op["operation_id"] == final_operation_id), None)
+    if candidate is not None or state.get("execution", {}).get("final_record_id"):
+        if candidate is not None:
+            frozen = candidate["payload"]["final_state"]
+            current = archive.run_status(state["run_id"])["current_execution_id"]
+            if current not in {frozen["execution"]["parent_id"], frozen["execution"]["point_id"]}:
+                raise CheckpointError("archive_execution_conflict")
+            state = deepcopy(frozen)
+            final_view = archive.view(state["resource_view_id"], confirmed=False)
+            state["record_files"] = {run: deepcopy(final_view["record_files"][run]) for run in final_view["record_order"]}
+        identity = state["execution"]["final_record_id"]
+        payload = {"final_state": deepcopy(state), "fact_end": (
+            candidate["payload"]["fact_end"] if candidate is not None else archive.event_end(state["run_id"]))}
+        archive.stage_run(state["run_id"], payload, record_id=identity)
+        checkpoint_id = kwargs["checkpoint_id"]
+        saved = await saver.read_confirmed(scope, checkpoint_id)
+        if encode_record({k: saved.checkpoint["channel_values"].get(k) for k in state}) != encode_record(state):
+            # Finish only this exact, previously staged terminal transition.
+            # No graph node or external operation runs during the import.
+            from langgraph.graph import END, START, StateGraph
+            builder = StateGraph(AgentState)
+            builder.add_node("restore_idle", lambda value: {})
+            builder.add_edge(START, "restore_idle")
+            builder.add_edge("restore_idle", END)
+            graph = builder.compile(checkpointer=saver)
+            config = await graph.aupdate_state({"configurable": {"thread_id": scope}},
+                {**state, "input": Overwrite(deepcopy(state["input"]))}, as_node="restore_idle")
+            snapshot = await graph.aget_state(config)
+            if snapshot.next or snapshot.tasks or encode_record(snapshot.values) != encode_record(state):
+                raise CheckpointError("checkpoint_read_error")
+            checkpoint_id = config["configurable"]["checkpoint_id"]
+        from lineage_agent.agent.recovery import validate_snapshot_state
+        validate_snapshot_state(state, archive, state["resource_view_id"])
+        saved = await saver.read_confirmed(scope, checkpoint_id)
+        if encode_record({k: saved.checkpoint["channel_values"].get(k) for k in state}) != encode_record(state):
+            raise CheckpointError("checkpoint_read_error")
+        archive.confirm_view(state["resource_view_id"], checkpoint_id)
+        snapshot = archive.publish_snapshot(identity, state["resource_view_id"], checkpoint_id,
+                                            kwargs["source_snapshot_id"])
+        kwargs["publication"].update(snapshot_id=snapshot["snapshot_id"], snapshot_status="published",
+                                    checkpoint_id=checkpoint_id, run_id=state["run_id"])
+        return deepcopy(state), checkpoint_id, None
+    return await _run_agent(state["input"], settings, resume_state=state, **kwargs)
 
 
 async def _run_agent(
@@ -223,6 +276,8 @@ async def _run_agent(
     artifacts: SessionArtifacts | None = None,
     source_snapshot_id: str | None = None,
     publication: dict | None = None,
+    resume_state: AgentState | None = None,
+    recovery_binding=None,
 ) -> tuple[AgentState, str | None, str | None]:
     """Share execution and cleanup; sessions add only the checkpoint lifecycle."""
     input_items = normalize_input(input)
@@ -231,7 +286,7 @@ async def _run_agent(
     try:
         available_tools = validate_tools(tools, execute_tool)
         registration = ({"settings": serialize_settings(settings),
-                         "binding": describe_tools(available_tools, execute_tool)}
+                         "binding": describe_tools(available_tools, execute_tool, recovery_binding=recovery_binding)}
                         if session_id is None else None)
         original_tools = deepcopy(available_tools)
         if session_id is None:
@@ -250,12 +305,13 @@ async def _run_agent(
                 raise ConfigurationError("工具执行器 bind_run 必须返回可调用的运行实例。")
         # Constructing the client validates credentials without making a request.
         # Rejected protocol input keeps its existing recorded rejection behavior.
-        prepared_client = (None if _input_shape_error(input_items) or _input_association_error(input_items)
+        prepared_client = (None if (resume_state is not None and resume_state.get("stop_reason")) or
+                           resume_state is None and (_input_shape_error(input_items) or _input_association_error(input_items))
                            else create_client(settings))
     except ConfigurationError:
         raise PreExecutionConfigurationError() from None
 
-    recorder = RunRecorder(settings.log_dir)
+    recorder = RunRecorder(settings.log_dir, run_id=resume_state["run_id"]) if resume_state is not None else RunRecorder(settings.log_dir)
     tracer = None
     propagating_error = False
     owned_store = None
@@ -311,6 +367,8 @@ async def _run_agent(
         }
         state["active_context"].update(initial_input_count=len(input_items), current_run_id=recorder.run_id,
                                        item_refs=[r["source_ref"] for r in initial_batch])
+        if resume_state is not None:
+            state = deepcopy(resume_state)
         if checkpointer is None:
             checkpointer = SessionCheckpointer()
         checkpointer.bind_run(scope_id, recorder)
@@ -322,12 +380,22 @@ async def _run_agent(
                 checkpointer.bind_archive(scope_id, archive)
                 archive.register_conversation(registration, original_tools)
             archive = checkpointer.archive(scope_id)
-            archive.begin_run(recorder.run_id, source_snapshot_id)
+            if resume_state is None:
+                archive.begin_run(recorder.run_id, source_snapshot_id)
+            # Register each execution's diagnostic file before any external work.
+            # A killed process may never reach final_state or recorder.close().
+            archive.append_event(recorder.run_id, "execution_started", {
+                "execution_id": recorder.execution_id, "log_path": str(recorder.path),
+                "resumed": resume_state is not None,
+            }, key="execution_started:" + recorder.execution_id)
             journal = RecordJournal(paths.history)
             checkpointer.bind_history(scope_id, journal)
-            receipts, watermark = journal.append(recorder.run_id, initial_batch)
-            state["record_batch"] = receipts
-            state["record_files"] = {recorder.run_id: watermark}
+            if resume_state is not None:
+                journal.resume(recorder.run_id, state["record_files"][recorder.run_id])
+            else:
+                receipts, watermark = journal.append(recorder.run_id, initial_batch)
+                state["record_batch"] = receipts
+                state["record_files"] = {recorder.run_id: watermark}
         except (StorageError, JournalError, CheckpointError, ArchiveError) as exc:
             code = exc.code if isinstance(exc, (JournalError, CheckpointError, ArchiveError)) else "record_create_error"
             state.update(stop_reason="error", error_code=code, error=str(CheckpointError(code)))
@@ -336,11 +404,14 @@ async def _run_agent(
             return deepcopy(state), None, code
         context_records = ContextRecords(checkpointer, scope_id)
         execute_tool = HistoryExecutor(context_records.store, execute_tool)
-        tracer = start_trace(recorder.run_id, settings)
+        tracer = start_trace(recorder.run_id, settings,
+            **({"trace_id": recorder.execution_id} if resume_state is not None else {}))
         if session_id is not None:
             recorder.bind_session(session_id)
             tracer.bind_session(session_id)
-        config: dict[str, Any] = {"recursion_limit": 16 * settings.max_model_calls + 8,
+        # Business attempts and compact passes have their own durable limits.
+        # A finite tool plan may contain more than one graph step per call.
+        config: dict[str, Any] = {"recursion_limit": sys.maxsize,
             "configurable": {"thread_id": scope_id}, "metadata": {"run_id": recorder.run_id}}
         if checkpoint_id is not None:
             config["configurable"]["checkpoint_id"] = checkpoint_id
@@ -368,6 +439,9 @@ async def _run_agent(
             artifact_initialization_failed = True
             state.update(stop_reason="error", error=ARTIFACT_INIT_MESSAGE,
                          error_code="artifact_store_init_error")
+        execution = DurableExecution(archive, recorder.run_id, settings, artifacts=artifacts,
+            executor=execute_tool, binding=archive.conversation()["configuration"]["binding"],
+            resuming=resume_state is not None)
 
         def prepare_model_request(model_input, **options):
             return prepare_request(
@@ -407,6 +481,7 @@ async def _run_agent(
                 observation_manager=observation_manager,
                 observation_hint_tools=observation_hint_tools,
                 native_recall_tools=frozenset(tool["name"] for tool in ARTIFACT_TOOLS) | HISTORY_TOOL_NAMES,
+                execution=execution,
             )
             start_budget_error = None
 
@@ -417,7 +492,7 @@ async def _run_agent(
             start_budget = read_budget_snapshot(execute_tool, on_unavailable=start_budget_unavailable)
             tracer.observe_read_budget("run_start", start_budget_error)
             if not recorder.emit(
-                "run.started", input_item_count=len(input_items),
+                "run.resumed" if resume_state is not None else "run.started", input_item_count=len(input_items),
                 max_model_calls=settings.max_model_calls,
                 read_budget=start_budget, read_budget_error=start_budget_error,
             ):
@@ -429,17 +504,19 @@ async def _run_agent(
                     saved = await graph.aget_state(config)
                     if checkpoint_id is not None and not saved.values:
                         raise CheckpointError("checkpoint_read_error")
-                    if saved.values:
+                    if saved.values and resume_state is None:
                         own_files = state["record_files"]
                         state.update(inherit_context(saved.values, input_items, state["context_risks"], run_id=recorder.run_id))
                         state["record_files"].update(own_files)
-                state["resource_view_id"] = checkpointer.prepare_state(scope_id, state)
+                if resume_state is None:
+                    state["resource_view_id"] = checkpointer.prepare_state(scope_id, state)
+                    state["execution"] = checkpointer.prepare_execution(scope_id, state, "run_ready")
                 if recorder.failed:
                     state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
                 elif artifact_initialization_failed:
                     recorder.emit("run.initialization_failed", stage="artifact_init",
                                   error_code="artifact_store_init_error")
-                elif invalid := _input_shape_error(state["input"]) or _input_association_error(state["input"]):
+                elif resume_state is None and (invalid := _input_shape_error(state["input"]) or _input_association_error(state["input"])):
                     code, index = invalid
                     recorder.emit("run.input_rejected", stage="input_validation", error_code=code, input_index=index)
                     state.update(
@@ -447,7 +524,8 @@ async def _run_agent(
                         error=INVALID_INPUT_MESSAGE if code == "invalid_input" else "初始上下文中的工具请求与结果无法唯一关联。",
                     )
                 else:
-                    client = await client_manager.__aenter__()
+                    if client_manager is not None:
+                        client = await client_manager.__aenter__()
                     graph_input = {**state, "input": Overwrite(deepcopy(state["input"]))} if checkpointer is not None else state
                     state = await graph.ainvoke(
                         graph_input, config=config,
@@ -456,7 +534,7 @@ async def _run_agent(
         except CheckpointError as exc:
             checkpoint_error = exc.code
             recorder.emit("run.checkpoint_failed", error_code=exc.code)
-            if last_node == "model" and state["stop_reason"] is None and state["result"] is not None:
+            if not state.get("execution") and last_node == "model" and state["stop_reason"] is None and state["result"] is not None:
                 # A model node can also prepare compaction without a new call.
                 # Its latest result may belong to tools that already completed.
                 # Only unmatched requests are known to have remained unexecuted.
@@ -525,7 +603,7 @@ async def _run_agent(
             if configuration_rejected:
                 archive.reject_run(state["run_id"])
             failure_code = "pre_execution_configuration_error" if configuration_rejected else "run_interrupted"
-            if not configuration_rejected and checkpointer.failure(scope_id) is None and last_node is not None:
+            if not configuration_rejected and not state.get("execution") and checkpointer.failure(scope_id) is None and last_node is not None:
                 # A cancelled tool batch may have produced real results before
                 # LangGraph could checkpoint its update. Save those facts once;
                 # this is never a resume, and the original exception still wins.
@@ -592,15 +670,30 @@ async def _run_agent(
                 "checkpoint_error": checkpoint_error,
             } if checkpointer is not None else {}),
         )
+        state["log_path"] = str(recorder.path)
         state["log_complete"] = recorder.close()
         if not state["log_complete"]:
             state.update(stop_reason="error", error=LOG_FAILURE_MESSAGE, error_code="logging_error")
+        try:
+            archive.append_event(recorder.run_id, "execution_log_closed", {
+                "execution_id": recorder.execution_id, "complete": state["log_complete"],
+            }, key="execution_log_closed:" + recorder.execution_id)
+            events = archive.events(recorder.run_id)
+            closed_logs = {event["payload"]["execution_id"]: event["payload"]["complete"]
+                           for event in events if event["kind"] == "execution_log_closed"}
+            state["log_segments"] = [
+                {"execution_id": event["payload"]["execution_id"], "path": event["payload"]["log_path"],
+                 "complete": closed_logs.get(event["payload"]["execution_id"], False)}
+                for event in events if event["kind"] == "execution_started"]
+        except ArchiveError as exc:
+            checkpoint_error = checkpoint_error or exc.code
+            state.update(stop_reason="error", error_code=checkpoint_error, error=str(CheckpointError(checkpoint_error)))
         if checkpointer is not None:
             outcome = make_record_batch(state["run_id"], state["record_sequence"], [{
                 "stop_reason": state["stop_reason"], "error_code": state["error_code"],
                 "tool_outcomes": state["tool_outcomes"], "model_calls": state["model_calls"],
             }], kind="outcome")
-            if checkpoint_error is None:
+            if checkpoint_error is None and not state.get("execution", {}).get("final_record_id"):
                 try:
                     receipts, watermark = journal.append(state["run_id"], outcome)
                     state.update(record_batch=state["record_batch"] + receipts,
@@ -650,18 +743,26 @@ async def _run_agent(
                 }
                 try:
                     final_state = deepcopy(state)
-                    if state["stop_reason"] == "completed":
+                    if state["stop_reason"] == "completed" and state["active_context"]["current_run_id"] is not None:
                         final_state["active_context"] = completed_context(state)
                     archive = checkpointer.archive(scope_id)
-                    archive.append_event(state["run_id"], "run_final", {
+                    final_event = {
                         "stop_reason": state["stop_reason"], "error_code": state["error_code"],
                         "cleanup_error": state["cleanup_error"], "log_complete": state["log_complete"],
                         "usage_totals": state["usage_totals"], "summary_usage_totals": state["summary_usage_totals"],
-                    }, key="final")
+                    }
+                    if not state.get("execution", {}).get("final_record_id"):
+                        archive.append_event(state["run_id"], "run_final", final_event,
+                                             key="final:" + recorder.execution_id)
                     final_state["resource_view_id"] = checkpointer.prepare_state(scope_id, final_state)
+                    final_state.setdefault("execution", {})["final_record_id"] = (
+                        state.get("execution", {}).get("final_record_id") or str(uuid4()))
+                    final_state["execution"] = checkpointer.prepare_execution(scope_id, final_state, "finalizing")
+                    archive.save_operation(state["run_id"], str(uuid5(NAMESPACE_URL, state["run_id"] + ":finalization")),
+                        "finalization", {"final_state": deepcopy(final_state), "fact_end": archive.event_end(state["run_id"])})
                     run_record_id = archive.stage_run(state["run_id"], {
                         "final_state": deepcopy(final_state), "fact_end": archive.event_end(state["run_id"]),
-                    })
+                    }, record_id=final_state["execution"]["final_record_id"])
                     with tracing_context(enabled=False, parent=False):
                         saved_config = await graph.aupdate_state(
                             final_config, {**final_state, "input": Overwrite(deepcopy(final_state["input"]))},

@@ -58,8 +58,8 @@ class SnapshotTests(unittest.TestCase):
     def test_registration_and_no_snapshot_are_explicit(self):
         original = self.archive.conversation()
         self.assertEqual(self.archive.register_conversation(self.configuration, []), original)
-        self.assertEqual((original["format_version"], original["recovery_version"]), (2, 1))
-        self.assertEqual((FORMAT_VERSION, RECOVERY_VERSION), (2, 1))
+        self.assertEqual((original["format_version"], original["recovery_version"]), (3, 2))
+        self.assertEqual((FORMAT_VERSION, RECOVERY_VERSION), (3, 2))
         self.assertIsNone(original["current_snapshot_id"])
         with self.assertRaises(ArchiveError) as error:
             self.archive.read_snapshot()
@@ -258,7 +258,7 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(ArchiveError) as error:
             ArchiveStore(self.paths.directory, create=False)
         self.assertEqual(error.exception.code, "archive_version_error")
-        self.db("PRAGMA user_version=2")
+        self.db(f"PRAGMA user_version={FORMAT_VERSION}")
         data = self.db("SELECT payload FROM conversation")[0][0]
         payload = decode_record(data)
         payload["recovery_version"] = 99

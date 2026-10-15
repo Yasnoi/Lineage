@@ -1,12 +1,48 @@
 """Callable tool interface and the result of one sequential batch."""
 
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from inspect import getattr_static
 import json
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 type ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
+type ToolRecoveryPolicy = Literal["safe_repeat", "requires_resolution", "pause"]
+
+
+@dataclass(frozen=True)
+class ToolRecoveryBinding:
+    """An application's explicit declaration, never inferred from model schemas.
+
+    Stateless means there is no hidden per-Run budget or execution state to
+    restore. Built-in file budgets use their own versioned recovery protocol.
+    """
+
+    binding_id: str
+    version: int
+    tools: dict[str, ToolRecoveryPolicy]
+    stateless: bool = True
+
+    def describe(self) -> dict[str, Any]:
+        if (type(self.binding_id) is not str or not self.binding_id.strip()
+                or type(self.version) is not int or self.version < 1
+                or type(self.stateless) is not bool or type(self.tools) is not dict
+                or any(type(name) is not str or not name.strip()
+                       or type(policy) is not str or policy not in {"safe_repeat", "requires_resolution", "pause"}
+                       for name, policy in self.tools.items())):
+            raise ValueError("Invalid application tool recovery declaration.")
+        return {"binding_id": self.binding_id, "version": self.version,
+                "stateless": self.stateless, "tools": deepcopy(self.tools)}
+
+
+BUILTIN_RECOVERY_POLICIES: dict[str, ToolRecoveryPolicy] = {
+    name: "safe_repeat" for name in (
+        "list_directory", "read_text_file", "artifact_read", "artifact_search",
+        "history_read", "history_search",
+    )
+}
 
 
 MAX_OBSERVATION_BYTES = 4096
@@ -119,10 +155,14 @@ def read_budget_snapshot(
         keys = ("limit_bytes", "used_bytes", "remaining_bytes")
         if isinstance(snapshot, dict):
             values = {key: snapshot[key] for key in keys}
+            reserved = snapshot.get("reserved_bytes", 0)
             if (
                 all(type(value) is int and value >= 0 for value in values.values())
-                and values["used_bytes"] + values["remaining_bytes"] == values["limit_bytes"]
+                and type(reserved) is int and reserved >= 0
+                and values["used_bytes"] + reserved + values["remaining_bytes"] == values["limit_bytes"]
             ):
+                if "reserved_bytes" in snapshot:
+                    values["reserved_bytes"] = reserved
                 return values
     except Exception:
         # Never carry caller exception text or an old numeric snapshot into

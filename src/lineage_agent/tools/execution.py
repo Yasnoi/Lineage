@@ -66,6 +66,9 @@ async def execute_calls(
     step_id: str | None = None,
     tracer: "RunTrace | None" = None,
     verify_persistence: Callable[[], None] | None = None,
+    recoverable: bool = False,
+    request_index_offset: int = 0,
+    reused_result: bool = False,
 ) -> ToolBatchResult:
     """Recover from tool errors; stop remaining calls if their record fails."""
     available_tools = {
@@ -84,36 +87,38 @@ async def execute_calls(
     def record(event: str, **details: Any) -> bool:
         if recorder is None:
             return True
-        return recorder.emit(event, step_id=step_id, node="tools", **details)
+        return recorder.emit(event, step_id=step_id, node="tools",
+                             **({"reused_result": True, "executor_entered": False} if reused_result else {}), **details)
 
     def skip_remaining(first_index: int, *, first_traced: bool = False, reason: str = "logging_error") -> None:
         outcomes["skipped"] += len(calls) - first_index
         for index in range(first_index, len(calls)):
             call_facts.append({
                 "call_id": calls[index]["call_id"], "name": calls[index]["name"],
-                "request_index": index + 1, "outcome": "skipped", "stage": "execution",
+                "request_index": request_index_offset + index + 1, "outcome": "skipped", "stage": "execution",
                 "reason_code": reason, "executor_entered": False,
                 "protocol_output_created": False, "output": None,
             })
             record(
                 "tool.skipped",
-                **tool_identity(calls[index], index + 1),
+                **tool_identity(calls[index], request_index_offset + index + 1),
                 stage="execution",
                 reason=reason,
                 error_code=reason,
             )
             if tracer is not None and not (first_traced and index == first_index):
                 tracer.tool_skipped(
-                    calls[index], step_id=step_id, request_index=index + 1,
+                    calls[index], step_id=step_id, request_index=request_index_offset + index + 1,
                     reason=reason,
                 )
 
     for index, call in enumerate(calls):
         token = (
-            tracer.tool_start(call, step_id=step_id, request_index=index + 1)
+            tracer.tool_start(call, step_id=step_id, request_index=request_index_offset + index + 1,
+                              **({"reused_result": True} if reused_result else {}))
             if tracer is not None else None
         )
-        identity = tool_identity(call, index + 1)
+        identity = tool_identity(call, request_index_offset + index + 1)
         arguments_summary = summarize_value(call["arguments"])
         reason_code = reason_message = None
         outcome = "rejected"
@@ -147,7 +152,7 @@ async def execute_calls(
                 else:
                     stage = "execution"
                     if not record(
-                        "tool.started",
+                        "tool.result_reused" if reused_result else "tool.started",
                         **identity,
                         stage=stage,
                         arguments_summary=arguments_summary,
@@ -160,7 +165,9 @@ async def execute_calls(
                         skip_remaining(index, first_traced=True)
                         error = LOG_FAILURE_MESSAGE
                         break
-                    tool_calls += 1
+                    tool_calls += int(not reused_result)
+                    # This logical fact includes the original trusted attempt;
+                    # only this process's diagnostics describe result replay.
                     executor_entered = True
                     try:
                         result = await execute_tool(call["name"], arguments)
@@ -178,17 +185,57 @@ async def execute_calls(
                             getattr(exc, "reason_code", None)
                         )
                         output = _error("execution_error", "工具执行失败。")
-                    except Exception:
+                    except Exception as exc:
+                        if getattr(exc, "code", "").startswith(("archive_", "checkpoint_", "record_", "artifact_")):
+                            if fact := getattr(exc, "execution_fact", None):
+                                # The delegate completed before durable result
+                                # storage failed. Record that real outcome, but
+                                # do not invent a model-visible protocol result.
+                                from lineage_agent.observations.manager import safe_observation_error
+                                actual_outcome, actual_stage = fact["outcome"], fact["stage"]
+                                details = {**identity, "stage": actual_stage,
+                                           "arguments_summary": arguments_summary,
+                                           "persistence_error_code": getattr(exc, "code", "archive_write_error")}
+                                tool_reason = tool_message = None
+                                if actual_outcome == "succeeded":
+                                    code, message = safe_observation_error(
+                                        "artifact_write_error" if fact["reason_code"] == "artifact_write_error"
+                                        else "observation_save_error")
+                                    diagnostic = {"ok": True, "observation": {
+                                        "status": "unavailable", "stage": "save",
+                                        "error": {"code": code, "message": message}}}
+                                    details.update(observation_status="unavailable",
+                                                   observation_stage="save", observation_error_code=code)
+                                else:
+                                    if actual_outcome == "rejected":
+                                        tool_reason, tool_message = safe_tool_argument_reason(fact.get("tool_reason_code"))
+                                        diagnostic = _error("invalid_arguments", "工具参数未通过执行器校验。")
+                                    else:
+                                        tool_reason, tool_message = safe_tool_execution_reason(fact.get("tool_reason_code"))
+                                        diagnostic = _error("execution_error", "工具执行失败。")
+                                    diagnostic["error"].update(reason_code=tool_reason, reason_message=tool_message)
+                                    details.update(error_code=diagnostic["error"]["code"],
+                                                   reason_code=tool_reason, reason_message=tool_message)
+                                if tracer is not None:
+                                    tracer.tool_end(token, output=diagnostic, outcome=actual_outcome, stage=actual_stage,
+                                                    reason_code=tool_reason, reason_message=tool_message)
+                                record(f"tool.{actual_outcome}", **details)
+                            raise
                         outcome = "failed"
                         output = _error("execution_error", "工具执行失败。")
                     except BaseException as interruption:
+                        if recoverable:
+                            if tracer is not None:
+                                tracer.tool_end(token, output={"status": "unknown"},
+                                                outcome="unknown", stage="execution")
+                            raise
                         # Attach actual facts to the original interruption. The
                         # graph may save them while still propagating it; none
                         # of these absent results becomes a protocol output.
                         outcomes["failed"] += 1
                         call_facts.append({
                             "call_id": call["call_id"], "name": call["name"],
-                            "request_index": index + 1, "outcome": "interrupted", "stage": "execution",
+                            "request_index": request_index_offset + index + 1, "outcome": "interrupted", "stage": "execution",
                             "reason_code": "tool_interrupted", "executor_entered": True,
                             "protocol_output_created": False, "output": None,
                         })
@@ -197,7 +244,7 @@ async def execute_calls(
                             outcomes["skipped"] += 1
                             call_facts.append({
                                 "call_id": skipped["call_id"], "name": skipped["name"],
-                                "request_index": skipped_index + 1, "outcome": "skipped", "stage": "execution",
+                                "request_index": request_index_offset + skipped_index + 1, "outcome": "skipped", "stage": "execution",
                                 "reason_code": "tool_interrupted", "executor_entered": False,
                                 "protocol_output_created": False, "output": None,
                             })
@@ -254,7 +301,8 @@ async def execute_calls(
         }
         output_items.append(item)
         call_facts.append({
-            "call_id": call["call_id"], "name": call["name"], "request_index": index + 1,
+            "call_id": call["call_id"], "name": call["name"], "request_index": request_index_offset + index + 1,
+            **({"reused_result": True} if reused_result else {}),
             "outcome": outcome, "stage": stage,
             "reason_code": reason_code or (output.get("error") or {}).get("code"),
             "executor_entered": executor_entered, "protocol_output_created": True,

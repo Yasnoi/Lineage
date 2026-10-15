@@ -26,6 +26,7 @@ from lineage_agent.agent import runtime
 from lineage_agent.agent.sessions import SessionManager
 from lineage_agent.config.settings import ConfigurationError, ModelSettings
 from lineage_agent.models.budget import check_context_budget
+from lineage_agent.models.responses import ModelError, parse_response
 from lineage_agent.models.summarization import is_summary_request
 from lineage_agent.recording.tracing import trace_scope
 from lineage_agent.tools.filesystem.directory import DIRECTORY_TOOL
@@ -190,9 +191,29 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
             lane in {"H", "R"} and entry.get("attempt_no") in {1, 2}
             and entry.get("request_no") == compaction.get("request_no") and identity not in seen
             and value.get("summary_request_sha256") == digest(summary_requests[index]))
+        candidate_body = None
         try:
-            lineage_valid = lineage_valid and attempt["result"]["text"] == value.get("body")
-        except (KeyError, TypeError):
+            candidate_body = attempt["result"]["text"]
+            if entry.get("provenance_phase") == "request_fixed":
+                # The immutable response receipt now keeps the input provenance,
+                # before parsing/activation creates a candidate. Bind its body to
+                # the actual transport response, then verify the candidate below.
+                sends = [event for event in observer.request_events
+                         if event["turn"] == pressure_turn and event["purpose"] == "summary"
+                         and event["request_sha256"] == digest(summary_requests[index])]
+                outputs = [response for response in observer.response_outputs
+                           if len(sends) == 1 and response["request_id"] == sends[0]["request_id"]]
+                response = parse_response({"status": "completed", "output": outputs[0]["output"]}) if len(outputs) == 1 else None
+                lineage_valid = lineage_valid and (
+                    response is not None and value.get("body") == prior_lanes.get(lane, {}).get("body")
+                    and candidate_body == response["text"]
+                    and attempt["result"]["output_items"] == outputs[0]["output"]
+                    and attempt["result"]["raw_response"]["output"] == outputs[0]["output"]
+                    and bool(attempt.get("attempt_id"))
+                    and attempt.get("operation_id") == entry.get("step_id"))
+            else:
+                lineage_valid = lineage_valid and candidate_body == value.get("body")
+        except (KeyError, TypeError, ValueError, IndexError, ModelError):
             lineage_valid = False
         seen.add(identity)
         binding = native_binding(observer, summary_requests[index])
@@ -207,12 +228,14 @@ def compaction_coverage(observer: Observer, states: list[dict], old_record: dict
                 and candidate.get("checkpoint_id")
                 and candidate == value.get("candidate_input")
                 and not binding["input_records"])
-        prior_lanes[lane] = value
+        prior_lanes[lane] = {**value, "body": candidate_body}
     ref = active.get("history_summary") or {}
     last_h = compaction.get("lanes", {}).get("H", {})
     proofs["summary_saved_and_activated"] = bool(
         lineage_valid and compaction.get("status") == "used" and compaction.get("confirmed_checkpoint_id")
         and ref.get("summary_id") == last_h.get("summary_id") and ref.get("checkpoint_id")
+        and all(last_h.get(key) == prior_lanes.get("H", {}).get(key)
+                for key in ("summary_id", "summary_request_sha256", "body", "candidate_input"))
         and active.get("version_id") != (before.get("active_context") or {}).get("version_id"))
     bindings = [native_binding(observer, request) for request in summary_requests if summary_lane(request) == "H"]
     source_items = [source for binding in bindings if binding["verified"] for source in binding["input_records"]]

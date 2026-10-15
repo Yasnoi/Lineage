@@ -79,7 +79,10 @@ def audit(state, client, measured, *, scenario, turn=None, faults=None):
               and event.get("purpose") not in {"summary", "candidate"}]
     starts = [event for event in events if event["event"] == "model.started"]
     for request, started in zip(client.requests, starts):
-        matching = [value for value in measured if value["diagnostic"]["step_id"] == started["step_id"]]
+        # Preparing and sending are distinct durable stages. The send names
+        # the exact earlier admission check, not a newly computed budget.
+        budget_step = started["budget_step_id"]
+        matching = [value for value in measured if value["diagnostic"]["step_id"] == budget_step]
         assert len(matching) == 1
         value = matching[0]
         assert value["diagnostic"]["decision"] == "allow"
@@ -91,7 +94,7 @@ def audit(state, client, measured, *, scenario, turn=None, faults=None):
         else:
             assert "instructions" not in request and "tool_choice" not in request
         assert not {"remaining_model_calls", "read_budget", "read_budget_error"} & request.keys()
-        recorded = next(event for event in checks if event["step_id"] == started["step_id"])
+        recorded = next(event for event in checks if event["step_id"] == budget_step)
         assert events.index(recorded) < events.index(started)
         assert recorded["input_tool_result_call_ids"] == [
             item["call_id"] for item in request["input"] if item.get("type") == "function_call_output"

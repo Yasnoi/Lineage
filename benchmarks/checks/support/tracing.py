@@ -100,6 +100,26 @@ def stable(state):
     watermarks = value.get("record_files", {})
     for index, run_id in enumerate(watermarks):
         identities.setdefault(run_id, f"<record-run-{index}>")
+    if active:
+        for index, group in enumerate(active.get("groups", [])):
+            identifier = group["group_id"]
+            try:
+                UUID(identifier)
+            except ValueError:
+                continue  # Legacy run-prefixed group names are normalized below.
+            identities.setdefault(identifier, f"<interaction-{index}>")
+    execution = value.get("execution", {})
+    for field in ("point_id", "parent_id", "operation_id", "final_record_id"):
+        if execution.get(field) is not None:
+            identifier = execution[field]
+            assert isinstance(identifier, str) and str(UUID(identifier)) == identifier
+            identities.setdefault(identifier, f"<execution-{field}>")
+            execution[field] = identities[identifier]
+    for index, segment in enumerate(value.get("log_segments", [])):
+        identifier = segment["execution_id"]
+        assert isinstance(identifier, str) and str(UUID(identifier)) == identifier
+        identities.setdefault(identifier, f"<log-execution-{index}>")
+        segment["execution_id"] = identities[identifier]
 
     def identity(text):
         if isinstance(text, str):
@@ -147,8 +167,13 @@ def stable(state):
                 record[key] = identity(record[key])
     for watermark in watermarks.values():
         watermark["prefix_sha256"] = digest(watermark["prefix_sha256"])
+        for segment in watermark.get("segments", []):
+            segment["path"] = identity(segment["path"])
+            segment["prefix_sha256"] = digest(segment["prefix_sha256"])
     if "record_files" in value:
         value["record_files"] = {identity(run_id): watermark for run_id, watermark in watermarks.items()}
+    for segment in value.get("log_segments", []):
+        segment["path"] = identity(segment["path"])
     metrics = value.get("record_metrics", {})
     if "checkpoint_serialized_bytes" in metrics:
         measured = metrics["checkpoint_serialized_bytes"]

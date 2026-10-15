@@ -169,6 +169,40 @@ class ObservationManager:
     def __init__(self, artifacts: SessionArtifacts) -> None:
         self._artifacts = artifacts
 
+    def observe_saved(self, artifact_ref: str, *, operation_id: str, attempt_id: str,
+                      sha256: str | None = None, keywords=(), native_recall: bool = False) -> dict[str, Any]:
+        """Render a trusted saved result; adoption remains the caller's job.
+
+        Integrity errors escape instead of becoming a preview failure. A saved
+        result must not be silently replaced by a fresh external observation.
+        """
+        identity = {"operation_id": operation_id, "attempt_id": attempt_id, "sha256": sha256}
+        raw = self._artifacts.read_candidate_raw(artifact_ref, **identity)
+        saved = self._artifacts.candidate_metadata(artifact_ref, **identity)
+        try:
+            output = inline_tool_output(raw)
+            size = tool_output_bytes(output)
+            if native_recall:
+                if size > MAX_RECALL_BYTES:
+                    raise ValueError("native recall exceeded its disclosure budget")
+                return output
+            if size <= MAX_OBSERVATION_BYTES:
+                return output
+        except Exception as error:
+            return _unavailable("serialize", error)
+        try:
+            content, _, _ = tool_result_view(raw, saved["tool_name"])
+            if keywords:
+                page = self._artifacts.search_candidate(artifact_ref, list(keywords), **identity)
+                if page["hits"]:
+                    return _keyword_preview(saved, content, page)
+                return _head_tail(saved, content, "no_match")
+            return _head_tail(saved, content, "not_requested")
+        except ArtifactError:
+            raise
+        except Exception as error:
+            return _unavailable("preview", error, saved)
+
     def observe(self, raw_result: str, *, tool_name: str, keywords=(),
                 native_recall: bool = False) -> dict[str, Any]:
         try:
