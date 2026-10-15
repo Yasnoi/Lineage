@@ -106,10 +106,11 @@ class ConversationCliTests(unittest.TestCase):
         self.assertEqual(manager.runs, [("saved", "new question")])
         self.assertIsNone(manager.opens[0][1]["current_project_root"])
         self.assertIn("沿用保存模型和额度", err)
+        self.assertIn("会话标识：saved", err)
         self.assertEqual(display.call_args.args[1], self.settings)
 
     def test_recovery_requires_literal_yes_and_keeps_default_cancel(self):
-        for answer in ("", "no", "y", "YES", EOFError()):
+        for answer in ("", "no", "y", "YES", "\nyes\n", "yes\n/open other", EOFError()):
             manager = _Manager(self.settings, recovery=True)
             code, _, err, _, _ = self.invoke(["--open", "saved"], manager, [answer])
             self.assertEqual(code, 1)
@@ -125,6 +126,45 @@ class ConversationCliTests(unittest.TestCase):
         self.assertEqual(choice.snapshot_id, "snapshot-1")
         self.assertEqual(choice.unfinished_run_ids, ("unfinished-1",))
         self.assertFalse(manager.runs)
+
+    def test_message_whitespace_and_multiline_commands_are_preserved(self):
+        manager = _Manager(self.settings)
+        messages = ["  首行\n    缩进\n/exit\n/open other  ", "\n/exit\n", "  单行正文  "]
+        code, _, err, _, display = self.invoke(
+            ["--open", "saved"], manager, [" \t ", *messages, "  /exit  "],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(manager.runs, [("saved", message) for message in messages])
+        self.assertEqual(len(manager.opens), 1)
+        self.assertEqual(display.call_count, len(messages))
+        self.assertNotIn("会话标识：", err)
+        self.assertIn("[saved] > ", err)
+
+    def test_supplied_async_reader_handles_message_and_recovery_confirmation(self):
+        manager = _Manager(self.settings, recovery=True)
+        reader = SimpleNamespace(
+            read=AsyncMock(side_effect=["/open saved", "  消息\n    第二行  ", "/exit"]),
+            confirm=AsyncMock(return_value=True),
+        )
+        out, err = StringIO(), StringIO()
+        with patch("builtins.input", side_effect=AssertionError("reader owns input")), \
+                patch.object(cli, "load_current_limits", return_value={}), \
+                patch.object(cli, "display_turn"), redirect_stdout(out), redirect_stderr(err):
+            code = cli.asyncio.run(cli._interactive_loop(
+                self.settings, {}, manager, local_paths=self.paths, input_reader=reader,
+            ))
+        self.assertEqual(code, 0)
+        reader.confirm.assert_awaited_once()
+        self.assertEqual(manager.runs, [("saved", "  消息\n    第二行  ")])
+        self.assertEqual([call.args[0] for call in reader.read.await_args_list],
+                         ["[未选择] > ", "[saved] > ", "[saved] > "])
+
+    def test_one_shot_message_is_not_a_management_command(self):
+        manager = _Manager(self.settings)
+        prompt = "\n/exit\n    trailing  "
+        code, _, _, _, _ = self.invoke(["--open", "saved", prompt], manager)
+        self.assertEqual(code, 0)
+        self.assertEqual(manager.runs, [("saved", prompt)])
 
     def test_no_snapshot_is_an_error_without_confirmation_or_empty_fallback(self):
         manager = _Manager(self.settings, missing=True)

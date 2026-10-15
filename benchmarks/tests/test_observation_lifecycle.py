@@ -161,7 +161,7 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         manager.close()
 
     async def test_interactive_reports_cleanup_failure_without_replacing_interrupt(self):
-        async def interrupted_loop(settings, dependencies, manager):
+        async def interrupted_loop(settings, dependencies, manager, **kwargs):
             manager.create_session(settings)
             raise KeyboardInterrupt(PRIVATE)
 
@@ -176,7 +176,7 @@ class ObservationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(attempts), 1)
 
     async def test_interactive_leaves_standalone_cleanup_error_for_main_to_report(self):
-        async def completed_loop(settings, dependencies, manager):
+        async def completed_loop(settings, dependencies, manager, **kwargs):
             manager.create_session(settings)
             return 0
 

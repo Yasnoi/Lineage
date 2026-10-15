@@ -395,7 +395,8 @@ async def check_configuration_and_cli(root, base):
             print(json.dumps({"scenario": scenario, "status": "PASS", "model_calls": 0, "run_id": None, "log_path": None}))
         else:
             assert code == 0 and client.closed and stdout.strip() == "done"
-            assert captured[0]["run_id"] in stderr and captured[0]["log_path"] in stderr
+            assert captured[0]["run_id"] not in stderr and captured[0]["log_path"] not in stderr
+            assert captured[0]["log_complete"] and Path(captured[0]["log_path"]).is_file()
             audit_recording(captured[0], client, scenario=scenario)
             if project_root is None:
                 assert assert_tools(client.requests[0]["tools"]) and len(client.requests) == 1

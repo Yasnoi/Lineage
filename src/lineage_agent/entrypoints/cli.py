@@ -18,6 +18,7 @@ from lineage_agent.artifacts.store import ArtifactError
 from lineage_agent.config.settings import (
     ConfigurationError, ModelSettings, load_current_limits, load_local_paths, load_settings,
 )
+from lineage_agent.entrypoints.console_input import ConsoleInput, ConsoleInputError
 from lineage_agent.recording.trace_data import TraceSanitizer
 from lineage_agent.storage import StorageError
 from lineage_agent.tools.filesystem import directory
@@ -34,22 +35,38 @@ _COMPACTION_STAGE_LABELS: dict[CompactionStatus, str] = {
 }
 
 
+def _needs_log_diagnostic(state: AgentState) -> bool:
+    return state.get("stop_reason") not in (None, "completed") or not state.get("log_complete", False)
+
+
+def _format_log_diagnostic(state: AgentState) -> str:
+    """Report recorded completeness separately from current file availability."""
+    completeness = "记录完整" if state.get("log_complete") else "记录不完整"
+    path = state.get("log_path")
+    if not path:
+        return f"运行日志（{completeness}）：未记录可用路径。"
+    try:
+        with Path(path).open("rb"):
+            pass
+    except (OSError, ValueError, TypeError):
+        availability = "文件不可读取"
+    else:
+        availability = "文件可读取"
+    return f"运行日志（{completeness}；{availability}）：{path}"
+
+
 def format_run_summary(state: AgentState) -> str:
     """Show program-recorded facts independently of the model's answer."""
     outcomes = state["tool_outcomes"]
-    completeness = "完整" if state["log_complete"] else "不完整"
     summary = (
-        f"运行标识：{state['run_id']}\n"
         f"工具处理：成功 {outcomes['succeeded']}，拒绝 {outcomes['rejected']}，"
-        f"失败 {outcomes['failed']}，未执行 {outcomes['skipped']}\n"
-        f"运行日志（{completeness}）：{state['log_path']}"
+        f"失败 {outcomes['failed']}，未执行 {outcomes['skipped']}"
     )
+    if _needs_log_diagnostic(state):
+        summary += "\n" + _format_log_diagnostic(state)
     summary += (
         f"\n模型调用：业务 {state.get('model_calls', 0)}，摘要 {state.get('summary_calls', 0)}"
     )
-    active = TraceSanitizer.active_context(state.get("active_context"))
-    if active.get("version_id"):
-        summary += f"\n活动上下文版本：{active['version_id']}"
     compaction = TraceSanitizer.compaction(state.get("compaction"))
     if compaction:
         stage = _COMPACTION_STAGE_LABELS.get(compaction.get("status"), "未确认")
@@ -77,16 +94,14 @@ def format_run_summary(state: AgentState) -> str:
         decision = {"allow": "放行", "exceeded": "超限", "error": "计量失败"}.get(budget.get("decision"), "未知")
         sent = "已发起" if budget.get("request_sent") is True else "未发起"
         summary += (
-            f"\n上下文预算（估算；非端点精确 Token）：{decision}，请求{sent}"
+            f"\n上下文预算（本地估算；非端点精确 Token）：{decision}，请求{sent}"
             f"，步骤 {budget.get('step_id', '未知')}\n"
             f"透明内容 {budget.get('transparent_tokens', '未知')} + "
             f"opaque 风险预留 {budget.get('opaque_risk_tokens', '未知')}"
             f"（{budget.get('opaque_items', '未知')} 项） + "
             f"输出预留 {budget.get('output_reserve_tokens', '未知')} + "
             f"安全余量 {budget.get('safety_margin_tokens', '未知')} = "
-            f"所需 {budget.get('required_tokens', '未知')}；"
-            f"触发阈值 {budget.get('trigger_tokens', '未知')}"
-            f"（总预算 {budget.get('limit_tokens', '未知')} 的 {budget.get('trigger_percent', '未知')}%）。"
+            f"所需 {budget.get('required_tokens', '未知')}／上限 {budget.get('limit_tokens', '未知')}。"
         )
     return summary
 
@@ -118,8 +133,9 @@ def display_run(state: AgentState, settings: ModelSettings) -> int:
 
 
 def display_turn(turn: SessionTurn, settings: ModelSettings) -> None:
-    print(f"会话标识：{turn.session_id}", file=sys.stderr)
     display_run(turn.state, settings)
+    if turn.snapshot_status != "published" and not _needs_log_diagnostic(turn.state):
+        print(_format_log_diagnostic(turn.state), file=sys.stderr)
     if turn.snapshot_status == "published" and turn.snapshot_id is not None:
         print(f"对话快照已发布：{turn.snapshot_id}；可在新进程中打开。", file=sys.stderr)
     elif turn.snapshot_status == "unknown":
@@ -151,11 +167,12 @@ async def interactive(settings: ModelSettings | None = None, dependencies: dict 
     """Handle terminal interaction; session state belongs to SessionManager."""
     sessions = SessionManager()
     try:
-        with sessions:
+        with sessions, ConsoleInput() as input_reader:
             if local_paths is None and open_id is None and prompt is None:
-                return await _interactive_loop(settings, dependencies, sessions)
+                return await _interactive_loop(settings, dependencies, sessions, input_reader=input_reader)
             return await _interactive_loop(settings, dependencies, sessions,
-                                           local_paths=local_paths, open_id=open_id, initial_prompt=prompt)
+                                           local_paths=local_paths, open_id=open_id, initial_prompt=prompt,
+                                           input_reader=input_reader)
     except BaseException as exc:
         # A primary interruption keeps propagating, while its suppressed cleanup
         # failure still gets a safe report. A standalone cleanup error is shown
@@ -185,7 +202,11 @@ def _show_sessions(sessions: SessionManager, application_root: Path) -> None:
         print(f"{identity}；状态：{status}；快照：{snapshot}{suffix}", file=sys.stderr)
 
 
-async def _open_session(sessions: SessionManager, identity: str, local_paths: dict):
+async def _open_session(sessions: SessionManager, identity: str, local_paths: dict, *,
+                        input_reader: ConsoleInput | None = None):
+    if input_reader is None:
+        with ConsoleInput() as reader:
+            return await _open_session(sessions, identity, local_paths, input_reader=reader)
     try:
         limits = load_current_limits()
     except ConfigurationError:
@@ -203,11 +224,7 @@ async def _open_session(sessions: SessionManager, identity: str, local_paths: di
         unfinished = tuple(details["unfinished_run_ids"])
         print(f"未封存轮次：{', '.join(unfinished)}。", file=sys.stderr)
         print(f"最后已发布快照：{details['snapshot_id']}。旧轮次及产物将保留，不会续跑。", file=sys.stderr)
-        print("输入 yes 从此快照开始新轮次；其他输入取消：", end="", file=sys.stderr, flush=True)
-        try:
-            confirmed = input().strip() == "yes"
-        except EOFError:
-            confirmed = False
+        confirmed = await input_reader.confirm("输入 yes 从此快照开始新轮次；其他输入取消：")
         if not confirmed:
             print("已取消打开。", file=sys.stderr)
             return None
@@ -221,7 +238,12 @@ async def _open_session(sessions: SessionManager, identity: str, local_paths: di
 
 async def _interactive_loop(settings: ModelSettings | None, dependencies: dict | None,
                             sessions: SessionManager, *, local_paths: dict | None = None,
-                            open_id: str | None = None, initial_prompt: str | None = None) -> int:
+                            open_id: str | None = None, initial_prompt: str | None = None,
+                            input_reader: ConsoleInput | None = None) -> int:
+    if input_reader is None:
+        with ConsoleInput() as reader:
+            return await _interactive_loop(settings, dependencies, sessions, local_paths=local_paths,
+                                           open_id=open_id, initial_prompt=initial_prompt, input_reader=reader)
     if local_paths is None:
         local_paths = ({"application_root": settings.application_root, "project_root": settings.project_root,
                         "log_dir": settings.log_dir} if settings is not None else load_local_paths())
@@ -235,7 +257,7 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
         return sessions.create_session(chosen, **bound)
 
     if open_id is not None:
-        opened = await _open_session(sessions, open_id, local_paths)
+        opened = await _open_session(sessions, open_id, local_paths, input_reader=input_reader)
         if opened is None:
             return 1
         current = opened.session_id
@@ -251,16 +273,16 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
         if one_shot:
             prompt, initial_prompt = initial_prompt, None
         else:
-            print(f"[{current or '未选择'}] > ", end="", file=sys.stderr, flush=True)
             try:
-                prompt = input().strip()
+                prompt = await input_reader.read(f"[{current or '未选择'}] > ")
             except EOFError:
                 return 0
-        if not prompt:
+        if not prompt.strip():
             continue
-        if not one_shot and prompt == "/exit":
+        command = prompt.strip() if not one_shot and "\n" not in prompt and "\r" not in prompt else ""
+        if command == "/exit":
             return 0
-        if not one_shot and prompt == "/new":
+        if command == "/new":
             try:
                 current = create()
             except (SessionError, ConfigurationError, CheckpointError, ArtifactError, ArchiveError, StorageError) as exc:
@@ -272,11 +294,11 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
             known_sessions.add(current)
             print(f"当前会话：{current}", file=sys.stderr)
             continue
-        if not one_shot and prompt == "/list":
+        if command == "/list":
             _show_sessions(sessions, local_paths["application_root"])
             continue
-        if not one_shot and prompt.split()[0] == "/open":
-            parts = prompt.split()
+        if command and command.split()[0] == "/open":
+            parts = command.split()
             if len(parts) != 2:
                 print("用法：/open <会话ID>", file=sys.stderr)
                 continue
@@ -284,7 +306,7 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
                 print("此会话已打开，可用 /switch 切换。", file=sys.stderr)
                 continue
             try:
-                opened = await _open_session(sessions, parts[1], local_paths)
+                opened = await _open_session(sessions, parts[1], local_paths, input_reader=input_reader)
             except ConfigurationError as exc:
                 print(f"配置错误：{exc}", file=sys.stderr)
                 continue
@@ -295,8 +317,8 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
                 current = opened.session_id
                 known_sessions.add(current)
             continue
-        if not one_shot and prompt.split()[0] == "/close":
-            parts = prompt.split()
+        if command and command.split()[0] == "/close":
+            parts = command.split()
             if len(parts) > 2:
                 print("用法：/close [会话ID]", file=sys.stderr)
                 continue
@@ -314,8 +336,8 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
                 current = None
             print(f"已关闭会话：{identity}；持久记录保留。", file=sys.stderr)
             continue
-        if not one_shot and prompt.startswith("/switch"):
-            parts = prompt.split()
+        if command.startswith("/switch"):
+            parts = command.split()
             if len(parts) != 2 or parts[0] != "/switch":
                 print("用法：/switch <会话ID>", file=sys.stderr)
             elif parts[1] not in known_sessions:
@@ -324,7 +346,7 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
                 current = parts[1]
                 print(f"当前会话：{current}", file=sys.stderr)
             continue
-        if not one_shot and prompt.startswith("/"):
+        if command.startswith("/"):
             print("未知命令；可使用 /new、/list、/open、/switch、/close 或 /exit。", file=sys.stderr)
             continue
         try:
@@ -342,6 +364,8 @@ async def _interactive_loop(settings: ModelSettings | None, dependencies: dict |
             if one_shot:
                 return 1
             continue
+        if one_shot:
+            print(f"会话标识：{current}", file=sys.stderr)
         display_turn(turn, sessions.settings(current))
         if one_shot:
             if not turn.checkpoint_complete:
@@ -381,6 +405,9 @@ def main() -> int:
     except ConfigurationError as exc:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2
+    except ConsoleInputError as exc:
+        print(f"输入失败：{exc}", file=sys.stderr)
+        return 1
     except (SessionError, CheckpointError, ArtifactError, ArchiveError, StorageError) as exc:
         print(f"会话错误（{exc.code}）：{exc}", file=sys.stderr)
         return 1

@@ -409,7 +409,8 @@ async def check_configuration_and_cli(root, base):
 
         code, stdout, stderr = await asyncio.to_thread(invoke)
         assert code == 0 and client.closed and stdout.strip() == "done"
-        assert captured[0]["run_id"] in stderr and captured[0]["log_path"] in stderr
+        assert captured[0]["run_id"] not in stderr and captured[0]["log_path"] not in stderr
+        assert captured[0]["log_complete"] and Path(captured[0]["log_path"]).is_file()
         if enabled:
             assert_tools(client.requests[0]["tools"], TOOLS)
             assert json.loads(inline_raw(json.loads(outputs(captured[0])[-1]["output"])))["content"] == (root / "plain private.txt").read_text(encoding="utf-8")

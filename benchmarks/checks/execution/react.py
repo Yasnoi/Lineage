@@ -342,8 +342,9 @@ async def check_failure_history_and_final_display():
         # cli.main owns asyncio.run, so invoke it outside this coroutine's loop.
         exit_code = await asyncio.to_thread(cli.main)
     assert exit_code == 0 and "成功" in stdout.getvalue()
-    assert state["run_id"] in stderr.getvalue()
-    assert state["log_path"] in stderr.getvalue()
+    assert state["run_id"] not in stderr.getvalue()
+    assert state["log_path"] not in stderr.getvalue()
+    assert state["log_complete"] and Path(state["log_path"]).is_file()
     assert "工具处理：成功 0，拒绝 0，失败 1，未执行 0" in stderr.getvalue()
 
 async def check_protocol_protection():
